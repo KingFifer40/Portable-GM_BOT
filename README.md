@@ -11,7 +11,7 @@ A GroupMe bot that lets your group play **Connect Four**, look up **scriptures**
 - 🎱 **Magic 8-Ball** — `?` + any question
 - 📖 **Scripture lookup** — Bible (KJV) and Book of Mormon verse search (files included)
 - 🔒 **Safe by default** — hardened AI safety rules, English-only responses, spam cooldowns
-- 🛠️ **Admin controls** — enable/disable bot or AI from inside the group
+- 🛠️ **Admin controls** — enable/disable individual features from inside the group
 - 🧙 **First-run setup wizard** — GUI on desktop, terminal fallback on servers
 
 ---
@@ -58,7 +58,7 @@ The wizard asks for:
 |---|---|
 | **GroupMe Access Token** | [dev.groupme.com](https://dev.groupme.com) → log in → click your avatar → *Access Token* |
 | **Dev Group ID** | Open your private dev group at [web.groupme.com](https://web.groupme.com) — the ID is in the URL: `.../groups/XXXXXXXX` |
-| **Ollama Model** | Pick from the dropdown, or type any model name from [ollama.com/library](https://ollama.com/library) |
+| **Ollama Model** | Pick from the scrollable list, or type any model name from [ollama.com/library](https://ollama.com/library) |
 
 Settings are saved to `config.json` — the wizard won't run again unless that file is missing or incomplete.
 
@@ -79,10 +79,11 @@ Once the bot is running, go to your **dev group** and send:
 !add YOUR_GAME_GROUP_ID
 ```
 
-The bot joins the game group and announces itself. Game group admins can then use `#state true/false` to enable or disable it.
-If you do not know your group id that you wish to add it to, no worries! Just type !listgroups and it will list them with ID.
+The bot joins the game group and announces itself.
 
-To find a game group ID: open it at [web.groupme.com](https://web.groupme.com) and copy the number from the URL.
+If you don't know your game group's ID, no worries! Just type `!listgroups` in the dev group and it will list all your groups with their IDs.
+
+To find it manually: open the group at [web.groupme.com](https://web.groupme.com) and copy the number from the URL.
 
 ---
 
@@ -94,36 +95,44 @@ To find a game group ID: open it at [web.groupme.com](https://web.groupme.com) a
 |---|---|
 | `#help` | Show help categories |
 | `#help game` | Connect Four commands |
+| `#help 8ball` | Magic 8-Ball info |
 | `#help scripture` | Scripture commands |
 | `#help ai` | AI chat commands |
-| `#help admin` | Admin info |
+| `#help admin` | Admin feature controls |
 | `#start` | Start a new Connect Four game |
 | `#join` | Join as Player 2 |
-| `#addai` | Add AI as Player 2 |
+| `#addai` | Add AI engine as Player 2 |
 | `#quit` | End the current game |
 | `#A` – `#G` | Drop a piece in that column |
 | `#timeout N` | Set inactivity timeout (seconds) |
 | `#randverse` | Random scripture verse |
+| `#randverse bible` | Random Bible verse |
+| `#randverse bom` | Random Book of Mormon verse |
 | `#findverse ...` | Look up or search a verse |
-| `?<question>` | Magic 8-ball |
+| `?<question>` | Magic 8-Ball |
 | `!ai <message>` | Chat with the AI (15s per-user cooldown) |
 | `!aiset <text>` | Set AI personality — anyone (60s cooldown) |
 | `!aiforget` | Clear your own AI conversation history |
+| `#state` | Show current state of all features |
+| `#state <feature>` | Check one feature's state |
 
 ### Game group — admins only
 
 | Command | Description |
 |---|---|
-| `#state true/false` | Enable or disable the bot |
-| `!aiswitch true/false` | Enable or disable AI responses |
-| `!aiforgetall` | Clear all users' AI history |
+| `#state all true/false` | Master on/off switch for the whole bot |
+| `#state ai true/false` | Enable or disable AI chat |
+| `#state 8ball true/false` | Enable or disable Magic 8-Ball |
+| `#state scripture true/false` | Enable or disable scripture commands |
+| `#state connect4 true/false` | Enable or disable Connect Four |
+| `!aiforgetall` | Clear all users' AI conversation history |
 
 ### Dev group — developer only
 
 | Command | Description |
 |---|---|
 | `!help` | Show dev commands |
-| `!listgroups` | List all groups the token is in |
+| `!listgroups` | List all groups your token is in (with IDs) |
 | `!add GROUPID` | Set the active game group |
 | `!reload` | Restart the bot script |
 | `!state true/false` | Enable or disable game responses |
@@ -145,7 +154,7 @@ The AI has hardened safety rules that **cannot be overridden** by any personalit
 - No inappropriate, sexual, violent, or hateful content
 - No detailed biology or medical explanations
 - Resists all common jailbreak techniques
-- Fun accents and harmless character personas are totally fine
+- Fun accents and harmless character personas are totally fine 🏴‍☠️
 
 Setting a new personality wipes all conversation history so no old context carries over.
 
@@ -192,3 +201,7 @@ OLLAMA_BASE_MODEL
 `config.json` is already ignored so your token is never committed. The `AI-BOT/` folder is **not** ignored because the scripture files live there and are part of the repo.
 
 ---
+
+## License
+
+No License...

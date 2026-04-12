@@ -1,6 +1,6 @@
 # AI-FSY — GroupMe Connect Four Bot with AI Chat
 
-A GroupMe bot that lets your group play **Connect Four**, look up **scriptures**, chat with a **local AI** (via Ollama), and more. Built in Python, runs on Windows, Mac, or Linux.
+A GroupMe bot that lets your group play **Connect Four**, look up **scriptures**, chat with a **local AI** (via Ollama), and more. Built in Python, runs on Windows, Mac, or Linux. (I made this for my FSY group, so I can play with them while I am away from my own PC but can leave it running)
 
 ---
 

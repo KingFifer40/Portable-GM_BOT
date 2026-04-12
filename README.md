@@ -191,7 +191,3 @@ OLLAMA_BASE_MODEL
 `config.json` is already ignored so your token is never committed. The `AI-BOT/` folder is **not** ignored because the scripture files live there and are part of the repo.
 
 ---
-
-## License
-
-MIT

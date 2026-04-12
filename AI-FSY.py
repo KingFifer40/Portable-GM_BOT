@@ -2479,6 +2479,677 @@ def get_latest_message_id(group_id):
     return None
 
 
+
+# =============================================================================
+# DEVELOPER CONTROL PANEL (GUI)
+# Runs on the main thread via tkinter. Bot polling runs on background threads.
+# Falls back silently if tkinter is unavailable (headless servers).
+# =============================================================================
+
+GITHUB_REPO        = "KingFifer40/Portable-GM_BOT"
+GITHUB_COMMITS_URL = f"https://api.github.com/repos/{GITHUB_REPO}/commits/main"
+GITHUB_RAW_URL     = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/AI-FSY.py"
+GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
+
+# SHA of the commit this copy was downloaded from.
+# The update checker compares this against the latest commit on main.
+# It is updated automatically after a successful self-update.
+BOT_COMMIT_SHA = "unknown"
+
+_control_panel_instance = None  # set when panel launches
+
+
+def _check_for_update():
+    """
+    Checks the latest commit on the main branch of the GitHub repo.
+    Returns (sha_short, commit_message, commit_url) or (None, None, None) on failure.
+    """
+    try:
+        resp = requests.get(GITHUB_COMMITS_URL, timeout=8)
+        if resp.status_code == 200:
+            data = resp.json()
+            sha       = data.get("sha", "")
+            sha_short = sha[:7]
+            msg       = data.get("commit", {}).get("message", "").splitlines()[0]
+            url       = data.get("html_url", GITHUB_COMMIT_PAGE)
+            return sha_short, msg, url
+    except Exception:
+        pass
+    return None, None, None
+
+
+def _do_self_update():
+    """
+    Downloads the latest AI-FSY.py from the main branch, stamps the new
+    commit SHA into it so the update checker knows what version is running,
+    then replaces this file atomically.
+    """
+    try:
+        # Fetch the new script
+        resp = requests.get(GITHUB_RAW_URL, timeout=30)
+        if resp.status_code != 200:
+            return False, f"HTTP {resp.status_code}"
+        new_source = resp.text
+
+        # Fetch the current commit SHA so we can stamp it in
+        sha_short, _, _ = _check_for_update()
+        if sha_short:
+            new_source = new_source.replace(
+                'BOT_COMMIT_SHA = "unknown"',
+                f'BOT_COMMIT_SHA = "{sha_short}"',
+                1,
+            )
+
+        script_path = os.path.abspath(__file__)
+        tmp_path = script_path + ".update_tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(new_source)
+        os.replace(tmp_path, script_path)
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+class ControlPanel:
+    """
+    Tkinter control panel window that mirrors all dev-group commands
+    plus an update checker. Runs on the main thread; bot runs in threads.
+    """
+
+    REFRESH_MS = 2000  # how often the UI polls bot state (ms)
+
+    def __init__(self, root):
+        self.root = root
+        root.title(f"AI-FSY Control Panel  [{BOT_COMMIT_SHA}]")
+        root.resizable(True, True)
+        root.minsize(520, 480)
+
+        self._build_ui()
+        self._schedule_refresh()
+
+    # ── UI Construction ───────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        import tkinter as tk
+        from tkinter import ttk
+
+        root = self.root
+
+        # ── Header bar ───────────────────────────────────────────────────────
+        hdr = tk.Frame(root, bg="#1c1c1e", pady=10, padx=16)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="🤖  AI-FSY Control Panel",
+                 font=("Helvetica", 15, "bold"),
+                 bg="#1c1c1e", fg="white").pack(side="left")
+        self._ver_label = tk.Label(hdr, text=f"commit {BOT_COMMIT_SHA}",
+                                   font=("Helvetica", 10),
+                                   bg="#1c1c1e", fg="#888888")
+        self._ver_label.pack(side="right")
+
+        # ── Status bar at bottom ──────────────────────────────────────────────
+        self._status_var = tk.StringVar(value="Ready.")
+        tk.Label(root, textvariable=self._status_var,
+                 anchor="w", relief="sunken",
+                 font=("Helvetica", 9), fg="#444444",
+                 padx=8).pack(side="bottom", fill="x")
+
+        # ── Notebook tabs ─────────────────────────────────────────────────────
+        nb = ttk.Notebook(root)
+        nb.pack(fill="both", expand=True, padx=8, pady=8)
+
+        self._build_tab_status(nb)
+        self._build_tab_groups(nb)
+        self._build_tab_ai(nb)
+        self._build_tab_update(nb)
+
+    # ── Tab: Status & Features ────────────────────────────────────────────────
+
+    def _build_tab_status(self, nb):
+        import tkinter as tk
+        from tkinter import ttk
+
+        tab = tk.Frame(nb, padx=16, pady=12)
+        nb.add(tab, text="  Status  ")
+
+        tk.Label(tab, text="Feature Toggles",
+                 font=("Helvetica", 12, "bold")).pack(anchor="w")
+        tk.Label(tab, text="Changes take effect immediately.",
+                 font=("Helvetica", 9), fg="#888888").pack(anchor="w", pady=(0, 10))
+
+        self._feature_vars = {}
+
+        features = [
+            ("Bot (master)",  "master"),
+            ("Connect Four",  "connect4"),
+            ("Magic 8-Ball",  "8ball"),
+            ("Scripture",     "scripture"),
+            ("AI Chat",       "ai"),
+        ]
+
+        grid = tk.Frame(tab)
+        grid.pack(fill="x")
+
+        for i, (label, key) in enumerate(features):
+            var = tk.BooleanVar()
+            self._feature_vars[key] = var
+
+            tk.Label(grid, text=label, font=("Helvetica", 11),
+                     width=16, anchor="w").grid(row=i, column=0, pady=4, sticky="w")
+
+            cb = ttk.Checkbutton(grid, variable=var,
+                                 command=lambda k=key, v=var: self._toggle_feature(k, v))
+            cb.grid(row=i, column=1, sticky="w")
+
+            # Status dot label (updated by refresh)
+            dot = tk.Label(grid, text="●", font=("Helvetica", 12), fg="#888888")
+            dot.grid(row=i, column=2, padx=(8, 0))
+            var._dot = dot  # stash reference
+
+        # ── Separator ────────────────────────────────────────────────────────
+        ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=14)
+
+        # ── Bot info ─────────────────────────────────────────────────────────
+        tk.Label(tab, text="Bot Info",
+                 font=("Helvetica", 12, "bold")).pack(anchor="w")
+
+        info_frame = tk.Frame(tab)
+        info_frame.pack(fill="x", pady=(6, 0))
+
+        self._info_labels = {}
+        rows = [
+            ("Game group",   "game_group"),
+            ("Dev group",    "dev_group"),
+            ("Model",        "model"),
+            ("Uptime",       "uptime"),
+        ]
+        for r, (lbl, key) in enumerate(rows):
+            tk.Label(info_frame, text=lbl + ":", font=("Helvetica", 10),
+                     width=14, anchor="w").grid(row=r, column=0, sticky="w", pady=2)
+            val = tk.Label(info_frame, text="—", font=("Helvetica", 10),
+                           fg="#0055aa", anchor="w")
+            val.grid(row=r, column=1, sticky="w")
+            self._info_labels[key] = val
+
+        self._start_time = time.time()
+
+        # ── Restart / Quit ────────────────────────────────────────────────────
+        ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=14)
+        btn_row = tk.Frame(tab)
+        btn_row.pack(fill="x")
+        tk.Button(btn_row, text="🔄  Restart Bot", font=("Helvetica", 10),
+                  command=self._restart_bot,
+                  bg="#ff9500", fg="white", relief="flat",
+                  padx=12, pady=6).pack(side="left", padx=(0, 8))
+        tk.Button(btn_row, text="⏹  Stop Bot", font=("Helvetica", 10),
+                  command=self._stop_bot,
+                  bg="#ff3b30", fg="white", relief="flat",
+                  padx=12, pady=6).pack(side="left")
+
+    # ── Tab: Group Management ─────────────────────────────────────────────────
+
+    def _build_tab_groups(self, nb):
+        import tkinter as tk
+        from tkinter import ttk, messagebox
+
+        tab = tk.Frame(nb, padx=16, pady=12)
+        nb.add(tab, text="  Groups  ")
+
+        # Current game group
+        tk.Label(tab, text="Active Game Group",
+                 font=("Helvetica", 12, "bold")).pack(anchor="w")
+        self._game_group_var = tk.StringVar()
+        tk.Entry(tab, textvariable=self._game_group_var,
+                 font=("Helvetica", 11), width=30,
+                 state="readonly").pack(anchor="w", pady=(4, 0), ipady=4)
+
+        # ── List groups ───────────────────────────────────────────────────────
+        ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=12)
+        tk.Label(tab, text="Your GroupMe Groups",
+                 font=("Helvetica", 12, "bold")).pack(anchor="w")
+        tk.Label(tab, text="Click a group to select it as the active game group.",
+                 font=("Helvetica", 9), fg="#888888").pack(anchor="w", pady=(0, 6))
+
+        lb_frame = tk.Frame(tab)
+        lb_frame.pack(fill="both", expand=True)
+
+        sb = tk.Scrollbar(lb_frame, orient="vertical")
+        self._group_listbox = tk.Listbox(lb_frame, font=("Courier", 10),
+                                         height=8, selectmode="single",
+                                         yscrollcommand=sb.set,
+                                         exportselection=False)
+        sb.config(command=self._group_listbox.yview)
+        sb.pack(side="right", fill="y")
+        self._group_listbox.pack(side="left", fill="both", expand=True)
+        self._group_data = []  # list of (name, id) tuples
+
+        btn_row = tk.Frame(tab)
+        btn_row.pack(fill="x", pady=(8, 0))
+        tk.Button(btn_row, text="🔃  Refresh List", font=("Helvetica", 10),
+                  command=self._refresh_groups,
+                  relief="flat", padx=10, pady=5).pack(side="left", padx=(0, 8))
+        tk.Button(btn_row, text="✅  Set as Game Group", font=("Helvetica", 10),
+                  command=self._set_game_group,
+                  bg="#34c759", fg="white", relief="flat",
+                  padx=10, pady=5).pack(side="left")
+
+        # ── Send message ──────────────────────────────────────────────────────
+        ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=12)
+        tk.Label(tab, text="Send Message to Game Group",
+                 font=("Helvetica", 12, "bold")).pack(anchor="w")
+        self._send_msg_var = tk.StringVar()
+        tk.Entry(tab, textvariable=self._send_msg_var,
+                 font=("Helvetica", 11), width=44).pack(anchor="w", pady=(4, 0),
+                                                         ipady=4, fill="x")
+        tk.Button(tab, text="Send", font=("Helvetica", 10),
+                  command=self._send_group_message,
+                  bg="#007aff", fg="white", relief="flat",
+                  padx=10, pady=5).pack(anchor="e", pady=(6, 0))
+
+    # ── Tab: AI Controls ──────────────────────────────────────────────────────
+
+    def _build_tab_ai(self, nb):
+        import tkinter as tk
+        from tkinter import ttk
+
+        tab = tk.Frame(nb, padx=16, pady=12)
+        nb.add(tab, text="  AI  ")
+
+        tk.Label(tab, text="AI Personality",
+                 font=("Helvetica", 12, "bold")).pack(anchor="w")
+        tk.Label(tab, text="Setting a new personality wipes all conversation memory.",
+                 font=("Helvetica", 9), fg="#888888").pack(anchor="w", pady=(0, 6))
+
+        self._personality_text = tk.Text(tab, font=("Helvetica", 11),
+                                         height=5, wrap="word", relief="solid",
+                                         borderwidth=1)
+        self._personality_text.pack(fill="x", ipady=4)
+
+        tk.Button(tab, text="Apply Personality", font=("Helvetica", 10),
+                  command=self._apply_personality,
+                  bg="#007aff", fg="white", relief="flat",
+                  padx=12, pady=6).pack(anchor="e", pady=(6, 0))
+
+        ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=14)
+
+        tk.Label(tab, text="Conversation Memory",
+                 font=("Helvetica", 12, "bold")).pack(anchor="w")
+        self._mem_label = tk.Label(tab, text="Users with active memory: —",
+                                   font=("Helvetica", 10), anchor="w")
+        self._mem_label.pack(anchor="w", pady=(4, 8))
+
+        btn_row = tk.Frame(tab)
+        btn_row.pack(anchor="w")
+        tk.Button(btn_row, text="🧹 Clear All Memory",
+                  font=("Helvetica", 10),
+                  command=self._clear_all_memory,
+                  bg="#ff3b30", fg="white", relief="flat",
+                  padx=12, pady=6).pack(side="left")
+
+        ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=14)
+
+        tk.Label(tab, text="Cooldown Settings",
+                 font=("Helvetica", 12, "bold")).pack(anchor="w")
+
+        grid = tk.Frame(tab)
+        grid.pack(fill="x", pady=(6, 0))
+
+        tk.Label(grid, text="!ai cooldown (s):", font=("Helvetica", 10),
+                 width=22, anchor="w").grid(row=0, column=0, sticky="w", pady=4)
+        self._ai_cd_var = tk.StringVar(value=str(AI_COOLDOWN_SECONDS))
+        tk.Entry(grid, textvariable=self._ai_cd_var, width=8,
+                 font=("Helvetica", 10)).grid(row=0, column=1, sticky="w")
+
+        tk.Label(grid, text="!aiset cooldown (s):", font=("Helvetica", 10),
+                 width=22, anchor="w").grid(row=1, column=0, sticky="w", pady=4)
+        self._aiset_cd_var = tk.StringVar(value=str(AISET_COOLDOWN_SECONDS))
+        tk.Entry(grid, textvariable=self._aiset_cd_var, width=8,
+                 font=("Helvetica", 10)).grid(row=1, column=1, sticky="w")
+
+        tk.Label(grid, text="Memory turns per user:", font=("Helvetica", 10),
+                 width=22, anchor="w").grid(row=2, column=0, sticky="w", pady=4)
+        self._mem_turns_var = tk.StringVar(value=str(AI_MEMORY_MAX_TURNS))
+        tk.Entry(grid, textvariable=self._mem_turns_var, width=8,
+                 font=("Helvetica", 10)).grid(row=2, column=1, sticky="w")
+
+        tk.Button(tab, text="Apply Cooldown Settings", font=("Helvetica", 10),
+                  command=self._apply_cooldowns,
+                  relief="flat", padx=12, pady=6).pack(anchor="e", pady=(10, 0))
+
+    # ── Tab: Update ───────────────────────────────────────────────────────────
+
+    def _build_tab_update(self, nb):
+        import tkinter as tk
+        from tkinter import ttk
+
+        tab = tk.Frame(nb, padx=16, pady=12)
+        nb.add(tab, text="  Update  ")
+
+        tk.Label(tab, text="Bot Updates",
+                 font=("Helvetica", 12, "bold")).pack(anchor="w")
+        tk.Label(tab,
+                 text=f"Repo: github.com/{GITHUB_REPO}",
+                 font=("Helvetica", 9), fg="#888888").pack(anchor="w", pady=(0, 10))
+
+        info_frame = tk.Frame(tab)
+        info_frame.pack(fill="x")
+
+        tk.Label(info_frame, text="Running commit:",
+                 font=("Helvetica", 10), width=18, anchor="w").grid(row=0, column=0, sticky="w")
+        tk.Label(info_frame, text=BOT_COMMIT_SHA,
+                 font=("Courier", 10, "bold"), fg="#007aff").grid(row=0, column=1, sticky="w")
+
+        tk.Label(info_frame, text="Latest commit:",
+                 font=("Helvetica", 10), width=18, anchor="w").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self._latest_ver_label = tk.Label(info_frame, text="Not checked yet",
+                                          font=("Courier", 10))
+        self._latest_ver_label.grid(row=1, column=1, sticky="w", pady=(6, 0))
+
+        self._latest_msg_label = tk.Label(info_frame, text="",
+                                          font=("Helvetica", 9), fg="#555555",
+                                          wraplength=340, justify="left")
+        self._latest_msg_label.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        self._update_status_var = tk.StringVar(value="")
+        tk.Label(tab, textvariable=self._update_status_var,
+                 font=("Helvetica", 10), wraplength=440, justify="left",
+                 fg="#555555").pack(anchor="w", pady=(12, 0))
+
+        btn_row = tk.Frame(tab)
+        btn_row.pack(anchor="w", pady=(16, 0))
+
+        tk.Button(btn_row, text="🔍  Check for Updates",
+                  font=("Helvetica", 10),
+                  command=self._check_update,
+                  relief="flat", padx=12, pady=6).pack(side="left", padx=(0, 10))
+
+        self._update_btn = tk.Button(btn_row, text="⬇  Download & Restart",
+                                     font=("Helvetica", 10),
+                                     command=self._apply_update,
+                                     bg="#34c759", fg="white",
+                                     relief="flat", padx=12, pady=6,
+                                     state="disabled")
+        self._update_btn.pack(side="left")
+
+        ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=16)
+        tk.Label(tab,
+                 text=(
+                     "\u26a0\ufe0f  'Download & Restart' replaces AI-FSY.py with the latest version "
+                     "from the main branch and restarts the bot. "
+                     "Your config.json and AI-BOT/ folder are not affected."
+                 ),
+                 font=("Helvetica", 9), fg="#888888", justify="left", wraplength=440).pack(anchor="w")
+
+    # ── Periodic refresh ──────────────────────────────────────────────────────
+
+    def _schedule_refresh(self):
+        self._refresh_ui()
+        self.root.after(self.REFRESH_MS, self._schedule_refresh)
+
+    def _refresh_ui(self):
+        global GAME_GROUP_ID, GAME_ENABLED, AI_ENABLED
+        global EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED
+
+        # Feature checkboxes + dots
+        state_map = {
+            "master":   GAME_ENABLED,
+            "connect4": CONNECT4_ENABLED,
+            "8ball":    EIGHTBALL_ENABLED,
+            "scripture":SCRIPTURE_ENABLED,
+            "ai":       AI_ENABLED,
+        }
+        for key, val in state_map.items():
+            var = self._feature_vars.get(key)
+            if var:
+                var.set(val)
+                var._dot.config(fg="#34c759" if val else "#ff3b30",
+                                text="●")
+
+        # Info labels
+        self._info_labels["game_group"].config(
+            text=GAME_GROUP_ID or "(not set)")
+        self._info_labels["dev_group"].config(
+            text=DEV_GROUP_ID or "(not set)")
+        self._info_labels["model"].config(
+            text=OLLAMA_BASE_MODEL or "—")
+
+        uptime_s = int(time.time() - self._start_time)
+        h, r = divmod(uptime_s, 3600)
+        m, s = divmod(r, 60)
+        self._info_labels["uptime"].config(text=f"{h}h {m}m {s}s")
+
+        # Memory count
+        if hasattr(self, "_mem_label"):
+            self._mem_label.config(
+                text=f"Users with active memory: {len(_ai_memory)}")
+
+        # Game group entry
+        if hasattr(self, "_game_group_var"):
+            self._game_group_var.set(GAME_GROUP_ID or "(not set)")
+
+    # ── Feature toggle callbacks ──────────────────────────────────────────────
+
+    def _toggle_feature(self, key, var):
+        global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED
+        global SCRIPTURE_ENABLED, CONNECT4_ENABLED
+
+        val = var.get()
+        if key == "master":
+            GAME_ENABLED = val
+        elif key == "ai":
+            AI_ENABLED = val
+        elif key == "8ball":
+            EIGHTBALL_ENABLED = val
+        elif key == "scripture":
+            SCRIPTURE_ENABLED = val
+        elif key == "connect4":
+            CONNECT4_ENABLED = val
+
+        self._set_status(f"{'Enabled' if val else 'Disabled'}: {key}")
+
+    # ── Group tab callbacks ───────────────────────────────────────────────────
+
+    def _refresh_groups(self):
+        self._set_status("Fetching groups...")
+        self._group_listbox.delete(0, "end")
+        self._group_data = []
+
+        def fetch():
+            groups = list_groups()
+            self.root.after(0, lambda: self._populate_groups(groups))
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def _populate_groups(self, groups):
+        self._group_listbox.delete(0, "end")
+        self._group_data = []
+        for g in groups:
+            name = g.get("name", "(no name)")
+            gid  = g.get("id", "")
+            self._group_data.append((name, gid))
+            self._group_listbox.insert("end", f"  {name}  —  {gid}")
+        self._set_status(f"Found {len(groups)} group(s).")
+
+    def _set_game_group(self):
+        global GAME_GROUP_ID, last_game_since_id
+        sel = self._group_listbox.curselection()
+        if not sel:
+            self._set_status("Select a group from the list first.")
+            return
+        name, gid = self._group_data[sel[0]]
+
+        old_gid = GAME_GROUP_ID
+        GAME_GROUP_ID = gid
+
+        cfg = load_config()
+        cfg["game_group_id"] = gid
+        save_config(cfg)
+
+        def notify():
+            if old_gid and old_gid != gid:
+                send_message(old_gid, "Connect Four bot has been removed from this group.")
+            send_message(gid, "Connect Four bot has been added to this group.")
+            send_message(gid, "Admins: use #state all true/false to enable or disable the bot.")
+            global last_game_since_id
+            last_game_since_id = get_latest_message_id(gid) or "0"
+
+        threading.Thread(target=notify, daemon=True).start()
+        self._set_status(f"Game group set to: {name} ({gid})")
+
+    def _send_group_message(self):
+        global GAME_GROUP_ID
+        msg = self._send_msg_var.get().strip()
+        if not msg:
+            return
+        if not GAME_GROUP_ID:
+            self._set_status("No game group set.")
+            return
+        gid = GAME_GROUP_ID
+
+        def do_send():
+            send_message(gid, msg)
+            self.root.after(0, lambda: self._send_msg_var.set(""))
+            self.root.after(0, lambda: self._set_status("Message sent."))
+
+        threading.Thread(target=do_send, daemon=True).start()
+
+    # ── AI tab callbacks ──────────────────────────────────────────────────────
+
+    def _apply_personality(self):
+        text = self._personality_text.get("1.0", "end").strip()
+        if not text:
+            self._set_status("Personality text is empty.")
+            return
+        self._set_status("Rebuilding AI model — this may take a moment...")
+
+        def do_update():
+            update_personality(text)
+            self.root.after(0, lambda: self._set_status("AI personality updated and memory cleared."))
+
+        threading.Thread(target=do_update, daemon=True).start()
+
+    def _clear_all_memory(self):
+        global _ai_memory
+        _ai_memory.clear()
+        self._set_status("All AI conversation memory cleared.")
+
+    def _apply_cooldowns(self):
+        global AI_COOLDOWN_SECONDS, AISET_COOLDOWN_SECONDS, AI_MEMORY_MAX_TURNS
+        try:
+            AI_COOLDOWN_SECONDS   = int(self._ai_cd_var.get())
+            AISET_COOLDOWN_SECONDS = int(self._aiset_cd_var.get())
+            AI_MEMORY_MAX_TURNS   = int(self._mem_turns_var.get())
+            self._set_status(
+                f"Cooldowns updated — !ai:{AI_COOLDOWN_SECONDS}s  "
+                f"!aiset:{AISET_COOLDOWN_SECONDS}s  "
+                f"memory:{AI_MEMORY_MAX_TURNS} turns"
+            )
+        except ValueError:
+            self._set_status("Invalid value — cooldowns must be whole numbers.")
+
+    # ── Update tab callbacks ──────────────────────────────────────────────────
+
+    def _check_update(self):
+        self._set_status("Checking for updates...")
+        self._latest_ver_label.config(text="Checking\u2026", fg="#888888")
+        self._latest_msg_label.config(text="")
+        self._update_btn.config(state="disabled")
+
+        def do_check():
+            sha_short, msg, url = _check_for_update()
+            self.root.after(0, lambda: self._show_update_result(sha_short, msg, url))
+
+        threading.Thread(target=do_check, daemon=True).start()
+
+    def _show_update_result(self, sha_short, msg, url):
+        if sha_short is None:
+            self._latest_ver_label.config(text="Could not reach GitHub", fg="#ff3b30")
+            self._latest_msg_label.config(text="")
+            self._update_status_var.set("Check your internet connection and try again.")
+            return
+
+        self._latest_ver_label.config(text=sha_short, fg="#007aff")
+        self._latest_msg_label.config(text=f"\u201c{msg}\u201d" if msg else "")
+
+        if sha_short == BOT_COMMIT_SHA:
+            self._update_status_var.set("\u2705  You are already running the latest commit.")
+            self._update_btn.config(state="disabled")
+        elif BOT_COMMIT_SHA == "unknown":
+            self._update_status_var.set(
+                f"Latest commit on main: {sha_short}\n"
+                "Running commit is unknown (fresh install).\n"
+                "You can download the latest version below."
+            )
+            self._update_btn.config(state="normal")
+        else:
+            self._update_status_var.set(
+                f"New commit available: {sha_short}\n"
+                f"You are running: {BOT_COMMIT_SHA}\n"
+                f"Commit page: {url}"
+            )
+            self._update_btn.config(state="normal")
+
+    def _apply_update(self):
+        from tkinter import messagebox
+        if not messagebox.askyesno(
+            "Confirm Update",
+            "This will download the latest AI-FSY.py from GitHub\n"
+            "and restart the bot.\n\n"
+            "Your config.json and AI-BOT/ folder will not be changed.\n\n"
+            "Continue?",
+        ):
+            return
+
+        self._set_status("Downloading update…")
+        self._update_btn.config(state="disabled")
+
+        def do_update():
+            ok, err = _do_self_update()
+            if ok:
+                self.root.after(0, self._restart_bot)
+            else:
+                self.root.after(
+                    0,
+                    lambda: self._set_status(f"Update failed: {err}"),
+                )
+
+        threading.Thread(target=do_update, daemon=True).start()
+
+    # ── Restart / Stop ────────────────────────────────────────────────────────
+
+    def _restart_bot(self):
+        self._set_status("Restarting…")
+        self.root.after(500, lambda: os.execv(sys.executable,
+                                              [sys.executable] + sys.argv))
+
+    def _stop_bot(self):
+        from tkinter import messagebox
+        if messagebox.askyesno("Stop Bot", "Stop the bot and close the control panel?"):
+            handle_shutdown(None, None)
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _set_status(self, msg):
+        self._status_var.set(msg)
+
+
+def launch_control_panel():
+    """
+    Creates the tkinter control panel on the main thread.
+    Returns True if launched, False if tkinter is unavailable.
+    """
+    global _control_panel_instance
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+        _control_panel_instance = ControlPanel(root)
+        root.mainloop()
+        return True
+    except Exception as e:
+        print(f"[panel] Control panel unavailable: {e}")
+        print("[panel] Running in headless mode — use dev group commands instead.")
+        return False
+
+
 def main():
     # Load credentials from config.json, running the setup wizard if needed.
     # This must happen before anything else so all globals are populated.
@@ -2523,16 +3194,21 @@ def main():
         print("Waiting for !add GROUPID to set the game group.")
         last_game_since_id = None
 
-    # Start threads
+    # Start bot threads (daemon=True so they die if the process exits)
     dev_thread = threading.Thread(target=dev_poll_loop, daemon=True)
     game_thread = threading.Thread(target=game_poll_loop, daemon=True)
 
     dev_thread.start()
     game_thread.start()
 
-    # Keep alive
-    while True:
-        time.sleep(60)
+    # Launch the control panel GUI on the main thread.
+    # If tkinter is unavailable (headless server), fall back to a simple
+    # keep-alive loop so the bot threads stay alive.
+    launched = launch_control_panel()
+    if not launched:
+        print("[bot] Running headless. Press Ctrl+C to stop.")
+        while True:
+            time.sleep(60)
 
 
 if __name__ == "__main__":

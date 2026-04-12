@@ -1,0 +1,6 @@
+{
+    "access_token": "YOUR_GROUPME_ACCESS_TOKEN",
+    "dev_group_id": "YOUR_DEV_GROUP_ID",
+    "ollama_base_model": "llama3.1:8b",
+    "game_group_id": null
+}

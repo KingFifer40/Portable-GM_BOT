@@ -80,6 +80,7 @@ Once the bot is running, go to your **dev group** and send:
 ```
 
 The bot joins the game group and announces itself. Game group admins can then use `#state true/false` to enable or disable it.
+If you do not know your group id that you wish to add it to, no worries! Just type !listgroups and it will list them with ID.
 
 To find a game group ID: open it at [web.groupme.com](https://web.groupme.com) and copy the number from the URL.
 

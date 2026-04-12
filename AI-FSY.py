@@ -138,20 +138,91 @@ def _run_gui_wizard(existing: dict) -> dict:
              text="The AI model Ollama will download and use. Smaller = faster startup.",
              font=("Helvetica", 9), fg="#666666", anchor="w").pack(fill="x")
 
+    # Extended model list with RAM guidance
     MODEL_OPTIONS = [
-        "llama3.1:8b",
-        "llama3.2:3b",
-        "llama3.2:1b",
-        "mistral",
-        "phi3:mini",
-        "gemma2:2b",
+        # ── Llama 3.x family ──────────────────────────────────────────────
+        ("llama3.1:8b",       "Llama 3.1  8B   (~5 GB RAM)  — great all-rounder"),
+        ("llama3.2:3b",       "Llama 3.2  3B   (~2 GB RAM)  — fast, good quality"),
+        ("llama3.2:1b",       "Llama 3.2  1B   (~1 GB RAM)  — very fast, basic"),
+        # ── Llama 3.3 ─────────────────────────────────────────────────────
+        ("llama3.3:70b",      "Llama 3.3 70B   (~40 GB RAM) — best quality, needs GPU"),
+        # ── Mistral family ────────────────────────────────────────────────
+        ("mistral",           "Mistral    7B   (~5 GB RAM)  — fast, great chat"),
+        ("mistral-nemo",      "Mistral Nemo12B (~8 GB RAM)  — very capable"),
+        ("mistral-small",     "Mistral Small   (~12 GB RAM) — high quality"),
+        # ── Phi family (Microsoft) ────────────────────────────────────────
+        ("phi3:mini",         "Phi-3 Mini 3.8B (~3 GB RAM)  — great for Raspberry Pi"),
+        ("phi3:medium",       "Phi-3 Med  14B  (~9 GB RAM)  — strong reasoning"),
+        ("phi4-mini",         "Phi-4 Mini 3.8B (~3 GB RAM)  — improved Phi-3 mini"),
+        # ── Gemma family (Google) ─────────────────────────────────────────
+        ("gemma2:2b",         "Gemma 2    2B   (~2 GB RAM)  — very fast, Pi-friendly"),
+        ("gemma2:9b",         "Gemma 2    9B   (~6 GB RAM)  — excellent quality"),
+        ("gemma2:27b",        "Gemma 2   27B   (~16 GB RAM) — near frontier quality"),
+        # ── Qwen family (Alibaba) ─────────────────────────────────────────
+        ("qwen2.5:0.5b",      "Qwen 2.5   0.5B (~1 GB RAM)  — ultra-light"),
+        ("qwen2.5:1.5b",      "Qwen 2.5   1.5B (~1 GB RAM)  — light, surprisingly good"),
+        ("qwen2.5:3b",        "Qwen 2.5   3B   (~2 GB RAM)  — solid small model"),
+        ("qwen2.5:7b",        "Qwen 2.5   7B   (~5 GB RAM)  — very capable"),
+        ("qwen2.5:14b",       "Qwen 2.5  14B   (~9 GB RAM)  — strong"),
+        # ── TinyLlama ─────────────────────────────────────────────────────
+        ("tinyllama",         "TinyLlama  1.1B (~1 GB RAM)  — Pi Zero / very low RAM"),
+        # ── DeepSeek ──────────────────────────────────────────────────────
+        ("deepseek-r1:1.5b",  "DeepSeek-R1 1.5B (~1 GB RAM) — reasoning, very light"),
+        ("deepseek-r1:7b",    "DeepSeek-R1 7B   (~5 GB RAM) — strong reasoning"),
+        # ── Llava (vision) ────────────────────────────────────────────────
+        ("llava:7b",          "LLaVA      7B   (~5 GB RAM)  — vision+language"),
     ]
-    model_var = tk.StringVar(value=existing.get("ollama_base_model", "llama3.1:8b"))
-    model_combo = ttk.Combobox(
-        model_row, textvariable=model_var,
-        values=MODEL_OPTIONS, font=("Helvetica", 11), width=30,
+    model_names  = [m[0] for m in MODEL_OPTIONS]
+    model_labels = [m[1] for m in MODEL_OPTIONS]
+
+    default_model = existing.get("ollama_base_model", "llama3.1:8b")
+    default_idx   = model_names.index(default_model) if default_model in model_names else 0
+
+    # Advice label
+    tk.Label(
+        model_row,
+        text="Not sure which to pick? Check ollama.com/library for the full list and details.",
+        font=("Helvetica", 9), fg="#0066cc", anchor="w", cursor="hand2",
+    ).pack(fill="x", pady=(2, 6))
+
+    # Scrollable listbox frame
+    lb_frame = tk.Frame(model_row)
+    lb_frame.pack(fill="x")
+
+    scrollbar = tk.Scrollbar(lb_frame, orient="vertical")
+    listbox = tk.Listbox(
+        lb_frame,
+        font=("Courier", 10),
+        height=8,
+        selectmode="single",
+        activestyle="dotbox",
+        yscrollcommand=scrollbar.set,
+        exportselection=False,
     )
-    model_combo.pack(anchor="w", pady=(4, 0), ipady=3)
+    scrollbar.config(command=listbox.yview)
+    scrollbar.pack(side="right", fill="y")
+    listbox.pack(side="left", fill="x", expand=True)
+
+    for label in model_labels:
+        listbox.insert("end", "  " + label)
+
+    listbox.selection_set(default_idx)
+    listbox.see(default_idx)
+
+    # Custom entry for models not in the list
+    tk.Label(model_row, text="Or type a custom model name:",
+             font=("Helvetica", 9), fg="#666666", anchor="w").pack(fill="x", pady=(6, 0))
+    model_var = tk.StringVar(value=default_model)
+    custom_entry = tk.Entry(model_row, textvariable=model_var, font=("Helvetica", 11), width=30)
+    custom_entry.pack(anchor="w", ipady=4)
+
+    # Sync listbox → custom entry
+    def on_listbox_select(event):
+        sel = listbox.curselection()
+        if sel:
+            model_var.set(model_names[sel[0]])
+    listbox.bind("<<ListboxSelect>>", on_listbox_select)
+
     fields["ollama_base_model"] = model_var
 
     # ── Buttons ─────────────────────────────────────────────────────────────
@@ -327,11 +398,22 @@ OLLAMA_BASE_MODEL = "llama3.1:8b"   # overwritten from config
 DEV_POLL_INTERVAL = 10  # seconds
 GAME_POLL_INTERVAL = 3  # seconds
 
-# Game state toggle (controlled by !state)
-GAME_ENABLED = True
+# ─────────────────────────────────────────────────────────────────────────────
+# Feature toggles — all controllable at runtime via #state <feature> true/false
+# ─────────────────────────────────────────────────────────────────────────────
+GAME_ENABLED       = True   # master switch — when False only #state works
+AI_ENABLED         = True   # !ai, !aiset, !aiforget, etc.
+EIGHTBALL_ENABLED  = True   # ? magic 8-ball
+SCRIPTURE_ENABLED  = True   # #randverse, #findverse
+CONNECT4_ENABLED   = True   # #start, #join, #addai, #quit, column moves
 
-# AI toggle
-AI_ENABLED = True
+# Human-readable names used in status messages
+FEATURE_NAMES = {
+    "ai":        ("AI Chat",         lambda: AI_ENABLED),
+    "8ball":     ("Magic 8-Ball",    lambda: EIGHTBALL_ENABLED),
+    "scripture": ("Scripture",       lambda: SCRIPTURE_ENABLED),
+    "connect4":  ("Connect Four",    lambda: CONNECT4_ENABLED),
+}
 
 # Default game timeout in seconds (controlled by #timeout)
 GAME_TIMEOUT_SECONDS = 300
@@ -1351,13 +1433,13 @@ def set_ai_cooldown(user_id, cooldown_dict):
 
 
 def handle_game_command(message):
-    global GAME_TIMEOUT_SECONDS, GAME_ENABLED, AI_ENABLED
+    global GAME_TIMEOUT_SECONDS, GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED
 
     # Extract text early so we can use it safely
     text = (message.get("text") or "").strip()
 
     # Allow AI commands even when bot is disabled
-    if not GAME_ENABLED and not text.startswith("#state") and not text.startswith("!ai") and not text.startswith("!aiswitch"):
+    if not GAME_ENABLED and not text.lower().startswith("#state") and not text.startswith("!ai") and not text.startswith("!aiswitch"):
         return
 
     if GAME_GROUP_ID is None:
@@ -1370,7 +1452,7 @@ def handle_game_command(message):
 
     # 8-ball shortcut
     if text.startswith("?"):
-        if GAME_ENABLED:
+        if GAME_ENABLED and EIGHTBALL_ENABLED:
             answer = random.choice(EIGHTBALL_ANSWERS)
             send_message(GAME_GROUP_ID, f"🎱 {answer}", reply_to_id=msg_id)
         return
@@ -1532,12 +1614,27 @@ def handle_game_command(message):
                     "🎮 *Connect Four Commands:*\n"
                     "• #start — Begin a new game\n"
                     "• #join — Join as Player 2\n"
-                    "• #addai — Add AI as Player 2\n"
+                    "• #addai — Add the AI engine as Player 2\n"
                     "• #quit — End the current game\n"
                     "• #timeout <seconds> — Set inactivity timeout\n"
-                    "• #A–#G — Drop a piece in that column\n"
+                    "• #A through #G — Drop your piece in that column\n"
                     "\n"
-                    "Player 1 = 🔴   Player 2 = 🟡 or 🟢 (AI)"
+                    "Player 1 = 🔴   Player 2 = 🟡 or 🟢 (AI engine)\n"
+                    "\n"
+                    "Enable/disable with: #state connect4 true/false"
+                )
+                send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
+                return
+
+            # 8-BALL HELP
+            if topic == "8ball":
+                help_text = (
+                    "🎱 *Magic 8-Ball:*\n"
+                    "Start any message with ? to ask the 8-ball a question.\n"
+                    "\n"
+                    "Example: ?Will we win today?\n"
+                    "\n"
+                    "Enable/disable with: #state 8ball true/false"
                 )
                 send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
                 return
@@ -1546,16 +1643,18 @@ def handle_game_command(message):
             if topic == "scripture":
                 help_text = (
                     "📖 *Scripture Commands:*\n"
-                    "• #randverse — Random verse (Bible or BoM)\n"
+                    "• #randverse — Random verse (Bible or Book of Mormon)\n"
                     "• #randverse bible — Random Bible verse\n"
                     "• #randverse bom — Random Book of Mormon verse\n"
                     "\n"
                     "• #findverse <Book> <Chapter:Verse> — Direct lookup\n"
+                    "  Example: #findverse Alma 32:21\n"
                     "• #findverse \"keyword\" — Search both testaments\n"
                     "• #findverse bible \"keyword\" — Search Bible only\n"
                     "• #findverse bom \"keyword\" — Search BoM only\n"
                     "\n"
-                    "Keyword search returns up to 10 random verses containing the phrase."
+                    "Keyword search returns up to 10 matching verses.\n"
+                    "Enable/disable with: #state scripture true/false"
                 )
                 send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
                 return
@@ -1563,51 +1662,60 @@ def handle_game_command(message):
             # AI HELP
             if topic == "ai":
                 help_text = (
-                    "🤖 *AI Commands:*\n"
-                    "• !ai <message> — Chat with the AI\n"
-                    "• !aiset <text> — Set AI personality (anyone)\n"
-                    "• !aiswitch true/false — Enable or disable AI (admins only)\n"
-                    "• !aiforget — Clear your own AI conversation history\n"
-                    "• !aiforgetall — Clear everyone's history (admins only)\n"
+                    "🤖 *AI Chat Commands:*\n"
+                    "• !ai <message> — Chat with the AI (15s cooldown)\n"
+                    "• !aiset <text> — Set a new AI personality (60s cooldown)\n"
+                    "  Setting a new personality clears all conversation history.\n"
+                    "• !aiforget — Clear your own conversation history\n"
                     "\n"
-                    "The AI remembers your last 10 exchanges.\n"
-                    "Use !aiforget to start fresh with it."
+                    "The AI remembers your last 10 exchanges per person.\n"
+                    "Fun accents and characters are allowed!\n"
+                    "Enable/disable with: #state ai true/false (admins)"
                 )
                 send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
                 return
 
-            # ADMIN HELP
-            if topic == "admin":
+            # STATE / ADMIN HELP
+            if topic in ("admin", "state"):
                 help_text = (
                     "🛠️ *Admin Commands:*\n"
-                    "These commands require group admin privileges:\n"
+                    "All require group admin privileges.\n"
                     "\n"
-                    "• #state true/false — Enable or disable the bot\n"
-                    "• !aiswitch true/false — Enable or disable AI responses\n"
+                    "#state                      — show all feature states\n"
+                    "#state all true/false       — master on/off switch\n"
+                    "#state ai true/false        — AI chat on/off\n"
+                    "#state 8ball true/false     — Magic 8-Ball on/off\n"
+                    "#state scripture true/false — Scripture on/off\n"
+                    "#state connect4 true/false  — Connect Four on/off\n"
                     "\n"
-                    "Developer-only commands are available in the dev group.\n"
-                    "Use !help there to see the full list."
+                    "!aiforgetall — Clear all AI conversation history\n"
+                    "\n"
+                    "Dev-only commands: use !help in the dev group."
                 )
                 send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
                 return
 
             # Unknown topic
-            send_message(GAME_GROUP_ID, "Unknown help topic. Try: #help", reply_to_id=msg_id)
+            send_message(
+                GAME_GROUP_ID,
+                "Unknown help topic.\n"
+                "Try: #help game, #help 8ball, #help scripture, #help ai, #help admin",
+                reply_to_id=msg_id,
+            )
             return
 
         # -----------------------------
-        # TOP‑LEVEL HELP MENU
+        # TOP-LEVEL HELP MENU
         # -----------------------------
         help_text = (
-            "📚 *Help Categories:*\n"
-            "Use one of the following:\n"
+            "📚 *Help Topics:*\n"
+            "• #help game       — Connect Four\n"
+            "• #help 8ball      — Magic 8-Ball\n"
+            "• #help scripture  — Bible & Book of Mormon\n"
+            "• #help ai         — AI chat & personality\n"
+            "• #help admin      — Admin feature controls\n"
             "\n"
-            "• #help game — Connect Four commands\n"
-            "• #help scripture — Scripture tools\n"
-            "• #help ai — AI chat & personality\n"
-            "• #help admin — Admin & dev info\n"
-            "\n"
-            "Example:  #help scripture"
+            "Quick tip: start any message with ? for the 8-Ball!"
         )
         send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
         return
@@ -1616,6 +1724,9 @@ def handle_game_command(message):
     # RANDOM SCRIPTURE VERSES
     # -----------------------------
     if cmd == "#randverse":
+        if not SCRIPTURE_ENABLED:
+            send_message(GAME_GROUP_ID, "📖 Scripture commands are currently disabled.", reply_to_id=msg_id)
+            return
 
         # Determine source
         if len(parts) == 1:
@@ -1677,6 +1788,9 @@ def handle_game_command(message):
     # FIND VERSE (#findverse)
     # -----------------------------
     if cmd == "#findverse":
+        if not SCRIPTURE_ENABLED:
+            send_message(GAME_GROUP_ID, "📖 Scripture commands are currently disabled.", reply_to_id=msg_id)
+            return
 
         # Determine if this is keyword/phrase search (quotes) or direct lookup
         is_keyword = "\"" in text
@@ -1934,28 +2048,104 @@ def handle_game_command(message):
         return
     
     # #state  (admin only)
+    # Usage:
+    #   #state                        — show all feature states
+    #   #state all true/false         — master on/off
+    #   #state <feature> true/false   — toggle a specific feature
+    #   #state <feature>              — check one feature's state
+    # Features: all, ai, 8ball, scripture, connect4
     if cmd == "#state":
-        if len(parts) < 2:
-            send_message(GAME_GROUP_ID, f"Current state: {GAME_ENABLED}", reply_to_id=msg_id)
+
+        def _bool_val(s):
+            if s in ("true", "on", "1", "yes"):   return True
+            if s in ("false", "off", "0", "no"):  return False
+            return None
+
+        def _feature_status():
+            on  = "✅"
+            off = "❌"
+            lines = [
+                f"{'Bot (master)':<16} {on if GAME_ENABLED else off}",
+                f"{'Connect Four':<16} {on if CONNECT4_ENABLED else off}",
+                f"{'Magic 8-Ball':<16} {on if EIGHTBALL_ENABLED else off}",
+                f"{'Scripture':<16} {on if SCRIPTURE_ENABLED else off}",
+                f"{'AI Chat':<16} {on if AI_ENABLED else off}",
+            ]
+            return "🔧 Feature states:\n" + "\n".join(lines)
+
+        # No args → show status (anyone can check)
+        if len(parts) == 1:
+            send_message(GAME_GROUP_ID, _feature_status(), reply_to_id=msg_id)
             return
 
+        feature = parts[1].lower()
+
+        # One arg that's a feature name → show just that feature's state
+        if feature in FEATURE_NAMES and len(parts) == 2:
+            name, getter = FEATURE_NAMES[feature]
+            status = "enabled ✅" if getter() else "disabled ❌"
+            send_message(GAME_GROUP_ID, f"{name} is currently {status}.", reply_to_id=msg_id)
+            return
+
+        # Need admin for everything else
         if not is_group_admin(GAME_GROUP_ID, sender_id):
-            send_message(GAME_GROUP_ID, "❌ Only group admins can enable or disable the bot.", reply_to_id=msg_id)
+            send_message(GAME_GROUP_ID, "❌ Only group admins can change feature states.", reply_to_id=msg_id)
             return
 
-        val = parts[1].lower()
-        if val in ("true", "on", "1", "yes"):
-            GAME_ENABLED = True
-            send_message(GAME_GROUP_ID, "Bot enabled.", reply_to_id=msg_id)
-        elif val in ("false", "off", "0", "no"):
-            GAME_ENABLED = False
-            send_message(GAME_GROUP_ID, "Bot disabled. Only #state commands will work now.", reply_to_id=msg_id)
+        # Two-arg form: #state <feature/all> <true/false>
+        if len(parts) < 3:
+            send_message(
+                GAME_GROUP_ID,
+                "Usage:\n"
+                "  #state                     — show all states\n"
+                "  #state all true/false       — master switch\n"
+                "  #state <feature> true/false — toggle feature\n"
+                "Features: ai, 8ball, scripture, connect4",
+                reply_to_id=msg_id,
+            )
+            return
+
+        val = _bool_val(parts[2].lower())
+        if val is None:
+            send_message(GAME_GROUP_ID, "Value must be true or false.", reply_to_id=msg_id)
+            return
+
+        if feature == "all":
+            GAME_ENABLED = val
+            if not val:
+                send_message(GAME_GROUP_ID, "🔴 Bot disabled. Only #state commands will work.", reply_to_id=msg_id)
+            else:
+                send_message(GAME_GROUP_ID, "🟢 Bot enabled.", reply_to_id=msg_id)
+
+        elif feature == "ai":
+            AI_ENABLED = val
+            send_message(GAME_GROUP_ID, f"AI Chat {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
+
+        elif feature == "8ball":
+            EIGHTBALL_ENABLED = val
+            send_message(GAME_GROUP_ID, f"Magic 8-Ball {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
+
+        elif feature == "scripture":
+            SCRIPTURE_ENABLED = val
+            send_message(GAME_GROUP_ID, f"Scripture commands {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
+
+        elif feature == "connect4":
+            CONNECT4_ENABLED = val
+            send_message(GAME_GROUP_ID, f"Connect Four {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
+
         else:
-            send_message(GAME_GROUP_ID, "Usage: #state true/false", reply_to_id=msg_id)
+            send_message(
+                GAME_GROUP_ID,
+                f"Unknown feature '{feature}'.\nKnown features: all, ai, 8ball, scripture, connect4",
+                reply_to_id=msg_id,
+            )
         return
 
     # #start
     if cmd == "#start":
+        if not CONNECT4_ENABLED:
+            send_message(GAME_GROUP_ID, "🎮 Connect Four is currently disabled.", reply_to_id=msg_id)
+            return
         if game_state["active"]:
             send_message(GAME_GROUP_ID, "A game is already in progress.", reply_to_id=msg_id)
             return
@@ -1979,6 +2169,9 @@ def handle_game_command(message):
 
     # #join
     if cmd == "#join":
+        if not CONNECT4_ENABLED:
+            send_message(GAME_GROUP_ID, "🎮 Connect Four is currently disabled.", reply_to_id=msg_id)
+            return
         if not game_state["active"]:
             send_message(GAME_GROUP_ID, "No active game. Use #start to begin.", reply_to_id=msg_id)
             return
@@ -2009,6 +2202,9 @@ def handle_game_command(message):
 
     # #addai
     if cmd == "#addai":
+        if not CONNECT4_ENABLED:
+            send_message(GAME_GROUP_ID, "🎮 Connect Four is currently disabled.", reply_to_id=msg_id)
+            return
         if not game_state["active"]:
             send_message(GAME_GROUP_ID, "No active game. Use #start first.", reply_to_id=msg_id)
             return
@@ -2073,6 +2269,10 @@ def handle_game_command(message):
         col_idx = column_letter_to_index(col_letter)
         if col_idx is None:
             send_message(GAME_GROUP_ID, "Invalid column. Use #A through #G.", reply_to_id=msg_id)
+            return
+
+        if not CONNECT4_ENABLED:
+            send_message(GAME_GROUP_ID, "🎮 Connect Four is currently disabled.", reply_to_id=msg_id)
             return
 
         if not game_state["active"]:

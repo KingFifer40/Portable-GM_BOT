@@ -1,6 +1,7 @@
 import sys
 import os
 import subprocess
+import time
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Dependency bootstrap — installs missing packages before anything else runs.

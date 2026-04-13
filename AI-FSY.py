@@ -463,7 +463,9 @@ def _load_or_run_setup():
 # Sentinel values — replaced at runtime by _load_or_run_setup()
 ACCESS_TOKEN   = None
 DEV_GROUP_ID   = None
-GAME_GROUP_ID  = None   # Set at runtime via !add GROUPID
+GAME_GROUP_ID  = None   # Set at runtime via !add GROUPID or Groups tab
+ADMIN_GROUP_ID = None   # Linked main group (for admin/feature data) — used when in subgroup mode
+USE_SUBGROUP   = False  # If True, bot operates in GAME_GROUP_ID but gets admin data from ADMIN_GROUP_ID
 OLLAMA_BASE_MODEL = "llama3.1:8b"   # overwritten from config
 
 DEV_POLL_INTERVAL = 10  # seconds
@@ -1616,6 +1618,13 @@ def handle_dev_command(message):
 # Game group command handling
 # ---------------------------------------------------------
 
+def get_admin_group_id():
+    """
+    Returns the group ID to use for checking admins and reading settings.
+    If in subgroup mode, returns the linked main group; otherwise returns the game group.
+    """
+    return ADMIN_GROUP_ID if USE_SUBGROUP and ADMIN_GROUP_ID else GAME_GROUP_ID
+        
 def is_group_admin(group_id, user_id):
     """
     Returns True if user_id is an admin (or owner) in the given GroupMe group.
@@ -1623,8 +1632,10 @@ def is_group_admin(group_id, user_id):
     """
     if user_id is None:
         return False
+    # Use admin group for checking privileges
+    check_group_id = get_admin_group_id()
     try:
-        resp = gm_get(f"/groups/{group_id}")
+        resp = gm_get(f"/groups/{check_group_id}")
         members = resp.get("members", [])
         for member in members:
             if str(member.get("user_id")) == str(user_id):
@@ -1864,8 +1875,8 @@ def handle_game_command(message):
 
     # !aiforget — clears the calling user's own AI memory
     if cmd == "!aiforget":
-        if user_id in _ai_memory:
-            del _ai_memory[user_id]
+        if sender_id in _ai_memory:
+            del _ai_memory[sender_id]
         send_message(GAME_GROUP_ID, "🧹 Your AI conversation history has been cleared.", reply_to_id=msg_id)
         return
 
@@ -3143,64 +3154,81 @@ class ControlPanel:
                   padx=12, pady=6).pack(side="left")
 
     # ── Tab: Group Management ─────────────────────────────────────────────────
+     def _build_tab_groups(self, nb):
+         import tkinter as tk
+         from tkinter import ttk, messagebox
 
-    def _build_tab_groups(self, nb):
-        import tkinter as tk
-        from tkinter import ttk, messagebox
+         tab = tk.Frame(nb, padx=16, pady=12)
+         nb.add(tab, text="  Groups  ")
 
-        tab = tk.Frame(nb, padx=16, pady=12)
-        nb.add(tab, text="  Groups  ")
+         # ─── Subgroup Mode Controls ───────────────────────────────────────
+         tk.Label(tab, text="Game Group Mode",
+                  font=("Helvetica", 12, "bold")).pack(anchor="w")
+         
+         mode_frame = tk.Frame(tab)
+         mode_frame.pack(fill="x", pady=(4, 12))
+         
+         self._use_subgroup_var = tk.BooleanVar(value=USE_SUBGROUP)
+         self._admin_group_entry = None
+         self._admin_group_label = None
+         
+         def on_subgroup_toggle():
+             is_checked = self._use_subgroup_var.get()
+             if self._admin_group_label:
+                 self._admin_group_label.config(
+                     state="normal" if is_checked else "disabled",
+                     fg="black" if is_checked else "#999999"
+                 )
+             if self._admin_group_entry:
+                 self._admin_group_entry.config(
+                     state="normal" if is_checked else "disabled"
+                 )
+         
+         # Radio button 1: Main Chat (default)
+         main_rb = ttk.Radiobutton(
+             mode_frame, text="Main Chat (default)",
+             variable=self._use_subgroup_var, value=False,
+             command=on_subgroup_toggle
+         )
+         main_rb.pack(anchor="w", pady=(0, 4))
+         tk.Label(mode_frame, text="Bot operates in the main group.",
+                  font=("Helvetica", 9), fg="#888888").pack(anchor="w", padx=(20, 0))
+         
+         # Radio button 2: Subgroup Chat
+         sub_rb = ttk.Radiobutton(
+             mode_frame, text="Subgroup Chat",
+             variable=self._use_subgroup_var, value=True,
+             command=on_subgroup_toggle
+         )
+         sub_rb.pack(anchor="w", pady=(8, 4))
+         
+         sub_info_frame = tk.Frame(mode_frame)
+         sub_info_frame.pack(anchor="w", padx=(20, 0), fill="x")
+         tk.Label(sub_info_frame,
+                  text="Bot operates in subgroup, but fetches admin & settings from linked main group.",
+                  font=("Helvetica", 9), fg="#888888").pack(anchor="w")
+         
+         admin_input_frame = tk.Frame(sub_info_frame)
+         admin_input_frame.pack(anchor="w", pady=(4, 0))
+         self._admin_group_label = tk.Label(admin_input_frame, text="Linked Main Group ID:",
+                                             font=("Helvetica", 10), width=20, anchor="w")
+         self._admin_group_label.pack(side="left")
+         self._admin_group_entry = tk.Entry(admin_input_frame, font=("Helvetica", 10), width=20)
+         self._admin_group_entry.pack(side="left", padx=(4, 0))
+         
+         # Initialize with current value
+         if ADMIN_GROUP_ID:
+             self._admin_group_entry.insert(0, str(ADMIN_GROUP_ID))
+         on_subgroup_toggle()  # Set initial state
 
-        # Current game group
-        tk.Label(tab, text="Active Game Group",
-                 font=("Helvetica", 12, "bold")).pack(anchor="w")
-        self._game_group_var = tk.StringVar()
-        tk.Entry(tab, textvariable=self._game_group_var,
-                 font=("Helvetica", 11), width=30,
-                 state="readonly").pack(anchor="w", pady=(4, 0), ipady=4)
-
-        # ── List groups ───────────────────────────────────────────────────────
-        ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=12)
-        tk.Label(tab, text="Your GroupMe Groups",
-                 font=("Helvetica", 12, "bold")).pack(anchor="w")
-        tk.Label(tab, text="Click a group to select it as the active game group.",
-                 font=("Helvetica", 9), fg="#888888").pack(anchor="w", pady=(0, 6))
-
-        lb_frame = tk.Frame(tab)
-        lb_frame.pack(fill="both", expand=True)
-
-        sb = tk.Scrollbar(lb_frame, orient="vertical")
-        self._group_listbox = tk.Listbox(lb_frame, font=("Courier", 10),
-                                         height=8, selectmode="single",
-                                         yscrollcommand=sb.set,
-                                         exportselection=False)
-        sb.config(command=self._group_listbox.yview)
-        sb.pack(side="right", fill="y")
-        self._group_listbox.pack(side="left", fill="both", expand=True)
-        self._group_data = []  # list of (name, id) tuples
-
-        btn_row = tk.Frame(tab)
-        btn_row.pack(fill="x", pady=(8, 0))
-        tk.Button(btn_row, text="🔃  Refresh List", font=("Helvetica", 10),
-                  command=self._refresh_groups,
-                  relief="flat", padx=10, pady=5).pack(side="left", padx=(0, 8))
-        tk.Button(btn_row, text="✅  Set as Game Group", font=("Helvetica", 10),
-                  command=self._set_game_group,
-                  bg="#34c759", fg="white", relief="flat",
-                  padx=10, pady=5).pack(side="left")
-
-        # ── Send message ──────────────────────────────────────────────────────
-        ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=12)
-        tk.Label(tab, text="Send Message to Game Group",
-                 font=("Helvetica", 12, "bold")).pack(anchor="w")
-        self._send_msg_var = tk.StringVar()
-        tk.Entry(tab, textvariable=self._send_msg_var,
-                 font=("Helvetica", 11), width=44).pack(anchor="w", pady=(4, 0),
-                                                         ipady=4, fill="x")
-        tk.Button(tab, text="Send", font=("Helvetica", 10),
-                  command=self._send_group_message,
-                  bg="#007aff", fg="white", relief="flat",
-                  padx=10, pady=5).pack(anchor="e", pady=(6, 0))
+         # Current game group
+         ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=12)
+         tk.Label(tab, text="Active Game Group",
+                  font=("Helvetica", 12, "bold")).pack(anchor="w")
+         self._game_group_var = tk.StringVar()
+         tk.Entry(tab, textvariable=self._game_group_var,
+                  font=("Helvetica", 11), width=30,
+                  state="readonly").pack(anchor="w", pady=(4, 0), ipady=4)
 
     # ── Tab: AI Controls ──────────────────────────────────────────────────────
 
@@ -3585,31 +3613,46 @@ class ControlPanel:
             self._group_listbox.insert("end", f"  {name}  —  {gid}")
         self._set_status(f"Found {len(groups)} group(s).")
 
-    def _set_game_group(self):
-        global GAME_GROUP_ID, last_game_since_id
-        sel = self._group_listbox.curselection()
-        if not sel:
-            self._set_status("Select a group from the list first.")
-            return
-        name, gid = self._group_data[sel[0]]
+     def _set_game_group(self):
+         global GAME_GROUP_ID, ADMIN_GROUP_ID, USE_SUBGROUP, last_game_since_id
+         sel = self._group_listbox.curselection()
+         if not sel:
+             self._set_status("Select a group from the list first.")
+             return
+         name, gid = self._group_data[sel[0]]
 
-        old_gid = GAME_GROUP_ID
-        GAME_GROUP_ID = gid
+         old_gid = GAME_GROUP_ID
+         GAME_GROUP_ID = gid
+         
+         # Save subgroup mode settings
+         USE_SUBGROUP = self._use_subgroup_var.get()
+         if USE_SUBGROUP:
+             admin_gid_text = self._admin_group_entry.get().strip()
+             if not admin_gid_text:
+                 self._set_status("ERROR: Please enter a Linked Main Group ID for subgroup mode.")
+                 return
+             ADMIN_GROUP_ID = admin_gid_text
+         else:
+             ADMIN_GROUP_ID = None
 
-        cfg = load_config()
-        cfg["game_group_id"] = gid
-        save_config(cfg)
+         cfg = load_config()
+         cfg["game_group_id"] = gid
+         cfg["use_subgroup_mode"] = USE_SUBGROUP
+         if USE_SUBGROUP:
+             cfg["admin_group_id"] = ADMIN_GROUP_ID
+         save_config(cfg)
 
-        def notify():
-            if old_gid and old_gid != gid:
-                send_message(old_gid, "Connect Four bot has been removed from this group.")
-            send_message(gid, "Connect Four bot has been added to this group.")
-            send_message(gid, "Admins: use #state all true/false to enable or disable the bot.")
-            global last_game_since_id
-            last_game_since_id = get_latest_message_id(gid) or "0"
+         def notify():
+             if old_gid and old_gid != gid:
+                 send_message(old_gid, "Connect Four bot has been removed from this group.")
+             send_message(gid, "Connect Four bot has been added to this group.")
+             send_message(gid, "Admins: use #state all true/false to enable or disable the bot.")
+             global last_game_since_id
+             last_game_since_id = get_latest_message_id(gid) or "0"
 
-        threading.Thread(target=notify, daemon=True).start()
-        self._set_status(f"Game group set to: {name} ({gid})")
+         threading.Thread(target=notify, daemon=True).start()
+         self._set_status(f"Game group set to: {name} ({gid})" + 
+                         (f" [subgroup mode, admin group: {ADMIN_GROUP_ID}]" if USE_SUBGROUP else ""))
 
     def _send_group_message(self):
         global GAME_GROUP_ID
@@ -3774,7 +3817,7 @@ def main():
     _load_or_run_setup()
 
     ensure_ai_directories()
-    global GAME_GROUP_ID, last_dev_since_id, last_game_since_id
+    global GAME_GROUP_ID, ADMIN_GROUP_ID, USE_SUBGROUP, last_dev_since_id, last_game_since_id
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)
 
@@ -3786,6 +3829,13 @@ def main():
     # Load config
     cfg = load_config()
     GAME_GROUP_ID = cfg.get("game_group_id")
+    USE_SUBGROUP = cfg.get("use_subgroup_mode", False)
+    ADMIN_GROUP_ID = cfg.get("admin_group_id") if USE_SUBGROUP else None
+    
+    if USE_SUBGROUP and ADMIN_GROUP_ID:
+        print(f"Subgroup mode: bot operates in {GAME_GROUP_ID}, admin data from {ADMIN_GROUP_ID}")
+    elif GAME_GROUP_ID:
+        print(f"Standard mode: bot operates in {GAME_GROUP_ID}")
 
     # Initialize dev since_id
     last_dev_since_id = get_latest_message_id(DEV_GROUP_ID)

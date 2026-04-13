@@ -37,7 +37,6 @@ def _bootstrap_dependencies():
                 sys.exit(1)
 
 _bootstrap_dependencies()
-
 # ---------------------------------------------------------
 # Single-instance lock — prevents running two copies at once.
 # Uses a lockfile next to the script. Restarts are safe because
@@ -51,6 +50,8 @@ def _acquire_instance_lock():
     """
     Writes our PID to .bot.lock. If a lock file already exists and the
     PID inside it belongs to a running process, we refuse to start.
+    
+    Tolerates stale locks from crashed processes or recent restarts.
     """
     def _pid_running(pid):
         try:
@@ -71,13 +72,23 @@ def _acquire_instance_lock():
         try:
             with open(_LOCK_FILE, "r") as f:
                 old_pid = int(f.read().strip())
+            
+            # Give the old process a moment to fully exit (helpful for rapid restarts)
             if _pid_running(old_pid) and old_pid != os.getpid():
-                print()
-                print(f"  ERROR: Another instance of the bot is already running (PID {old_pid}).")
-                print("  Close the other instance first, then try again.")
-                print()
-                input("Press Enter to exit...")
-                sys.exit(1)
+                # Wait up to 2 seconds for the old process to cleanly exit
+                for attempt in range(20):
+                    time.sleep(0.1)
+                    if not _pid_running(old_pid):
+                        # Process exited, we can proceed
+                        break
+                else:
+                    # After 2 seconds, it's still running — genuine conflict
+                    print()
+                    print(f"  ERROR: Another instance of the bot is already running (PID {old_pid}).")
+                    print("  Close the other instance first, then try again.")
+                    print()
+                    input("Press Enter to exit...")
+                    sys.exit(1)
         except (ValueError, OSError):
             pass  # stale / corrupt lock — overwrite it
 

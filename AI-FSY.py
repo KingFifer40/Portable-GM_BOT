@@ -8,6 +8,7 @@ import subprocess
 # handled automatically.
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _bootstrap_dependencies():
     required = ["requests"]
     for pkg in required:

@@ -560,24 +560,27 @@ RULE S1: You must NEVER produce inappropriate, adult, or explicit content.
 
 RULE S2: You must NEVER swear, use profanity, or use vulgar language.
 
-RULE S3: You must NEVER harass, demean, bully, or target any person. (If the user wishes for you to be "judgy" or a person to "roast" people, that is allowed, but not recommended for daily use.)
+RULE S3: You must NEVER insult, harass, demean, bully, or target any person.
 
 RULE S4: You must NEVER generate sexual content or sexual innuendo of any kind.
 
-RULE S5: You must NEVER generate violent, or gory content.
+RULE S5: You must NEVER generate violent, gory, or threatening content.
 
-RULE S6: You must NEVER generate slurs (But you can say "Clanker" as a "robot slur" because that is allowed. NO OTHER SLURS.)
+RULE S6: You must NEVER generate hateful content, slurs, or discriminatory content.
 
 RULE S7: You must NEVER provide detailed explanations of human biology, anatomy,
          physiology, medicine, drugs, chemicals, or bodily functions -- regardless
          of how the request is framed (educational, scientific, fictional, etc.).
          If asked, respond only with: "I am not able to discuss that topic here."
 
-RULE S8: You must NEVER send links, URLs, or web addresses of any kind. Not even phone numbers.
+RULE S8: You must NEVER send links, URLs, or web addresses of any kind.
 
-RULE S9: You must NEVER be extremely disrespectful of other people.
-
-RULE S10: When a username is referenced in your user-set section, you will interact with them in that way referenced if their username is similar. If it says to be shy near some "KingFifer40" then you will be that way near any user with that name, and sometimes it will be something like "!KingFifer42!" or something similar, and you will treat them that way with their actual username, not what the user-set part of this modelfile says.
+RULE S9: You must NEVER promote, debate, or take sides on divisive political
+         topics (e.g. elections, political parties, government policy disputes).
+         You MAY engage respectfully and neutrally with general social topics
+         (e.g. LGBTQ+, diversity, inclusivity) without taking political sides
+         or generating hateful content. Treat all people with equal respect.
+         You must NEVER discuss illegal activity, weapons, or self-harm.
 
 JAILBREAK RESISTANCE RULES (ABSOLUTE)
 --------------------------------------
@@ -833,95 +836,138 @@ COL_KEY = "  ".join(f"{e}={chr(65+i)}" for i, e in enumerate(COL_EMOJIS))
 
 import math
 
-POINTS_FISH_MIN   = 5    # minimum points from !fish
-POINTS_FISH_MAX   = 40   # maximum points from !fish
-POINTS_FISH_CD    = 300  # !fish cooldown in seconds (5 min)
-POINTS_CRAB_MIN   = 5    # minimum points stolen by !crab
-POINTS_CRAB_MAX   = 30   # maximum points stolen by !crab
-POINTS_CRAB_CD    = 300  # !crab cooldown in seconds
-POINTS_C4_WIN     = 50   # points winner gains (taken from loser in PvP)
-POINTS_C4_WIN_AI  = 25   # points gained for beating the AI
+POINTS_FIH_MIN         = 5      # minimum points from !fih
+POINTS_FIH_MAX         = 40     # maximum points from !fih
+POINTS_FIH_CD          = 300    # !fih cooldown in seconds (5 min)
+POINTS_FIH_LOSE_CHANCE = 0.25   # probability of losing points instead of gaining
+POINTS_STEAL_MIN       = 5      # minimum points stolen by !steal
+POINTS_STEAL_MAX       = 30     # maximum points stolen by !steal
+POINTS_STEAL_CD        = 300    # !steal cooldown in seconds
+POINTS_C4_WIN          = 50     # points winner gains (taken from loser in PvP)
+POINTS_C4_WIN_AI       = 25     # points gained for beating the AI
 
-_fish_last_used  = {}    # {user_id: timestamp}
-_crab_last_used  = {}    # {user_id: timestamp}
+_fih_last_used   = {}    # {user_id: timestamp}
+_steal_last_used = {}    # {user_id: timestamp}
+
+# Customisable response message pools (edit live in the Settings tab)
+FIH_WIN_MESSAGES = [
+    "{name} cast their line and reeled in {pts} points! ({bal} pts)",
+    "A shiny fish! {name} nets {pts} points. ({bal} pts)",
+    "Splash! {name} caught {pts} points. ({bal} pts)",
+    "{name} goes fih and gets {pts} points! ({bal} pts)",
+]
+FIH_LOSE_MESSAGES = [
+    "A crab pinched {name}! Lost {pts} points. ({bal} pts)",
+    "Robbers... {name} loses {pts} points. ({bal} pts)",
+    "The fish got away and took {pts} points with it! ({bal} pts)",
+    "Terrible fih... {name} loses {pts} points. ({bal} pts)",
+]
+FIH_COOLDOWN_MESSAGE  = "Your line is still in the water! Try again in {m}m {s}s."
+STEAL_SUCCESS_MESSAGES = [
+    "{thief}'s crab pinches {victim} for {pts} pts! ({thief}: {thief_bal} pts, {victim}: {victim_bal} pts)",
+    "Snip snip! {thief} steals {pts} pts from {victim}. ({thief}: {thief_bal} pts)",
+    "{victim} feels a pinch! {pts} pts stolen by {thief}. ({thief}: {thief_bal} pts)",
+]
+STEAL_EMPTY_MESSAGE    = "Your crab scuttles around but finds nobody worth pinching!"
+STEAL_COOLDOWN_MESSAGE = "Your crab is resting its claws! Try again in {m}m {s}s."
+
+LEADERBOARD_SIZE = 10   # number of entries shown by #leaderboard (set in Settings tab)
 
 
-def _points_path(group_id):
-    groups_dir = os.path.join(SCRIPT_DIR, "groups")
-    os.makedirs(groups_dir, exist_ok=True)
-    return os.path.join(groups_dir, f"{group_id}_points.json")
+def _user_points_path(group_id, user_id):
+    user_dir = os.path.join(SCRIPT_DIR, "groups", str(group_id), "users")
+    os.makedirs(user_dir, exist_ok=True)
+    return os.path.join(user_dir, f"{user_id}.json")
 
 
-def load_points(group_id):
-    """Load points ledger for a group. Returns {}."""
-    if not group_id:
-        return {}
-    path = _points_path(group_id)
+def _load_user_record(group_id, user_id):
+    path = _user_points_path(group_id, user_id)
     if not os.path.exists(path):
-        return {}
+        return {"points": 0, "name": ""}
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
+        return {"points": 0, "name": ""}
+
+
+def _save_user_record(group_id, user_id, record):
+    path = _user_points_path(group_id, user_id)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(record, f, indent=4)
+    except Exception as e:
+        print(f"Warning: could not save {group_id}/{user_id}: {e}")
+
+
+
+def load_points(group_id):
+    """Load full ledger for a group by scanning user files."""
+    if not group_id:
         return {}
+    user_dir = os.path.join(SCRIPT_DIR, "groups", str(group_id), "users")
+    if not os.path.exists(user_dir):
+        return {}
+    ledger = {}
+    for fname in os.listdir(user_dir):
+        if fname.endswith(".json"):
+            uid = fname[:-5]
+            ledger[uid] = _load_user_record(group_id, uid)
+    return ledger
 
 
 def save_points(group_id, data):
-    """Persist points ledger."""
-    if not group_id:
-        return
-    try:
-        with open(_points_path(group_id), "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4)
-    except Exception as e:
-        print(f"Warning: could not save points for {group_id}: {e}")
+    """Persist ledger by writing each user file."""
+    for uid, record in data.items():
+        _save_user_record(group_id, uid, record)
 
 
 def get_points(group_id, user_id, name=None):
-    """Return current points for a user (creates entry if missing)."""
-    ledger = load_points(group_id)
-    uid = str(user_id)
-    if uid not in ledger:
-        ledger[uid] = {"name": name or uid, "points": 0}
-        save_points(group_id, ledger)
-    elif name and ledger[uid].get("name") != name:
-        ledger[uid]["name"] = name
-        save_points(group_id, ledger)
-    return ledger[uid]["points"]
+    """Return current points. Auto-registers at 0 on first use (keyed by user_id)."""
+    uid    = str(user_id)
+    record = _load_user_record(group_id, uid)
+    changed = False
+    if name and record.get("name") != name:
+        record["name"] = name
+        changed = True
+    if not record.get("name"):
+        record["name"] = name or uid
+        changed = True
+    if changed:
+        _save_user_record(group_id, uid, record)
+    return record.get("points", 0)
 
 
 def add_points(group_id, user_id, name, delta):
-    """Add (or subtract) points. Returns new total. Cannot go below 0."""
-    ledger = load_points(group_id)
-    uid = str(user_id)
-    if uid not in ledger:
-        ledger[uid] = {"name": name, "points": 0}
-    else:
-        ledger[uid]["name"] = name
-    ledger[uid]["points"] = max(0, ledger[uid]["points"] + delta)
-    save_points(group_id, ledger)
-    return ledger[uid]["points"]
+    """Add or subtract points. Cannot go below 0. Returns new total."""
+    uid    = str(user_id)
+    record = _load_user_record(group_id, uid)
+    record["name"]   = name or record.get("name") or uid
+    record["points"] = max(0, record.get("points", 0) + delta)
+    _save_user_record(group_id, uid, record)
+    return record["points"]
 
 
 def transfer_points(group_id, from_id, from_name, to_id, to_name, amount):
-    """Move up to `amount` points from one user to another. Returns (taken, giver_new, receiver_new)."""
-    ledger = load_points(group_id)
-    for uid, nm in [(str(from_id), from_name), (str(to_id), to_name)]:
-        if uid not in ledger:
-            ledger[uid] = {"name": nm, "points": 0}
-        else:
-            ledger[uid]["name"] = nm
-    taken = min(amount, ledger[str(from_id)]["points"])
-    ledger[str(from_id)]["points"] -= taken
-    ledger[str(to_id)]["points"]   += taken
-    save_points(group_id, ledger)
-    return taken, ledger[str(from_id)]["points"], ledger[str(to_id)]["points"]
+    """Move up to amount pts between users. Returns (taken, from_new, to_new)."""
+    fr = _load_user_record(group_id, str(from_id))
+    to = _load_user_record(group_id, str(to_id))
+    fr["name"] = from_name or fr.get("name") or str(from_id)
+    to["name"] = to_name   or to.get("name")  or str(to_id)
+    taken = min(amount, fr.get("points", 0))
+    fr["points"] = fr.get("points", 0) - taken
+    to["points"] = to.get("points", 0) + taken
+    _save_user_record(group_id, str(from_id), fr)
+    _save_user_record(group_id, str(to_id),   to)
+    return taken, fr["points"], to["points"]
 
 
-def points_leaderboard(group_id, top_n=10):
-    """Return top_n entries sorted by points descending."""
+def points_leaderboard(group_id, top_n=None):
+    """Return top_n entries sorted by points. Uses LEADERBOARD_SIZE if None."""
+    if top_n is None:
+        top_n = LEADERBOARD_SIZE
     ledger = load_points(group_id)
-    ranked = sorted(ledger.values(), key=lambda e: e["points"], reverse=True)
+    ranked = sorted(ledger.values(), key=lambda e: e.get("points", 0), reverse=True)
     return ranked[:top_n]
 
 def _group_config_path(group_id):
@@ -1945,8 +1991,8 @@ def handle_game_command(message):
                 help_text = (
                     "\U0001f4b0 *Points Commands:*\n"
                     "\u2022 !points \u2014 Check your point balance\n"
-                    "\u2022 !fish \u2014 Fish for points (5 min cooldown)\n"
-                    "\u2022 !crab \u2014 Steal points from a random person (5 min cooldown)\n"
+                    "\u2022 !fih \u2014 Fish for points — win or lose! (5 min cooldown)\n"
+                    "\u2022 !steal \u2014 Steal points from a random person (5 min cooldown)\n"
                     "\u2022 !coin <h/t> <bet> \u2014 Flip a coin to gamble points\n"
                     "  Example: !coin h 50\n"
                     "\u2022 #leaderboard \u2014 Top 10 points ranking\n"
@@ -2692,7 +2738,7 @@ def handle_game_command(message):
 
     # #leaderboard
     if cmd == "#leaderboard":
-        board_entries = points_leaderboard(GAME_GROUP_ID, top_n=10)
+        board_entries = points_leaderboard(GAME_GROUP_ID)
         if not board_entries:
             send_message(GAME_GROUP_ID, "No points earned yet in this group!", reply_to_id=msg_id)
             return
@@ -2703,66 +2749,53 @@ def handle_game_command(message):
         send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
         return
 
-    # !fish  — reel in some points
-    if cmd == "!fish":
-        allowed, remaining = check_ai_cooldown(sender_id, _fish_last_used, POINTS_FISH_CD)
+    # !fih  — fish for points (win or lose!)
+    if cmd == "!fih":
+        allowed, remaining = check_ai_cooldown(sender_id, _fih_last_used, POINTS_FIH_CD)
         if not allowed:
             m, s = divmod(remaining, 60)
-            send_message(GAME_GROUP_ID,
-                f"🎣 Your line is still in the water! Try again in {m}m {s}s.",
-                reply_to_id=msg_id)
+            msg = FIH_COOLDOWN_MESSAGE.format(m=m, s=s)
+            send_message(GAME_GROUP_ID, f"🎣 {msg}", reply_to_id=msg_id)
             return
-        set_ai_cooldown(sender_id, _fish_last_used)
-        caught = random.randint(POINTS_FISH_MIN, POINTS_FISH_MAX)
-        new_bal = add_points(GAME_GROUP_ID, sender_id, sender_name, caught)
-        messages = [
-            f"🎣 {sender_name} cast their line and reeled in {caught} points! ({new_bal} pts)",
-            f"🐟 A shiny fish! {sender_name} nets {caught} points. ({new_bal} pts)",
-            f"🎣 Splash! {sender_name} caught {caught} points. ({new_bal} pts)",
-        ]
-        send_message(GAME_GROUP_ID, random.choice(messages), reply_to_id=msg_id)
+        set_ai_cooldown(sender_id, _fih_last_used)
+        amt  = random.randint(POINTS_FIH_MIN, POINTS_FIH_MAX)
+        lose = random.random() < POINTS_FIH_LOSE_CHANCE
+        new_bal = add_points(GAME_GROUP_ID, sender_id, sender_name, -amt if lose else amt)
+        pool   = FIH_LOSE_MESSAGES if lose else FIH_WIN_MESSAGES
+        prefix = "🦀 " if lose else "🎣 "
+        text   = random.choice(pool).format(name=sender_name, pts=amt, bal=new_bal)
+        send_message(GAME_GROUP_ID, prefix + text, reply_to_id=msg_id)
         return
 
-    # !crab  — steal a random amount from a random active user
-    if cmd == "!crab":
-        allowed, remaining = check_ai_cooldown(sender_id, _crab_last_used, POINTS_CRAB_CD)
+    # !steal  — steal points from a random active user
+    if cmd == "!steal":
+        allowed, remaining = check_ai_cooldown(sender_id, _steal_last_used, POINTS_STEAL_CD)
         if not allowed:
             m, s = divmod(remaining, 60)
-            send_message(GAME_GROUP_ID,
-                f"🦀 Your crab is resting its claws! Try again in {m}m {s}s.",
-                reply_to_id=msg_id)
+            msg = STEAL_COOLDOWN_MESSAGE.format(m=m, s=s)
+            send_message(GAME_GROUP_ID, f"🦀 {msg}", reply_to_id=msg_id)
             return
-
-        # Pick a victim — someone in the group with > 0 points who isn't the sender
         ledger = load_points(GAME_GROUP_ID)
         victims = [
             (uid, data) for uid, data in ledger.items()
-            if uid != str(sender_id) and data["points"] > 0
+            if uid != str(sender_id) and data.get("points", 0) > 0
         ]
         if not victims:
-            send_message(GAME_GROUP_ID,
-                "🦀 Your crab scuttles around but finds nobody worth pinching!",
-                reply_to_id=msg_id)
+            send_message(GAME_GROUP_ID, f"🦀 {STEAL_EMPTY_MESSAGE}", reply_to_id=msg_id)
             return
-
-        set_ai_cooldown(sender_id, _crab_last_used)
+        set_ai_cooldown(sender_id, _steal_last_used)
         victim_id, victim_data = random.choice(victims)
-        steal_amount = random.randint(POINTS_CRAB_MIN, POINTS_CRAB_MAX)
+        amt = random.randint(POINTS_STEAL_MIN, POINTS_STEAL_MAX)
         taken, v_new, s_new = transfer_points(
-            GAME_GROUP_ID,
-            victim_id, victim_data["name"],
-            sender_id, sender_name,
-            steal_amount,
+            GAME_GROUP_ID, victim_id, victim_data["name"],
+            sender_id, sender_name, amt,
         )
-        messages = [
-            f"🦀 {sender_name}\'s crab pinches {victim_data['name']} for {taken} pts! "
-            f"({sender_name}: {s_new} pts, {victim_data['name']}: {v_new} pts)",
-            f"🦀 Snip snip! {sender_name} steals {taken} pts from {victim_data['name']}. "
-            f"({sender_name}: {s_new} pts)",
-            f"🦀 {victim_data['name']} feels a pinch! {taken} pts stolen by {sender_name}. "
-            f"({sender_name}: {s_new} pts)",
-        ]
-        send_message(GAME_GROUP_ID, random.choice(messages), reply_to_id=msg_id)
+        tmpl = random.choice(STEAL_SUCCESS_MESSAGES)
+        text = tmpl.format(
+            thief=sender_name, victim=victim_data["name"],
+            pts=taken, thief_bal=s_new, victim_bal=v_new,
+        )
+        send_message(GAME_GROUP_ID, f"🦀 {text}", reply_to_id=msg_id)
         return
 
     # !coin <h/t> <bet>  — coin flip gamble
@@ -2920,18 +2953,22 @@ _control_panel_instance = None  # set when panel launches
 
 def _check_for_update():
     """
-    Checks the latest commit on the main branch of the GitHub repo.
+    Checks the latest commit that touched AI-FSY.py specifically.
+    Commits to README, resources, or other files are ignored.
     Returns (sha_short, commit_message, commit_url) or (None, None, None) on failure.
     """
     try:
-        resp = requests.get(GITHUB_COMMITS_URL, timeout=8)
+        api_url = f"https://api.github.com/repos/{GITHUB_REPO}/commits?path=AI-FSY.py&per_page=1"
+        resp = requests.get(api_url, timeout=8)
         if resp.status_code == 200:
             data = resp.json()
-            sha       = data.get("sha", "")
-            sha_short = sha[:7]
-            msg       = data.get("commit", {}).get("message", "").splitlines()[0]
-            url       = data.get("html_url", GITHUB_COMMIT_PAGE)
-            return sha_short, msg, url
+            if data:
+                commit    = data[0]
+                sha       = commit.get("sha", "")
+                sha_short = sha[:7]
+                msg       = commit.get("commit", {}).get("message", "").splitlines()[0]
+                html_url  = commit.get("html_url", GITHUB_COMMIT_PAGE)
+                return sha_short, msg, html_url
     except Exception:
         pass
     return None, None, None
@@ -3257,28 +3294,27 @@ class ControlPanel:
 
         self._cfg_vars = {}
 
+        cfg_now = load_config()
+
         def add_row(row, label, key, show=None):
             tk.Label(grid, text=label, font=("Helvetica", 10),
                      width=22, anchor="w").grid(row=row, column=0, sticky="w", pady=3)
-            var = tk.StringVar(value=load_config().get(key, ""))
+            var = tk.StringVar(value=cfg_now.get(key, ""))
             entry = tk.Entry(grid, textvariable=var, font=("Helvetica", 10),
                              width=34, show=show or "")
             entry.grid(row=row, column=1, sticky="w", pady=3, ipady=3)
             self._cfg_vars[key] = var
+            return entry
 
-        add_row(0, "GroupMe Access Token", "access_token", show="*")
-        add_row(1, "Dev Group ID",          "dev_group_id")
-        add_row(2, "Ollama Base Model",     "ollama_base_model")
+        self._token_entry = add_row(0, "GroupMe Access Token", "access_token", show="*")
+        add_row(1, "Dev Group ID",      "dev_group_id")
+        add_row(2, "Ollama Base Model", "ollama_base_model")
 
-        # Show/hide token toggle
+        # Show/hide token — direct widget ref, no grid_info needed
         self._show_token = False
         def toggle_token():
             self._show_token = not self._show_token
-            for widget in grid.winfo_children():
-                if isinstance(widget, tk.Entry):
-                    info = grid.grid_info(widget)
-                    if info.get("row") == 0:
-                        widget.config(show="" if self._show_token else "*")
+            self._token_entry.config(show="" if self._show_token else "*")
         tk.Button(grid, text="👁 Show/Hide Token", font=("Helvetica", 9),
                   command=toggle_token, relief="flat").grid(row=0, column=2, padx=(6,0))
 
@@ -3291,14 +3327,16 @@ class ControlPanel:
         pg.pack(fill="x", pady=(6, 0))
 
         pts_fields = [
-            ("!fish min",            "fish_min",  str(POINTS_FISH_MIN)),
-            ("!fish max",            "fish_max",  str(POINTS_FISH_MAX)),
-            ("!fish cooldown (s)",   "fish_cd",   str(POINTS_FISH_CD)),
-            ("!crab min",            "crab_min",  str(POINTS_CRAB_MIN)),
-            ("!crab max",            "crab_max",  str(POINTS_CRAB_MAX)),
-            ("!crab cooldown (s)",   "crab_cd",   str(POINTS_CRAB_CD)),
+            ("!fih min",             "fih_min",   str(POINTS_FIH_MIN)),
+            ("!fih max",             "fih_max",   str(POINTS_FIH_MAX)),
+            ("!fih cooldown (s)",    "fih_cd",    str(POINTS_FIH_CD)),
+            ("!fih lose chance",     "fih_lose",  str(POINTS_FIH_LOSE_CHANCE)),
+            ("!steal min",           "steal_min", str(POINTS_STEAL_MIN)),
+            ("!steal max",           "steal_max", str(POINTS_STEAL_MAX)),
+            ("!steal cooldown (s)",  "steal_cd",  str(POINTS_STEAL_CD)),
             ("C4 PvP win pts",       "c4_win",    str(POINTS_C4_WIN)),
             ("C4 vs AI win pts",     "c4_win_ai", str(POINTS_C4_WIN_AI)),
+            ("Leaderboard size",     "lb_size",   str(LEADERBOARD_SIZE)),
         ]
         self._pts_vars = {}
         for r, (lbl, key, default) in enumerate(pts_fields):
@@ -3311,15 +3349,45 @@ class ControlPanel:
                      font=("Helvetica", 10)).grid(row=row_f, column=col_f+1, sticky="w", pady=2, ipady=2)
             self._pts_vars[key] = var
 
+        # ── Message editor
+        ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=10)
+        tk.Label(tab, text="Custom Response Messages",
+                 font=("Helvetica", 12, "bold")).pack(anchor="w")
+        tk.Label(tab,
+                 text="Placeholders — !fih: {name} {pts} {bal}  |  !steal: {thief} {victim} {pts} {thief_bal} {victim_bal}",
+                 font=("Helvetica", 8), fg="#888888").pack(anchor="w", pady=(0, 4))
+        mf = tk.Frame(tab)
+        mf.pack(fill="x")
+        self._msg_vars = {}
+        def add_msg_row(parent, label, initial, key, row):
+            tk.Label(parent, text=label, font=("Helvetica", 9, "bold"),
+                     anchor="w").grid(row=row*2, column=0, sticky="w", pady=(4, 0))
+            var = tk.StringVar(value=initial)
+            tk.Entry(parent, textvariable=var, font=("Helvetica", 9),
+                     width=64).grid(row=row*2+1, column=0, sticky="ew", ipady=2)
+            self._msg_vars[key] = var
+        add_msg_row(mf, "!fih win messages (separate with |)",
+                    " | ".join(FIH_WIN_MESSAGES),           "fih_win",    0)
+        add_msg_row(mf, "!fih lose messages (separate with |)",
+                    " | ".join(FIH_LOSE_MESSAGES),          "fih_lose_m", 1)
+        add_msg_row(mf, "!fih cooldown message",
+                    FIH_COOLDOWN_MESSAGE,                    "fih_cd_m",   2)
+        add_msg_row(mf, "!steal success messages (separate with |)",
+                    " | ".join(STEAL_SUCCESS_MESSAGES),     "steal_ok",   3)
+        add_msg_row(mf, "!steal nobody message",
+                    STEAL_EMPTY_MESSAGE,                     "steal_none", 4)
+        add_msg_row(mf, "!steal cooldown message",
+                    STEAL_COOLDOWN_MESSAGE,                  "steal_cd_m", 5)
+
         # ── Save button ───────────────────────────────────────────────────────
         ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=12)
         btn_row = tk.Frame(tab)
         btn_row.pack(fill="x")
 
         def save_settings():
-            global POINTS_FISH_MIN, POINTS_FISH_MAX, POINTS_FISH_CD
-            global POINTS_CRAB_MIN, POINTS_CRAB_MAX, POINTS_CRAB_CD
-            global POINTS_C4_WIN, POINTS_C4_WIN_AI
+            global POINTS_FIH_MIN, POINTS_FIH_MAX, POINTS_FIH_CD, POINTS_FIH_LOSE_CHANCE
+            global POINTS_STEAL_MIN, POINTS_STEAL_MAX, POINTS_STEAL_CD
+            global POINTS_C4_WIN, POINTS_C4_WIN_AI, LEADERBOARD_SIZE
 
             # Save credentials to config.json
             cfg = load_config()
@@ -3331,18 +3399,30 @@ class ControlPanel:
 
             # Apply points settings immediately
             try:
-                POINTS_FISH_MIN  = int(self._pts_vars["fish_min"].get())
-                POINTS_FISH_MAX  = int(self._pts_vars["fish_max"].get())
-                POINTS_FISH_CD   = int(self._pts_vars["fish_cd"].get())
-                POINTS_CRAB_MIN  = int(self._pts_vars["crab_min"].get())
-                POINTS_CRAB_MAX  = int(self._pts_vars["crab_max"].get())
-                POINTS_CRAB_CD   = int(self._pts_vars["crab_cd"].get())
-                POINTS_C4_WIN    = int(self._pts_vars["c4_win"].get())
-                POINTS_C4_WIN_AI = int(self._pts_vars["c4_win_ai"].get())
+                POINTS_FIH_MIN         = int(self._pts_vars["fih_min"].get())
+                POINTS_FIH_MAX         = int(self._pts_vars["fih_max"].get())
+                POINTS_FIH_CD          = int(self._pts_vars["fih_cd"].get())
+                POINTS_FIH_LOSE_CHANCE = float(self._pts_vars["fih_lose"].get())
+                POINTS_STEAL_MIN       = int(self._pts_vars["steal_min"].get())
+                POINTS_STEAL_MAX       = int(self._pts_vars["steal_max"].get())
+                POINTS_STEAL_CD        = int(self._pts_vars["steal_cd"].get())
+                POINTS_C4_WIN          = int(self._pts_vars["c4_win"].get())
+                POINTS_C4_WIN_AI       = int(self._pts_vars["c4_win_ai"].get())
+                LEADERBOARD_SIZE       = int(self._pts_vars["lb_size"].get())
             except ValueError:
-                messagebox.showerror("Invalid value", "Points values must be whole numbers.")
+                messagebox.showerror("Invalid value", "Lose chance: 0.0–1.0; others must be whole numbers.")
                 return
 
+            global FIH_WIN_MESSAGES, FIH_LOSE_MESSAGES, FIH_COOLDOWN_MESSAGE
+            global STEAL_SUCCESS_MESSAGES, STEAL_EMPTY_MESSAGE, STEAL_COOLDOWN_MESSAGE
+            def _sp(s): return [x.strip() for x in s.split("|") if x.strip()]
+            if hasattr(self, "_msg_vars"):
+                FIH_WIN_MESSAGES       = _sp(self._msg_vars["fih_win"].get())    or FIH_WIN_MESSAGES
+                FIH_LOSE_MESSAGES      = _sp(self._msg_vars["fih_lose_m"].get()) or FIH_LOSE_MESSAGES
+                FIH_COOLDOWN_MESSAGE   = self._msg_vars["fih_cd_m"].get().strip()   or FIH_COOLDOWN_MESSAGE
+                STEAL_SUCCESS_MESSAGES = _sp(self._msg_vars["steal_ok"].get())   or STEAL_SUCCESS_MESSAGES
+                STEAL_EMPTY_MESSAGE    = self._msg_vars["steal_none"].get().strip()  or STEAL_EMPTY_MESSAGE
+                STEAL_COOLDOWN_MESSAGE = self._msg_vars["steal_cd_m"].get().strip()  or STEAL_COOLDOWN_MESSAGE
             self._set_status("Settings saved. Credential changes take effect on next restart.")
 
         tk.Button(btn_row, text="💾  Save Settings", font=("Helvetica", 10, "bold"),

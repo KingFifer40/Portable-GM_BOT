@@ -3657,46 +3657,46 @@ class ControlPanel:
             self._group_listbox.insert("end", f"  {name}  —  {gid}")
         self._set_status(f"Found {len(groups)} group(s).")
 
-     def _set_game_group(self):
-         global GAME_GROUP_ID, ADMIN_GROUP_ID, USE_SUBGROUP, last_game_since_id
-         sel = self._group_listbox.curselection()
-         if not sel:
-             self._set_status("Select a group from the list first.")
-             return
-         name, gid = self._group_data[sel[0]]
+    def _set_game_group(self):
+        global GAME_GROUP_ID, ADMIN_GROUP_ID, USE_SUBGROUP, last_game_since_id
+        sel = self._group_listbox.curselection()
+        if not sel:
+            self._set_status("Select a group from the list first.")
+            return
+        name, gid = self._group_data[sel[0]]
 
-         old_gid = GAME_GROUP_ID
-         GAME_GROUP_ID = gid
-         
-         # Save subgroup mode settings
-         USE_SUBGROUP = self._use_subgroup_var.get()
-         if USE_SUBGROUP:
-             admin_gid_text = self._admin_group_entry.get().strip()
-             if not admin_gid_text:
-                 self._set_status("ERROR: Please enter a Linked Main Group ID for subgroup mode.")
-                 return
-             ADMIN_GROUP_ID = admin_gid_text
-         else:
-             ADMIN_GROUP_ID = None
+        old_gid = GAME_GROUP_ID
+        GAME_GROUP_ID = gid
+        
+        # Save subgroup mode settings
+        USE_SUBGROUP = self._use_subgroup_var.get()
+        if USE_SUBGROUP:
+            admin_gid_text = self._admin_group_entry.get().strip()
+            if not admin_gid_text:
+                self._set_status("ERROR: Please enter a Linked Main Group ID for subgroup mode.")
+                return
+            ADMIN_GROUP_ID = admin_gid_text
+        else:
+            ADMIN_GROUP_ID = None
 
-         cfg = load_config()
-         cfg["game_group_id"] = gid
-         cfg["use_subgroup_mode"] = USE_SUBGROUP
-         if USE_SUBGROUP:
-             cfg["admin_group_id"] = ADMIN_GROUP_ID
-         save_config(cfg)
+        cfg = load_config()
+        cfg["game_group_id"] = gid
+        cfg["use_subgroup_mode"] = USE_SUBGROUP
+        if USE_SUBGROUP:
+            cfg["admin_group_id"] = ADMIN_GROUP_ID
+        save_config(cfg)
 
-         def notify():
-             if old_gid and old_gid != gid:
-                 send_message(old_gid, "Connect Four bot has been removed from this group.")
-             send_message(gid, "Connect Four bot has been added to this group.")
-             send_message(gid, "Admins: use #state all true/false to enable or disable the bot.")
-             global last_game_since_id
-             last_game_since_id = get_latest_message_id(gid) or "0"
+        def notify():
+            if old_gid and old_gid != gid:
+                send_message(old_gid, "Connect Four bot has been removed from this group.")
+            send_message(gid, "Connect Four bot has been added to this group.")
+            send_message(gid, "Admins: use #state all true/false to enable or disable the bot.")
+            global last_game_since_id
+            last_game_since_id = get_latest_message_id(gid) or "0"
 
-         threading.Thread(target=notify, daemon=True).start()
-         self._set_status(f"Game group set to: {name} ({gid})" + 
-                         (f" [subgroup mode, admin group: {ADMIN_GROUP_ID}]" if USE_SUBGROUP else ""))
+        threading.Thread(target=notify, daemon=True).start()
+        self._set_status(f"Game group set to: {name} ({gid})" + 
+                        (f" [subgroup mode, admin group: {ADMIN_GROUP_ID}]" if USE_SUBGROUP else ""))
 
     def _send_group_message(self):
         global GAME_GROUP_ID

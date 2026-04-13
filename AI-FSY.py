@@ -7,6 +7,7 @@ import subprocess
 # This means a fresh clone only needs Python installed; everything else is
 # handled automatically.
 # ─────────────────────────────────────────────────────────────────────────────
+
 def _bootstrap_dependencies():
     required = ["requests"]
     for pkg in required:

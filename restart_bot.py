@@ -139,8 +139,8 @@ def main():
         print("[restart] FAILED: Could not stop running instance.")
         sys.exit(1)
     
-    # Step 2: Wait a moment for all file handles to release
-    time.sleep(1)
+    # Step 2: Wait longer for all file handles to release (critical for Windows)
+    time.sleep(3)
     
     # Step 3: Double-check lock file is gone
     if os.path.exists(LOCK_FILE):

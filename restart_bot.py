@@ -79,34 +79,39 @@ def stop_running_instance():
         time.sleep(0.1)
         if not pid_is_running(pid):
             print(f"[restart] Process stopped cleanly.")
-            # Clean up lock file
-            try:
-                os.remove(LOCK_FILE)
-            except OSError:
-                pass
+            break
+    else:
+        # After 5 seconds, still running
+        print(f"[restart] WARNING: Process did not stop gracefully after 5 seconds.")
+        print(f"[restart] Forcing termination...")
+        try:
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5
+                )
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except Exception as e:
+            print(f"[restart] Error force-killing: {e}")
+    
+    # Wait for lock file to be cleaned up by the stopped process
+    print("[restart] Waiting for lock file to be released...")
+    for attempt in range(50):
+        time.sleep(0.1)
+        if not os.path.exists(LOCK_FILE):
+            print("[restart] Lock file released.")
             return True
     
-    print(f"[restart] WARNING: Process did not stop gracefully after 5 seconds.")
-    print(f"[restart] Forcing termination...")
-    try:
-        if sys.platform == "win32":
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/F"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=5
-            )
-        else:
-            os.kill(pid, signal.SIGKILL)
-    except Exception as e:
-        print(f"[restart] Error force-killing: {e}")
-    
-    # Final cleanup
-    time.sleep(1)
+    # If lock file still exists, force remove it
+    print("[restart] Lock file still exists. Force removing...")
     try:
         os.remove(LOCK_FILE)
-    except OSError:
-        pass
+        print("[restart] Lock file force-removed.")
+    except OSError as e:
+        print(f"[restart] WARNING: Could not remove lock file: {e}")
     
     return True
 
@@ -134,10 +139,18 @@ def main():
         print("[restart] FAILED: Could not stop running instance.")
         sys.exit(1)
     
-    # Step 2: Wait a moment for file locks to release
+    # Step 2: Wait a moment for all file handles to release
     time.sleep(1)
     
-    # Step 3: Start the bot
+    # Step 3: Double-check lock file is gone
+    if os.path.exists(LOCK_FILE):
+        print("[restart] Lock file still present. Force removing...")
+        try:
+            os.remove(LOCK_FILE)
+        except OSError as e:
+            print(f"[restart] WARNING: Could not remove lock file: {e}")
+    
+    # Step 4: Start the bot
     if not start_bot():
         print("[restart] FAILED: Could not start bot.")
         sys.exit(1)

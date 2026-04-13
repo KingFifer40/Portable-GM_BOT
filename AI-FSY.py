@@ -13,14 +13,85 @@ def _bootstrap_dependencies():
         try:
             __import__(pkg)
         except ImportError:
-            print(f"[setup] Installing missing package: {pkg}")
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", pkg],
-                stdout=subprocess.DEVNULL,
-            )
-            print(f"[setup] {pkg} installed.")
+            print(f"[setup] Package '{pkg}' is not installed. Attempting to install...")
+            try:
+                subprocess.check_call(
+                    [sys.executable, "-m", "pip", "install", "--user", pkg],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                __import__(pkg)
+                print(f"[setup] '{pkg}' installed successfully.")
+            except Exception as e:
+                print()
+                print(f"  ERROR: Could not install '{pkg}' automatically.")
+                print(f"  This sometimes happens when Windows Defender or a firewall")
+                print(f"  blocks pip. Please install it manually by running:")
+                print()
+                print(f"      pip install {pkg}")
+                print()
+                print(f"  Then run the bot again. (Error detail: {e})")
+                print()
+                input("Press Enter to exit...")
+                sys.exit(1)
 
 _bootstrap_dependencies()
+
+# ---------------------------------------------------------
+# Single-instance lock — prevents running two copies at once.
+# Uses a lockfile next to the script. Restarts are safe because
+# the new process acquires the lock after the old one releases it.
+# ---------------------------------------------------------
+import atexit
+
+_LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot.lock")
+
+def _acquire_instance_lock():
+    """
+    Writes our PID to .bot.lock. If a lock file already exists and the
+    PID inside it belongs to a running process, we refuse to start.
+    """
+    def _pid_running(pid):
+        try:
+            if sys.platform == "win32":
+                import ctypes
+                handle = ctypes.windll.kernel32.OpenProcess(0x0400, False, pid)
+                if handle:
+                    ctypes.windll.kernel32.CloseHandle(handle)
+                    return True
+                return False
+            else:
+                os.kill(pid, 0)
+                return True
+        except Exception:
+            return False
+
+    if os.path.exists(_LOCK_FILE):
+        try:
+            with open(_LOCK_FILE, "r") as f:
+                old_pid = int(f.read().strip())
+            if _pid_running(old_pid) and old_pid != os.getpid():
+                print()
+                print(f"  ERROR: Another instance of the bot is already running (PID {old_pid}).")
+                print("  Close the other instance first, then try again.")
+                print()
+                input("Press Enter to exit...")
+                sys.exit(1)
+        except (ValueError, OSError):
+            pass  # stale / corrupt lock — overwrite it
+
+    with open(_LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+    def _release_lock():
+        try:
+            os.remove(_LOCK_FILE)
+        except OSError:
+            pass
+
+    atexit.register(_release_lock)
+
+_acquire_instance_lock()
 
 # Standard library + now-guaranteed third-party imports
 sys.stdout.reconfigure(encoding='utf-8')
@@ -735,10 +806,193 @@ game_state = {
 }
 
 # Emoji pieces
-EMPTY = "⚫"
-P1 = "🔴"
-P2 = "🟡"
+EMPTY    = "⚫"
+P1       = "🔴"
+P2       = "🟡"
 AI_PIECE = "🟢"
+
+# Column indicator emojis — one per column A-G
+# These replace the full-width letter header so the grid aligns in GroupMe
+COL_EMOJIS = ["🔵", "🟠", "🟤", "🟣", "🔶", "🔷", "🟥"]
+# Map from emoji → column index (mirrors COL_EMOJIS)
+EMOJI_TO_COL = {e: i for i, e in enumerate(COL_EMOJIS)}
+# Key shown to players
+COL_KEY = "  ".join(f"{e}={chr(65+i)}" for i, e in enumerate(COL_EMOJIS))
+
+
+# ---------------------------------------------------------
+# Per-group persistent config
+# Each game group gets its own JSON file: groups/<group_id>.json
+# This stores feature toggles, game timeout, etc. separately
+# so switching groups preserves each group's settings.
+# ---------------------------------------------------------
+
+
+# =============================================================================
+# POINTS SYSTEM
+# Points are stored per-group in groups/<group_id>_points.json
+# Format: { "user_id": {"name": str, "points": int} }
+# =============================================================================
+
+import math
+
+POINTS_FISH_MIN   = 5    # minimum points from !fish
+POINTS_FISH_MAX   = 40   # maximum points from !fish
+POINTS_FISH_CD    = 300  # !fish cooldown in seconds (5 min)
+POINTS_CRAB_MIN   = 5    # minimum points stolen by !crab
+POINTS_CRAB_MAX   = 30   # maximum points stolen by !crab
+POINTS_CRAB_CD    = 300  # !crab cooldown in seconds
+POINTS_C4_WIN     = 50   # points winner gains (taken from loser in PvP)
+POINTS_C4_WIN_AI  = 25   # points gained for beating the AI
+
+_fish_last_used  = {}    # {user_id: timestamp}
+_crab_last_used  = {}    # {user_id: timestamp}
+
+
+def _points_path(group_id):
+    groups_dir = os.path.join(SCRIPT_DIR, "groups")
+    os.makedirs(groups_dir, exist_ok=True)
+    return os.path.join(groups_dir, f"{group_id}_points.json")
+
+
+def load_points(group_id):
+    """Load points ledger for a group. Returns {}."""
+    if not group_id:
+        return {}
+    path = _points_path(group_id)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_points(group_id, data):
+    """Persist points ledger."""
+    if not group_id:
+        return
+    try:
+        with open(_points_path(group_id), "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"Warning: could not save points for {group_id}: {e}")
+
+
+def get_points(group_id, user_id, name=None):
+    """Return current points for a user (creates entry if missing)."""
+    ledger = load_points(group_id)
+    uid = str(user_id)
+    if uid not in ledger:
+        ledger[uid] = {"name": name or uid, "points": 0}
+        save_points(group_id, ledger)
+    elif name and ledger[uid].get("name") != name:
+        ledger[uid]["name"] = name
+        save_points(group_id, ledger)
+    return ledger[uid]["points"]
+
+
+def add_points(group_id, user_id, name, delta):
+    """Add (or subtract) points. Returns new total. Cannot go below 0."""
+    ledger = load_points(group_id)
+    uid = str(user_id)
+    if uid not in ledger:
+        ledger[uid] = {"name": name, "points": 0}
+    else:
+        ledger[uid]["name"] = name
+    ledger[uid]["points"] = max(0, ledger[uid]["points"] + delta)
+    save_points(group_id, ledger)
+    return ledger[uid]["points"]
+
+
+def transfer_points(group_id, from_id, from_name, to_id, to_name, amount):
+    """Move up to `amount` points from one user to another. Returns (taken, giver_new, receiver_new)."""
+    ledger = load_points(group_id)
+    for uid, nm in [(str(from_id), from_name), (str(to_id), to_name)]:
+        if uid not in ledger:
+            ledger[uid] = {"name": nm, "points": 0}
+        else:
+            ledger[uid]["name"] = nm
+    taken = min(amount, ledger[str(from_id)]["points"])
+    ledger[str(from_id)]["points"] -= taken
+    ledger[str(to_id)]["points"]   += taken
+    save_points(group_id, ledger)
+    return taken, ledger[str(from_id)]["points"], ledger[str(to_id)]["points"]
+
+
+def points_leaderboard(group_id, top_n=10):
+    """Return top_n entries sorted by points descending."""
+    ledger = load_points(group_id)
+    ranked = sorted(ledger.values(), key=lambda e: e["points"], reverse=True)
+    return ranked[:top_n]
+
+def _group_config_path(group_id):
+    groups_dir = os.path.join(SCRIPT_DIR, "groups")
+    os.makedirs(groups_dir, exist_ok=True)
+    return os.path.join(groups_dir, f"{group_id}.json")
+
+
+def load_group_config(group_id):
+    """Load per-group settings. Returns {} if none saved yet."""
+    if not group_id:
+        return {}
+    path = _group_config_path(group_id)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_group_config(group_id, data):
+    """Persist per-group settings."""
+    if not group_id:
+        return
+    path = _group_config_path(group_id)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"Warning: could not save group config for {group_id}: {e}")
+
+
+def apply_group_config(group_id):
+    """
+    Load saved feature toggles / timeout for the given group
+    and apply them to the running globals.
+    Called whenever the active group changes.
+    """
+    global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED
+    global SCRIPTURE_ENABLED, CONNECT4_ENABLED, GAME_TIMEOUT_SECONDS
+    cfg = load_group_config(group_id)
+    GAME_ENABLED      = cfg.get("game_enabled",      True)
+    AI_ENABLED        = cfg.get("ai_enabled",         True)
+    EIGHTBALL_ENABLED = cfg.get("eightball_enabled",  True)
+    SCRIPTURE_ENABLED = cfg.get("scripture_enabled",  True)
+    CONNECT4_ENABLED  = cfg.get("connect4_enabled",   True)
+    GAME_TIMEOUT_SECONDS = cfg.get("game_timeout",    300)
+
+
+def snapshot_group_config(group_id):
+    """
+    Save the current feature toggles / timeout for the active group.
+    Call this whenever a toggle changes so it survives restarts.
+    """
+    if not group_id:
+        return
+    existing = load_group_config(group_id)
+    existing.update({
+        "game_enabled":      GAME_ENABLED,
+        "ai_enabled":        AI_ENABLED,
+        "eightball_enabled": EIGHTBALL_ENABLED,
+        "scripture_enabled": SCRIPTURE_ENABLED,
+        "connect4_enabled":  CONNECT4_ENABLED,
+        "game_timeout":      GAME_TIMEOUT_SECONDS,
+    })
+    save_group_config(group_id, existing)
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
@@ -903,35 +1157,26 @@ def init_board():
 
 
 def cf_board_to_text(board):
-    # Full-width column labels
-    FIG = "\u2007"
-    header = FIG*3 + "Ａ" + FIG*2 + "Ｂ" + FIG*2 + "Ｃ" + FIG*2 + "Ｄ" + FIG*2 + "Ｅ" + FIG*2 + "Ｆ" + FIG*2 + "Ｇ"
+    """
+    Renders the board with colored-circle column headers instead of letters.
+    Emoji headers align correctly in GroupMe regardless of font settings.
+    A color key is appended so players know which emoji = which column.
+    """
+    header = "".join(COL_EMOJIS)
     rows = [header]
-
-    # Full-width digits for row numbers
-    fullwidth_digits = ["１", "２", "３", "４", "５", "６"]
-
     for r in range(6):
-        row_label = fullwidth_digits[r]
-        FIG = "\u2007"  # figure space
-        row = f"{row_label}{FIG}" + FIG.join(board[r])
-        rows.append(row)
-
+        rows.append("".join(board[r]))
+    rows.append(COL_KEY)
     return "\n".join(rows)
 
 
 def column_letter_to_index(letter):
-    letter = letter.upper()
-    mapping = {
-        "A": 0,
-        "B": 1,
-        "C": 2,
-        "D": 3,
-        "E": 4,
-        "F": 5,
-        "G": 6,
-    }
-    return mapping.get(letter)
+    """Accepts a letter (A-G) or a column emoji (🔵🟠🟤🟣🔶🔷🟥)."""
+    # Try emoji first
+    if letter in EMOJI_TO_COL:
+        return EMOJI_TO_COL[letter]
+    mapping = {"A": 0, "B": 1, "C": 2, "D": 3, "E": 4, "F": 5, "G": 6}
+    return mapping.get(letter.upper())
 
 
 def drop_piece(board, col_idx, symbol):
@@ -1260,7 +1505,9 @@ def handle_dev_command(message):
         old_gid = GAME_GROUP_ID
         GAME_GROUP_ID = new_gid
 
-        save_config({"game_group_id": GAME_GROUP_ID})
+        cfg = load_config()
+        cfg["game_group_id"] = GAME_GROUP_ID
+        save_config(cfg)
 
         if old_gid and old_gid != new_gid:
             send_message(old_gid, "Connect Four bot has been removed from this group.")
@@ -1272,6 +1519,7 @@ def handle_dev_command(message):
         if last_game_since_id is None:
             last_game_since_id = "0"
 
+        apply_group_config(new_gid)
         send_message(DEV_GROUP_ID, f"Game group set to {new_gid}", reply_to_id=msg_id)
         return
 
@@ -1454,7 +1702,7 @@ def handle_game_command(message):
     if text.startswith("?"):
         if GAME_ENABLED and EIGHTBALL_ENABLED:
             answer = random.choice(EIGHTBALL_ANSWERS)
-            send_message(GAME_GROUP_ID, f"🎱 {answer}", reply_to_id=msg_id)
+            send_message(GAME_GROUP_ID, answer, reply_to_id=msg_id)
         return
 
     # Split AFTER checking for 8-ball
@@ -1695,11 +1943,29 @@ def handle_game_command(message):
                 send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
                 return
 
+            # POINTS HELP
+            if topic == "points":
+                help_text = (
+                    "\U0001f4b0 *Points Commands:*\n"
+                    "\u2022 !points \u2014 Check your point balance\n"
+                    "\u2022 !fish \u2014 Fish for points (5 min cooldown)\n"
+                    "\u2022 !crab \u2014 Steal points from a random person (5 min cooldown)\n"
+                    "\u2022 !coin <h/t> <bet> \u2014 Flip a coin to gamble points\n"
+                    "  Example: !coin h 50\n"
+                    "\u2022 #leaderboard \u2014 Top 10 points ranking\n"
+                    "\n"
+                    "Points are also earned/lost in Connect Four:\n"
+                    "PvP win: steal pts from loser\n"
+                    "vs AI win: earn bonus pts"
+                )
+                send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
+                return
+
             # Unknown topic
             send_message(
                 GAME_GROUP_ID,
                 "Unknown help topic.\n"
-                "Try: #help game, #help 8ball, #help scripture, #help ai, #help admin",
+                "Try: #help game, #help 8ball, #help scripture, #help ai, #help points, #help admin",
                 reply_to_id=msg_id,
             )
             return
@@ -1713,6 +1979,7 @@ def handle_game_command(message):
             "• #help 8ball      — Magic 8-Ball\n"
             "• #help scripture  — Bible & Book of Mormon\n"
             "• #help ai         — AI chat & personality\n"
+            "• #help points     — Points, fishing, crab & coin\n"
             "• #help admin      — Admin feature controls\n"
             "\n"
             "Quick tip: start any message with ? for the 8-Ball!"
@@ -2119,18 +2386,22 @@ def handle_game_command(message):
 
         elif feature == "ai":
             AI_ENABLED = val
+            snapshot_group_config(GAME_GROUP_ID)
             send_message(GAME_GROUP_ID, f"AI Chat {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
 
         elif feature == "8ball":
             EIGHTBALL_ENABLED = val
+            snapshot_group_config(GAME_GROUP_ID)
             send_message(GAME_GROUP_ID, f"Magic 8-Ball {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
 
         elif feature == "scripture":
             SCRIPTURE_ENABLED = val
+            snapshot_group_config(GAME_GROUP_ID)
             send_message(GAME_GROUP_ID, f"Scripture commands {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
 
         elif feature == "connect4":
             CONNECT4_ENABLED = val
+            snapshot_group_config(GAME_GROUP_ID)
             send_message(GAME_GROUP_ID, f"Connect Four {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
 
         else:
@@ -2263,13 +2534,11 @@ def handle_game_command(message):
         send_message(GAME_GROUP_ID, f"Game timeout set to {val} seconds.", reply_to_id=msg_id)
         return
 
-    # Column moves (#A–#G)
-    if len(cmd) == 2:
-        col_letter = cmd[1]
-        col_idx = column_letter_to_index(col_letter)
-        if col_idx is None:
-            send_message(GAME_GROUP_ID, "Invalid column. Use #A through #G.", reply_to_id=msg_id)
-            return
+    # Column moves — #A through #G  OR  #🔵 #🟠 #🟤 #🟣 #🔶 #🔷 #🟥
+    raw_col = cmd[1:] if cmd.startswith("#") else ""
+    col_idx  = column_letter_to_index(raw_col) if raw_col else None
+    if col_idx is not None:
+        col_letter = raw_col  # keep for display; could be letter or emoji
 
         if not CONNECT4_ENABLED:
             send_message(GAME_GROUP_ID, "🎮 Connect Four is currently disabled.", reply_to_id=msg_id)
@@ -2299,9 +2568,24 @@ def handle_game_command(message):
 
         if check_winner(game_state["board"], symbol):
             board_text = cf_board_to_text(game_state["board"])
+            # Award points — PvP: take from loser; vs AI: flat bonus
+            points_msg = ""
+            opponent_id = None
+            for pid in game_state["turn_order"]:
+                if pid != sender_id and pid != "AI":
+                    opponent_id = pid
+            if opponent_id:
+                opp_name = game_state["players"][opponent_id]["name"]
+                taken, opp_new, win_new = transfer_points(
+                    GAME_GROUP_ID, opponent_id, opp_name, sender_id, sender_name, POINTS_C4_WIN
+                )
+                points_msg = f"\n\n🏆 {sender_name} wins {taken} pts from {opp_name}! ({win_new} pts)"
+            else:
+                win_new = add_points(GAME_GROUP_ID, sender_id, sender_name, POINTS_C4_WIN_AI)
+                points_msg = f"\n\n🏆 {sender_name} earns {POINTS_C4_WIN_AI} pts! ({win_new} pts)"
             send_message(
                 GAME_GROUP_ID,
-                f"{sender_name} wins!\n\n{board_text}",
+                f"{sender_name} wins!\n\n{board_text}{points_msg}",
                 reply_to_id=msg_id,
             )
             reset_game_state()
@@ -2351,9 +2635,17 @@ def handle_game_command(message):
             # AI win?
             if check_winner(game_state["board"], AI_PIECE):
                 board_text = cf_board_to_text(game_state["board"])
+                # Player loses points to the AI (capped at their balance)
+                human_id   = game_state["turn_order"][0]
+                human_name = game_state["players"][human_id]["name"]
+                lost = min(POINTS_C4_WIN_AI, max(0, get_points(GAME_GROUP_ID, human_id, human_name)))
+                if lost:
+                    add_points(GAME_GROUP_ID, human_id, human_name, -lost)
+                new_bal = get_points(GAME_GROUP_ID, human_id, human_name)
+                pts_msg = f"\n\n😢 {human_name} loses {lost} pts to the AI. ({new_bal} pts)"
                 send_message(
                     GAME_GROUP_ID,
-                    f"AI plays column {chr(ai_col + 65)}.\nAI wins!\n\n{board_text}",
+                    f"AI plays column {chr(ai_col + 65)}.\nAI wins!\n\n{board_text}{pts_msg}",
                     reply_to_id=msg_id,
                 )
                 reset_game_state()
@@ -2390,6 +2682,136 @@ def handle_game_command(message):
             f"It is now {next_player_name}'s turn.\n\n{board_text}",
             reply_to_id=msg_id,
         )
+        return
+
+
+    # ── POINTS COMMANDS ──────────────────────────────────────────────────────
+
+    # !points  — check own balance
+    if cmd == "!points":
+        bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
+        send_message(GAME_GROUP_ID, f"💰 {sender_name} has {bal} points.", reply_to_id=msg_id)
+        return
+
+    # #leaderboard
+    if cmd == "#leaderboard":
+        board_entries = points_leaderboard(GAME_GROUP_ID, top_n=10)
+        if not board_entries:
+            send_message(GAME_GROUP_ID, "No points earned yet in this group!", reply_to_id=msg_id)
+            return
+        medals = ["🥇", "🥈", "🥉"] + ["   "] * 7
+        lines = ["🏆 Points Leaderboard:"]
+        for i, entry in enumerate(board_entries):
+            lines.append(f"{medals[i]} {entry['name']}: {entry['points']} pts")
+        send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
+        return
+
+    # !fish  — reel in some points
+    if cmd == "!fish":
+        allowed, remaining = check_ai_cooldown(sender_id, _fish_last_used, POINTS_FISH_CD)
+        if not allowed:
+            m, s = divmod(remaining, 60)
+            send_message(GAME_GROUP_ID,
+                f"🎣 Your line is still in the water! Try again in {m}m {s}s.",
+                reply_to_id=msg_id)
+            return
+        set_ai_cooldown(sender_id, _fish_last_used)
+        caught = random.randint(POINTS_FISH_MIN, POINTS_FISH_MAX)
+        new_bal = add_points(GAME_GROUP_ID, sender_id, sender_name, caught)
+        messages = [
+            f"🎣 {sender_name} cast their line and reeled in {caught} points! ({new_bal} pts)",
+            f"🐟 A shiny fish! {sender_name} nets {caught} points. ({new_bal} pts)",
+            f"🎣 Splash! {sender_name} caught {caught} points. ({new_bal} pts)",
+        ]
+        send_message(GAME_GROUP_ID, random.choice(messages), reply_to_id=msg_id)
+        return
+
+    # !crab  — steal a random amount from a random active user
+    if cmd == "!crab":
+        allowed, remaining = check_ai_cooldown(sender_id, _crab_last_used, POINTS_CRAB_CD)
+        if not allowed:
+            m, s = divmod(remaining, 60)
+            send_message(GAME_GROUP_ID,
+                f"🦀 Your crab is resting its claws! Try again in {m}m {s}s.",
+                reply_to_id=msg_id)
+            return
+
+        # Pick a victim — someone in the group with > 0 points who isn't the sender
+        ledger = load_points(GAME_GROUP_ID)
+        victims = [
+            (uid, data) for uid, data in ledger.items()
+            if uid != str(sender_id) and data["points"] > 0
+        ]
+        if not victims:
+            send_message(GAME_GROUP_ID,
+                "🦀 Your crab scuttles around but finds nobody worth pinching!",
+                reply_to_id=msg_id)
+            return
+
+        set_ai_cooldown(sender_id, _crab_last_used)
+        victim_id, victim_data = random.choice(victims)
+        steal_amount = random.randint(POINTS_CRAB_MIN, POINTS_CRAB_MAX)
+        taken, v_new, s_new = transfer_points(
+            GAME_GROUP_ID,
+            victim_id, victim_data["name"],
+            sender_id, sender_name,
+            steal_amount,
+        )
+        messages = [
+            f"🦀 {sender_name}\'s crab pinches {victim_data['name']} for {taken} pts! "
+            f"({sender_name}: {s_new} pts, {victim_data['name']}: {v_new} pts)",
+            f"🦀 Snip snip! {sender_name} steals {taken} pts from {victim_data['name']}. "
+            f"({sender_name}: {s_new} pts)",
+            f"🦀 {victim_data['name']} feels a pinch! {taken} pts stolen by {sender_name}. "
+            f"({sender_name}: {s_new} pts)",
+        ]
+        send_message(GAME_GROUP_ID, random.choice(messages), reply_to_id=msg_id)
+        return
+
+    # !coin <h/t> <bet>  — coin flip gamble
+    if cmd == "!coin":
+        if len(parts) < 3:
+            send_message(GAME_GROUP_ID,
+                "Usage: !coin <h/t> <points>\nExample: !coin h 50",
+                reply_to_id=msg_id)
+            return
+        side_arg = parts[1].lower()
+        if side_arg not in ("h", "t", "heads", "tails"):
+            send_message(GAME_GROUP_ID, "Choose h (heads) or t (tails).", reply_to_id=msg_id)
+            return
+        try:
+            bet = int(parts[2])
+            if bet <= 0:
+                raise ValueError
+        except ValueError:
+            send_message(GAME_GROUP_ID, "Bet must be a positive whole number.", reply_to_id=msg_id)
+            return
+
+        bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
+        if bet > bal:
+            send_message(GAME_GROUP_ID,
+                f"💸 You only have {bal} points — you can\'t bet {bet}!",
+                reply_to_id=msg_id)
+            return
+
+        chosen_heads = side_arg in ("h", "heads")
+        send_message(GAME_GROUP_ID, "🪙 Flipping coin...", reply_to_id=msg_id)
+        time.sleep(1.2)
+
+        result_heads = random.random() < 0.5
+        result_word  = "Heads" if result_heads else "Tails"
+        won = (chosen_heads == result_heads)
+
+        if won:
+            new_bal = add_points(GAME_GROUP_ID, sender_id, sender_name, bet)
+            send_message(GAME_GROUP_ID,
+                f"🪙 {result_word}! {sender_name} wins {bet} points! ({new_bal} pts)",
+                reply_to_id=msg_id)
+        else:
+            new_bal = add_points(GAME_GROUP_ID, sender_id, sender_name, -bet)
+            send_message(GAME_GROUP_ID,
+                f"🪙 {result_word}! {sender_name} loses {bet} points. ({new_bal} pts)",
+                reply_to_id=msg_id)
         return
 
     # Unknown command
@@ -2600,6 +3022,7 @@ class ControlPanel:
         self._build_tab_status(nb)
         self._build_tab_groups(nb)
         self._build_tab_ai(nb)
+        self._build_tab_settings(nb)
         self._build_tab_update(nb)
 
     # ── Tab: Status & Features ────────────────────────────────────────────────
@@ -2816,6 +3239,122 @@ class ControlPanel:
                   relief="flat", padx=12, pady=6).pack(anchor="e", pady=(10, 0))
 
     # ── Tab: Update ───────────────────────────────────────────────────────────
+
+    # ── Tab: Settings ────────────────────────────────────────────────────────
+
+    def _build_tab_settings(self, nb):
+        import tkinter as tk
+        from tkinter import ttk, messagebox
+
+        tab = tk.Frame(nb, padx=16, pady=12)
+        nb.add(tab, text="  Settings  ")
+
+        # ── Credentials ───────────────────────────────────────────────────────
+        tk.Label(tab, text="Bot Credentials",
+                 font=("Helvetica", 12, "bold")).pack(anchor="w")
+        tk.Label(tab, text="Changes are saved to config.json and take effect on next restart.",
+                 font=("Helvetica", 9), fg="#888888").pack(anchor="w", pady=(0, 8))
+
+        grid = tk.Frame(tab)
+        grid.pack(fill="x")
+
+        self._cfg_vars = {}
+
+        def add_row(row, label, key, show=None):
+            tk.Label(grid, text=label, font=("Helvetica", 10),
+                     width=22, anchor="w").grid(row=row, column=0, sticky="w", pady=3)
+            var = tk.StringVar(value=load_config().get(key, ""))
+            entry = tk.Entry(grid, textvariable=var, font=("Helvetica", 10),
+                             width=34, show=show or "")
+            entry.grid(row=row, column=1, sticky="w", pady=3, ipady=3)
+            self._cfg_vars[key] = var
+
+        add_row(0, "GroupMe Access Token", "access_token", show="*")
+        add_row(1, "Dev Group ID",          "dev_group_id")
+        add_row(2, "Ollama Base Model",     "ollama_base_model")
+
+        # Show/hide token toggle
+        self._show_token = False
+        def toggle_token():
+            self._show_token = not self._show_token
+            for widget in grid.winfo_children():
+                if isinstance(widget, tk.Entry):
+                    info = grid.grid_info(widget)
+                    if info.get("row") == 0:
+                        widget.config(show="" if self._show_token else "*")
+        tk.Button(grid, text="👁 Show/Hide Token", font=("Helvetica", 9),
+                  command=toggle_token, relief="flat").grid(row=0, column=2, padx=(6,0))
+
+        # ── Points tuning ─────────────────────────────────────────────────────
+        ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=12)
+        tk.Label(tab, text="Points System",
+                 font=("Helvetica", 12, "bold")).pack(anchor="w")
+
+        pg = tk.Frame(tab)
+        pg.pack(fill="x", pady=(6, 0))
+
+        pts_fields = [
+            ("!fish min",            "fish_min",  str(POINTS_FISH_MIN)),
+            ("!fish max",            "fish_max",  str(POINTS_FISH_MAX)),
+            ("!fish cooldown (s)",   "fish_cd",   str(POINTS_FISH_CD)),
+            ("!crab min",            "crab_min",  str(POINTS_CRAB_MIN)),
+            ("!crab max",            "crab_max",  str(POINTS_CRAB_MAX)),
+            ("!crab cooldown (s)",   "crab_cd",   str(POINTS_CRAB_CD)),
+            ("C4 PvP win pts",       "c4_win",    str(POINTS_C4_WIN)),
+            ("C4 vs AI win pts",     "c4_win_ai", str(POINTS_C4_WIN_AI)),
+        ]
+        self._pts_vars = {}
+        for r, (lbl, key, default) in enumerate(pts_fields):
+            row_f = r // 2
+            col_f = (r % 2) * 3
+            tk.Label(pg, text=lbl, font=("Helvetica", 9),
+                     width=18, anchor="w").grid(row=row_f, column=col_f, sticky="w", pady=2)
+            var = tk.StringVar(value=default)
+            tk.Entry(pg, textvariable=var, width=7,
+                     font=("Helvetica", 10)).grid(row=row_f, column=col_f+1, sticky="w", pady=2, ipady=2)
+            self._pts_vars[key] = var
+
+        # ── Save button ───────────────────────────────────────────────────────
+        ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=12)
+        btn_row = tk.Frame(tab)
+        btn_row.pack(fill="x")
+
+        def save_settings():
+            global POINTS_FISH_MIN, POINTS_FISH_MAX, POINTS_FISH_CD
+            global POINTS_CRAB_MIN, POINTS_CRAB_MAX, POINTS_CRAB_CD
+            global POINTS_C4_WIN, POINTS_C4_WIN_AI
+
+            # Save credentials to config.json
+            cfg = load_config()
+            for key, var in self._cfg_vars.items():
+                val = var.get().strip()
+                if val:
+                    cfg[key] = val
+            save_config(cfg)
+
+            # Apply points settings immediately
+            try:
+                POINTS_FISH_MIN  = int(self._pts_vars["fish_min"].get())
+                POINTS_FISH_MAX  = int(self._pts_vars["fish_max"].get())
+                POINTS_FISH_CD   = int(self._pts_vars["fish_cd"].get())
+                POINTS_CRAB_MIN  = int(self._pts_vars["crab_min"].get())
+                POINTS_CRAB_MAX  = int(self._pts_vars["crab_max"].get())
+                POINTS_CRAB_CD   = int(self._pts_vars["crab_cd"].get())
+                POINTS_C4_WIN    = int(self._pts_vars["c4_win"].get())
+                POINTS_C4_WIN_AI = int(self._pts_vars["c4_win_ai"].get())
+            except ValueError:
+                messagebox.showerror("Invalid value", "Points values must be whole numbers.")
+                return
+
+            self._set_status("Settings saved. Credential changes take effect on next restart.")
+
+        tk.Button(btn_row, text="💾  Save Settings", font=("Helvetica", 10, "bold"),
+                  command=save_settings,
+                  bg="#007aff", fg="white", relief="flat",
+                  padx=14, pady=7).pack(side="right")
+        tk.Label(btn_row,
+                 text="Credential changes require a restart to take effect.",
+                 font=("Helvetica", 9), fg="#888888").pack(side="left")
 
     def _build_tab_update(self, nb):
         import tkinter as tk
@@ -3142,6 +3681,8 @@ def launch_control_panel():
         import tkinter as tk
         root = tk.Tk()
         _control_panel_instance = ControlPanel(root)
+        # Closing the window shuts down the whole bot cleanly
+        root.protocol("WM_DELETE_WINDOW", _control_panel_instance._stop_bot)
         root.mainloop()
         return True
     except Exception as e:
@@ -3184,6 +3725,7 @@ def main():
         else:
             last_game_since_id = str(int(latest) + 1)
 
+        apply_group_config(GAME_GROUP_ID)
         send_message(GAME_GROUP_ID, "Connect Four bot is now online.")
         send_message(
             GAME_GROUP_ID,

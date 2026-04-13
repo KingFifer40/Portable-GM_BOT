@@ -3060,7 +3060,7 @@ def _do_self_update():
     """
     Downloads the latest AI-FSY.py from the main branch, stamps the new
     commit SHA into it so the update checker knows what version is running,
-    then replaces this file atomically.
+    then replaces this file atomically and triggers a restart via restart_bot.py.
     """
     try:
         # Fetch the new script
@@ -3083,7 +3083,22 @@ def _do_self_update():
         with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(new_source)
         os.replace(tmp_path, script_path)
-        return True, ""
+        
+        # Find and call restart_bot.py in the same directory
+        restart_script = os.path.join(os.path.dirname(script_path), "restart_bot.py")
+        if not os.path.exists(restart_script):
+            return False, "restart_bot.py not found in script directory"
+        
+        print("[update] Update complete. Restarting bot via restart_bot.py...")
+        
+        # Launch restart script and immediately exit (DON'T wait for it to return)
+        # This ensures the lock file gets released before restart_bot tries to check it
+        subprocess.Popen([sys.executable, restart_script])
+        
+        # CRITICAL: Exit immediately without waiting
+        # This allows the lock file cleanup to happen before restart_bot checks it
+        os._exit(0)
+        
     except Exception as e:
         return False, str(e)
 

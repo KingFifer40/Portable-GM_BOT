@@ -1175,6 +1175,11 @@ def _fetch_group_topics(group_id):
     Fetches topics/subgroups for a given group ID.
     Uses the /groups/{id}/subgroups endpoint.
     Returns a list of (name, id) tuples.
+    
+    Handles three possible field names for topic names:
+    1. 'name' (standard GroupMe field)
+    2. 'topic' (alternative field name from some API versions)
+    3. Falls back to "Unnamed Topic" if both are missing
     """
     try:
         resp = gm_get(f"/groups/{group_id}/subgroups")
@@ -1182,7 +1187,10 @@ def _fetch_group_topics(group_id):
             topics = []
             for item in resp:
                 topic_id = item.get("id")
-                topic_name = item.get("name", f"(Unnamed: {topic_id})")
+                
+                # Try 'name' first, then 'topic', then fallback
+                topic_name = item.get("name") or item.get("topic") or f"Unnamed Topic (ID: {topic_id})"
+                
                 topics.append((topic_name, topic_id))
             return topics
     except Exception as e:

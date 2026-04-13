@@ -3154,81 +3154,125 @@ class ControlPanel:
                   padx=12, pady=6).pack(side="left")
 
     # ── Tab: Group Management ─────────────────────────────────────────────────
-     def _build_tab_groups(self, nb):
-         import tkinter as tk
-         from tkinter import ttk, messagebox
 
-         tab = tk.Frame(nb, padx=16, pady=12)
-         nb.add(tab, text="  Groups  ")
+    def _build_tab_groups(self, nb):
+        import tkinter as tk
+        from tkinter import ttk, messagebox
 
-         # ─── Subgroup Mode Controls ───────────────────────────────────────
-         tk.Label(tab, text="Game Group Mode",
-                  font=("Helvetica", 12, "bold")).pack(anchor="w")
-         
-         mode_frame = tk.Frame(tab)
-         mode_frame.pack(fill="x", pady=(4, 12))
-         
-         self._use_subgroup_var = tk.BooleanVar(value=USE_SUBGROUP)
-         self._admin_group_entry = None
-         self._admin_group_label = None
-         
-         def on_subgroup_toggle():
-             is_checked = self._use_subgroup_var.get()
-             if self._admin_group_label:
-                 self._admin_group_label.config(
-                     state="normal" if is_checked else "disabled",
-                     fg="black" if is_checked else "#999999"
-                 )
-             if self._admin_group_entry:
-                 self._admin_group_entry.config(
-                     state="normal" if is_checked else "disabled"
-                 )
-         
-         # Radio button 1: Main Chat (default)
-         main_rb = ttk.Radiobutton(
-             mode_frame, text="Main Chat (default)",
-             variable=self._use_subgroup_var, value=False,
-             command=on_subgroup_toggle
-         )
-         main_rb.pack(anchor="w", pady=(0, 4))
-         tk.Label(mode_frame, text="Bot operates in the main group.",
-                  font=("Helvetica", 9), fg="#888888").pack(anchor="w", padx=(20, 0))
-         
-         # Radio button 2: Subgroup Chat
-         sub_rb = ttk.Radiobutton(
-             mode_frame, text="Subgroup Chat",
-             variable=self._use_subgroup_var, value=True,
-             command=on_subgroup_toggle
-         )
-         sub_rb.pack(anchor="w", pady=(8, 4))
-         
-         sub_info_frame = tk.Frame(mode_frame)
-         sub_info_frame.pack(anchor="w", padx=(20, 0), fill="x")
-         tk.Label(sub_info_frame,
-                  text="Bot operates in subgroup, but fetches admin & settings from linked main group.",
-                  font=("Helvetica", 9), fg="#888888").pack(anchor="w")
-         
-         admin_input_frame = tk.Frame(sub_info_frame)
-         admin_input_frame.pack(anchor="w", pady=(4, 0))
-         self._admin_group_label = tk.Label(admin_input_frame, text="Linked Main Group ID:",
-                                             font=("Helvetica", 10), width=20, anchor="w")
-         self._admin_group_label.pack(side="left")
-         self._admin_group_entry = tk.Entry(admin_input_frame, font=("Helvetica", 10), width=20)
-         self._admin_group_entry.pack(side="left", padx=(4, 0))
-         
-         # Initialize with current value
-         if ADMIN_GROUP_ID:
-             self._admin_group_entry.insert(0, str(ADMIN_GROUP_ID))
-         on_subgroup_toggle()  # Set initial state
+        tab = tk.Frame(nb, padx=16, pady=12)
+        nb.add(tab, text="  Groups  ")
 
-         # Current game group
-         ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=12)
-         tk.Label(tab, text="Active Game Group",
-                  font=("Helvetica", 12, "bold")).pack(anchor="w")
-         self._game_group_var = tk.StringVar()
-         tk.Entry(tab, textvariable=self._game_group_var,
-                  font=("Helvetica", 11), width=30,
-                  state="readonly").pack(anchor="w", pady=(4, 0), ipady=4)
+        # ─── Subgroup Mode Controls ───────────────────────────────────────
+        tk.Label(tab, text="Game Group Mode",
+                 font=("Helvetica", 12, "bold")).pack(anchor="w")
+        
+        mode_frame = tk.Frame(tab)
+        mode_frame.pack(fill="x", pady=(4, 12))
+        
+        self._use_subgroup_var = tk.BooleanVar(value=USE_SUBGROUP)
+        self._admin_group_entry = None
+        self._admin_group_label = None
+        
+        def on_subgroup_toggle():
+            is_checked = self._use_subgroup_var.get()
+            if self._admin_group_label:
+                self._admin_group_label.config(
+                    state="normal" if is_checked else "disabled",
+                    fg="black" if is_checked else "#999999"
+                )
+            if self._admin_group_entry:
+                self._admin_group_entry.config(
+                    state="normal" if is_checked else "disabled"
+                )
+        
+        # Radio button 1: Main Chat (default)
+        main_rb = ttk.Radiobutton(
+            mode_frame, text="Main Chat (default)",
+            variable=self._use_subgroup_var, value=False,
+            command=on_subgroup_toggle
+        )
+        main_rb.pack(anchor="w", pady=(0, 4))
+        tk.Label(mode_frame, text="Bot operates in the main group.",
+                 font=("Helvetica", 9), fg="#888888").pack(anchor="w", padx=(20, 0))
+        
+        # Radio button 2: Subgroup Chat
+        sub_rb = ttk.Radiobutton(
+            mode_frame, text="Subgroup Chat",
+            variable=self._use_subgroup_var, value=True,
+            command=on_subgroup_toggle
+        )
+        sub_rb.pack(anchor="w", pady=(8, 4))
+        
+        sub_info_frame = tk.Frame(mode_frame)
+        sub_info_frame.pack(anchor="w", padx=(20, 0), fill="x")
+        tk.Label(sub_info_frame,
+                 text="Bot operates in subgroup, but fetches admin & settings from linked main group.",
+                 font=("Helvetica", 9), fg="#888888").pack(anchor="w")
+        
+        admin_input_frame = tk.Frame(sub_info_frame)
+        admin_input_frame.pack(anchor="w", pady=(4, 0))
+        self._admin_group_label = tk.Label(admin_input_frame, text="Linked Main Group ID:",
+                                            font=("Helvetica", 10), width=20, anchor="w")
+        self._admin_group_label.pack(side="left")
+        self._admin_group_entry = tk.Entry(admin_input_frame, font=("Helvetica", 10), width=20)
+        self._admin_group_entry.pack(side="left", padx=(4, 0))
+        
+        # Initialize with current value
+        if ADMIN_GROUP_ID:
+            self._admin_group_entry.insert(0, str(ADMIN_GROUP_ID))
+        on_subgroup_toggle()  # Set initial state
+
+        # Current game group
+        ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=12)
+        tk.Label(tab, text="Active Game Group",
+                 font=("Helvetica", 12, "bold")).pack(anchor="w")
+        self._game_group_var = tk.StringVar()
+        tk.Entry(tab, textvariable=self._game_group_var,
+                 font=("Helvetica", 11), width=30,
+                 state="readonly").pack(anchor="w", pady=(4, 0), ipady=4)
+
+        # ── List groups ───────────────────────────────────────────────────────
+        ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=12)
+        tk.Label(tab, text="Your GroupMe Groups",
+                 font=("Helvetica", 12, "bold")).pack(anchor="w")
+        tk.Label(tab, text="Click a group to select it as the active game group.",
+                 font=("Helvetica", 9), fg="#888888").pack(anchor="w", pady=(0, 6))
+
+        lb_frame = tk.Frame(tab)
+        lb_frame.pack(fill="both", expand=True)
+
+        sb = tk.Scrollbar(lb_frame, orient="vertical")
+        self._group_listbox = tk.Listbox(lb_frame, font=("Courier", 10),
+                                         height=8, selectmode="single",
+                                         yscrollcommand=sb.set,
+                                         exportselection=False)
+        sb.config(command=self._group_listbox.yview)
+        sb.pack(side="right", fill="y")
+        self._group_listbox.pack(side="left", fill="both", expand=True)
+        self._group_data = []  # list of (name, id) tuples
+
+        btn_row = tk.Frame(tab)
+        btn_row.pack(fill="x", pady=(8, 0))
+        tk.Button(btn_row, text="🔃  Refresh List", font=("Helvetica", 10),
+                  command=self._refresh_groups,
+                  relief="flat", padx=10, pady=5).pack(side="left", padx=(0, 8))
+        tk.Button(btn_row, text="✅  Set as Game Group", font=("Helvetica", 10),
+                  command=self._set_game_group,
+                  bg="#34c759", fg="white", relief="flat",
+                  padx=10, pady=5).pack(side="left")
+
+        # ── Send message ──────────────────────────────────────────────────────
+        ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=12)
+        tk.Label(tab, text="Send Message to Game Group",
+                 font=("Helvetica", 12, "bold")).pack(anchor="w")
+        self._send_msg_var = tk.StringVar()
+        tk.Entry(tab, textvariable=self._send_msg_var,
+                 font=("Helvetica", 11), width=44).pack(anchor="w", pady=(4, 0),
+                                                        ipady=4, fill="x")
+        tk.Button(tab, text="Send", font=("Helvetica", 10),
+                  command=self._send_group_message,
+                  bg="#007aff", fg="white", relief="flat",
+                  padx=10, pady=5).pack(anchor="e", pady=(6, 0))
 
     # ── Tab: AI Controls ──────────────────────────────────────────────────────
 

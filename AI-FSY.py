@@ -1,8 +1,6 @@
 import sys
 import os
 import subprocess
-import time
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Dependency bootstrap — installs missing packages before anything else runs.
@@ -45,6 +43,7 @@ _bootstrap_dependencies()
 # the new process acquires the lock after the old one releases it.
 # ---------------------------------------------------------
 import atexit
+import time as _time  # Import here for lock timeout
 
 _LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot.lock")
 
@@ -79,7 +78,7 @@ def _acquire_instance_lock():
             if _pid_running(old_pid) and old_pid != os.getpid():
                 # Wait up to 2 seconds for the old process to cleanly exit
                 for attempt in range(20):
-                    time.sleep(0.1)
+                    _time.sleep(0.1)
                     if not _pid_running(old_pid):
                         # Process exited, we can proceed
                         break

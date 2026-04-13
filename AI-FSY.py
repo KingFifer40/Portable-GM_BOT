@@ -346,7 +346,6 @@ def _run_gui_wizard(existing: dict) -> dict:
         return None
     return result
 
-
 def _run_terminal_wizard(existing: dict) -> dict:
     """Fallback plain-text wizard for headless / no-GUI environments."""
     print()

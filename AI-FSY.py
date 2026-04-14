@@ -804,6 +804,7 @@ game_state = {
     "current_turn": 0,   # index into turn_order
     "last_move_time": None,
     "timeout_seconds": GAME_TIMEOUT_SECONDS,
+    "difficulty": "hard",  # "easy" | "medium" | "hard"
 }
 
 # Emoji pieces
@@ -1423,10 +1424,26 @@ def ai_minimax(board, depth, alpha, beta, maximizing, ai_piece, human_piece):
 
         return best_col, best_score
 
-def ai_choose_move(board, ai_piece, human_piece):
+DIFFICULTY_DEPTH = {"easy": 1, "medium": 3, "hard": 8}
+
+def ai_choose_move(board, ai_piece, human_piece, difficulty="hard"):
+    # Easy: just block immediate wins, otherwise random — very fast
+    if difficulty == "easy":
+        moves = ai_valid_moves(board)
+        for col in moves:
+            temp = ai_make_temp_move(board, col, ai_piece)
+            if check_winner(temp, ai_piece):
+                return col
+        for col in moves:
+            temp = ai_make_temp_move(board, col, human_piece)
+            if check_winner(temp, human_piece):
+                return col
+        return random.choice(moves)
+
+    depth = DIFFICULTY_DEPTH.get(difficulty, 8)
     col, _ = ai_minimax(
         board,
-        depth=8,
+        depth=depth,
         alpha=-10**12,
         beta=10**12,
         maximizing=True,
@@ -1444,6 +1461,7 @@ def reset_game_state():
     game_state["current_turn"] = 0
     game_state["last_move_time"] = None
     game_state["timeout_seconds"] = GAME_TIMEOUT_SECONDS
+    game_state["difficulty"] = "hard"
 
 # ---------------------------------------------------------
 # Dev group command handling
@@ -1986,7 +2004,7 @@ def handle_game_command(message):
                     "🎮 *Connect Four Commands:*\n"
                     "• #start — Begin a new game\n"
                     "• #join — Join as Player 2\n"
-                    "• #addai — Add the AI engine as Player 2\n"
+                    "• #addai [easy|medium|hard] — Add the AI engine as Player 2\n"
                     "• #quit — End the current game\n"
                     "• #timeout <seconds> — Set inactivity timeout\n"
                     "• #A through #G — Drop your piece in that column\n"
@@ -2608,8 +2626,12 @@ def handle_game_command(message):
             send_message(GAME_GROUP_ID, "A second player already joined.", reply_to_id=msg_id)
             return
 
+        # Parse optional difficulty argument: #addai easy / medium / hard
+        difficulty = parts[1].lower() if len(parts) > 1 and parts[1].lower() in ("easy", "medium", "hard") else "hard"
+        game_state["difficulty"] = difficulty
+
         # Add AI as Player 2
-        game_state["players"]["AI"] = {"name": "AI", "symbol": AI_PIECE}
+        game_state["players"]["AI"] = {"name": f"AI ({difficulty})", "symbol": AI_PIECE}
         game_state["turn_order"].append("AI")
         game_state["last_move_time"] = time.time()
 
@@ -2618,7 +2640,7 @@ def handle_game_command(message):
 
         send_message(
             GAME_GROUP_ID,
-            f"AI joined as Player 2.\n"
+            f"AI ({difficulty}) joined as Player 2.\n"
             f"{p1_name} is Player 1.\n\n" +
             cf_board_to_text(game_state["board"]),
             reply_to_id=msg_id,
@@ -2747,7 +2769,7 @@ def handle_game_command(message):
             t.start()
 
             # AI calculates move
-            ai_col = ai_choose_move(game_state["board"], AI_PIECE, P1)
+            ai_col = ai_choose_move(game_state["board"], AI_PIECE, P1, game_state["difficulty"])
 
             # Stop typing indicator
             typing_active = False
@@ -3027,7 +3049,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "unknown"
+BOT_COMMIT_SHA = "deaa29b"
 
 _control_panel_instance = None  # set when panel launches
 

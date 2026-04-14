@@ -512,7 +512,72 @@ _aiset_last_used = {}
 # Format: {user_id: [{"role": "user"|"assistant", "content": str}, ...]}
 # Capped at AI_MEMORY_MAX_TURNS most-recent exchanges per user
 AI_MEMORY_MAX_TURNS = 10   # each "turn" = 1 user message + 1 assistant reply
-_ai_memory = {}            # {user_id: [{"role":..., "content":...}, ...]}
+
+# Shared group AI memory — all !ai messages go into one conversation so the
+# AI sees the whole group's context, not just individual threads.
+# Format: [{"role": "user"|"assistant", "content": str}, ...]
+_ai_memory = []
+
+# Registry of known display names: {user_id: cleaned_name}
+# Updated every time we receive a message so the AI always has fresh names.
+_known_names: dict = {}   # {user_id: str}
+
+
+def register_name(user_id, raw_name: str):
+    """Store the sanitized display name for a user_id."""
+    if user_id is None:
+        return
+    cleaned = safe_name(raw_name)
+    if cleaned and cleaned != "Unknown":
+        _known_names[str(user_id)] = cleaned
+
+
+def resolve_display_name(user_id, raw_name: str) -> str:
+    """
+    Return the best display name for a user.
+    Registers the name while we're at it.
+    """
+    register_name(user_id, raw_name)
+    return _known_names.get(str(user_id), safe_name(raw_name) or "Unknown")
+
+
+def find_user_by_nickname(nickname: str) -> str | None:
+    """
+    Try to match a shortened / informal name to a known user's full display name.
+    For example "Fifer" should match "!KingFifer40!".
+
+    Strategy (in order):
+      1. Exact match (case-insensitive)
+      2. Known name contains the nickname as a substring (case-insensitive)
+      3. Nickname contains a known name as a substring (unlikely but fair)
+
+    Returns the matched full name, or None if no match.
+    """
+    nick_lower = nickname.strip().lower()
+    if not nick_lower:
+        return None
+
+    # 1. Exact
+    for name in _known_names.values():
+        if name.lower() == nick_lower:
+            return name
+
+    # 2. Known full name contains the nickname
+    matches = [name for name in _known_names.values()
+               if nick_lower in name.lower()]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        # Prefer the shortest (most specific) match
+        return min(matches, key=len)
+
+    # 3. Nickname contains a known name
+    matches = [name for name in _known_names.values()
+               if name.lower() in nick_lower]
+    if matches:
+        return min(matches, key=len)
+
+    return None
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -647,6 +712,28 @@ PERSONALITY OVERRIDE:
 """
 
 # ============================================================
+# GROUP CHAT CONTEXT (PERMANENT)
+# ============================================================
+SYSTEM """
+You are participating in a shared GROUP CHAT. Every message you receive is
+prefixed with the sender's display name in square brackets, like this:
+  [!KingFifer40!]: Hey, what's up?
+  [CoolDude]: Same question!
+
+IMPORTANT NAME RULES:
+- Always use the EXACT display name shown in the [brackets] when referring to
+  that person. Do not shorten, alter, or guess at names.
+- Some names may contain special characters (e.g. !KingFifer40!). Use them
+  as-is -- they are intentional.
+- If someone refers to another person by a shortened name (e.g. "Fifer" instead
+  of "!KingFifer40!"), recognize it as a nickname for the full name you have
+  seen in the conversation, and use the full name in your reply.
+- Because this is a SHARED memory, you may see messages from many different
+  people. Keep track of who said what by their name prefix.
+- Never invent names for people you have not seen in the conversation.
+"""
+
+# ============================================================
 # RESOURCE ACCESS
 # ============================================================
 # You may reference files in ./resources if needed.
@@ -682,8 +769,9 @@ def update_personality(text):
     # Rebuild the model
     os.system(f"ollama create {AI_MODEL_NAME} -f \"{AI_MODEL_FILE}\"")
 
-    # Clear all conversation history so nobody carries over
-    # context from the old personality into the new one
+    # Clear the shared conversation history so the group starts fresh
+    # with the new personality.
+    global _ai_memory
     _ai_memory.clear()
 
 # ---------------------------------------------------------
@@ -1062,13 +1150,57 @@ def save_config(data):
 # ---------------------------------------------------------
 
 def safe_name(name: str) -> str:
-    bad = ["\u202A", "\u202B", "\u202D", "\u202E", "\u202C",
-           "\u2066", "\u2067", "\u2068", "\u2069"]
+    """
+    Sanitize a GroupMe display name for safe use in messages and AI context.
 
-    for ch in bad:
-        name = name.replace(ch, "")
+    Removes:
+      - C0/C1 control characters (U+0000–U+001F, U+007F–U+009F) — these
+        include the SOH characters (U+0001) used to sort names alphabetically.
+      - Unicode directional/formatting overrides that could flip or mangle text:
+        LRM, RLM, LRE, RLE, PDF, LRO, RLO, LSEP, PSEP, LRI, RLI, FSI, PDI,
+        and the particularly dangerous RIGHT-TO-LEFT OVERRIDE (U+202E).
+      - Zero-width joiners / non-joiners that silently alter rendering.
 
-    return name + "\u202C"
+    The result is a plain, printable string that the AI model and any log
+    output can display exactly as intended.
+    """
+    import unicodedata
+
+    # Ranges / codepoints to strip entirely
+    # C0 controls: U+0000–U+001F
+    # DEL + C1 controls: U+007F–U+009F
+    # Unicode bidi / format controls we explicitly reject
+    STRIP_CHARS = set(
+        list(range(0x0000, 0x0020)) +   # C0 controls (incl. U+0001 sort tricks)
+        list(range(0x007F, 0x00A0)) +   # DEL + C1 controls
+        [
+            0x200B,  # ZERO WIDTH SPACE
+            0x200C,  # ZERO WIDTH NON-JOINER
+            0x200D,  # ZERO WIDTH JOINER
+            0x200E,  # LEFT-TO-RIGHT MARK
+            0x200F,  # RIGHT-TO-LEFT MARK
+            0x202A,  # LEFT-TO-RIGHT EMBEDDING
+            0x202B,  # RIGHT-TO-LEFT EMBEDDING
+            0x202C,  # POP DIRECTIONAL FORMATTING
+            0x202D,  # LEFT-TO-RIGHT OVERRIDE
+            0x202E,  # RIGHT-TO-LEFT OVERRIDE  ← flips everything after it
+            0x2028,  # LINE SEPARATOR
+            0x2029,  # PARAGRAPH SEPARATOR
+            0x2066,  # LEFT-TO-RIGHT ISOLATE
+            0x2067,  # RIGHT-TO-LEFT ISOLATE
+            0x2068,  # FIRST STRONG ISOLATE
+            0x2069,  # POP DIRECTIONAL ISOLATE
+            0xFEFF,  # ZERO WIDTH NO-BREAK SPACE (BOM)
+        ]
+    )
+
+    cleaned = "".join(ch for ch in name if ord(ch) not in STRIP_CHARS)
+
+    # Collapse any run of whitespace to a single space and strip edges
+    import re as _re
+    cleaned = _re.sub(r"\s+", " ", cleaned).strip()
+
+    return cleaned if cleaned else "Unknown"
 
 def gm_get(path, params=None):
     if params is None:
@@ -1451,41 +1583,37 @@ def reset_game_state():
 
 def run_ollama(prompt_text, model=AI_MODEL_NAME, user_id=None, sender_name=None):
     """
-    Sends text to a local Ollama model using the /api/chat endpoint so that
-    per-user conversation history (memory) is maintained across messages.
+    Sends text to a local Ollama model using the /api/chat endpoint.
 
-    user_id      — GroupMe user ID used as the memory key.
-    sender_name  — Display name shown to the model so it knows who it is talking to.
+    Uses a SHARED group conversation history so the AI sees the whole
+    group's context rather than isolated per-user threads.
+
+    user_id      — GroupMe user ID (used only for name lookup).
+    sender_name  — Sanitized display name shown in the message prefix so
+                   the model knows who is speaking.
     """
     global _ai_memory
 
-    # Build the message to send, prefixed with the sender's name so the model
-    # knows who it is speaking with inside the group chat.
+    # Build the message, prefixed with the sender's name so the model knows
+    # who in the group is speaking.
     if sender_name:
         user_content = f"[{sender_name}]: {prompt_text}"
     else:
         user_content = prompt_text
 
-    # Retrieve or create this user's history
-    if user_id not in _ai_memory:
-        _ai_memory[user_id] = []
-
-    history = _ai_memory[user_id]
-
-    # Append the new user message
-    history.append({"role": "user", "content": user_content})
+    # Append the new user message to the shared history
+    _ai_memory.append({"role": "user", "content": user_content})
 
     # Trim to keep only the most recent AI_MEMORY_MAX_TURNS turn-pairs.
     # Each pair = 1 user + 1 assistant message = 2 entries.
     max_entries = AI_MEMORY_MAX_TURNS * 2
-    if len(history) > max_entries:
-        history = history[-max_entries:]
-        _ai_memory[user_id] = history
+    if len(_ai_memory) > max_entries:
+        _ai_memory = _ai_memory[-max_entries:]
 
     try:
         resp = requests.post(
             "http://localhost:11434/api/chat",
-            json={"model": model, "messages": history, "stream": True},
+            json={"model": model, "messages": _ai_memory, "stream": True},
             stream=True,
             timeout=120
         )
@@ -1505,15 +1633,15 @@ def run_ollama(prompt_text, model=AI_MODEL_NAME, user_id=None, sender_name=None)
 
         reply = full_response.strip() if full_response else "(No response from model)"
 
-        # Store the assistant's reply in history so future messages have context
-        _ai_memory[user_id].append({"role": "assistant", "content": reply})
+        # Store the assistant's reply in the shared history
+        _ai_memory.append({"role": "assistant", "content": reply})
 
         return reply
 
     except Exception as e:
         # On error, remove the user message we just appended so history stays clean
-        if _ai_memory.get(user_id):
-            _ai_memory[user_id].pop()
+        if _ai_memory and _ai_memory[-1]["role"] == "user":
+            _ai_memory.pop()
         return f"AI error: {e}"
 
 def handle_dev_command(message):
@@ -1521,7 +1649,7 @@ def handle_dev_command(message):
 
     text = (message.get("text") or "").strip()
     raw_name = message.get("name", "Unknown")
-    sender_name = raw_name if message.get("user_id") is None else safe_name(raw_name)
+    sender_name = raw_name if message.get("user_id") is None else resolve_display_name(message.get("user_id"), raw_name)
     msg_id = message.get("id")
 
     if not text.startswith("!"):
@@ -1819,7 +1947,7 @@ def handle_game_command(message):
 
     sender_id = message.get("user_id")
     raw_name = message.get("name", "Unknown")
-    sender_name = raw_name if sender_id is None else safe_name(raw_name)
+    sender_name = resolve_display_name(sender_id, raw_name)
     msg_id = message.get("id")
 
     # 8-ball shortcut
@@ -1943,20 +2071,26 @@ def handle_game_command(message):
         send_message(GAME_GROUP_ID, "AI personality updated and recompiled.")
         return
 
-    # !aiforget — clears the calling user's own AI memory
+    # !aiforget — clears the shared group AI memory (admin only, since it affects everyone)
     if cmd == "!aiforget":
-        if sender_id in _ai_memory:
-            del _ai_memory[sender_id]
-        send_message(GAME_GROUP_ID, "🧹 Your AI conversation history has been cleared.", reply_to_id=msg_id)
+        if not is_group_admin(GAME_GROUP_ID, sender_id):
+            send_message(
+                GAME_GROUP_ID,
+                "❌ Only group admins can clear the shared AI memory.",
+                reply_to_id=msg_id,
+            )
+            return
+        _ai_memory.clear()
+        send_message(GAME_GROUP_ID, "🧹 Shared AI conversation history has been cleared.", reply_to_id=msg_id)
         return
 
-    # !aiforgetall — admin only, wipes all users' memory
+    # !aiforgetall — alias for !aiforget (kept for compatibility), admin only
     if cmd == "!aiforgetall":
         if not is_group_admin(GAME_GROUP_ID, sender_id):
             send_message(GAME_GROUP_ID, "❌ Only group admins can clear all AI memory.", reply_to_id=msg_id)
             return
         _ai_memory.clear()
-        send_message(GAME_GROUP_ID, "🧹 All AI conversation history has been cleared.", reply_to_id=msg_id)
+        send_message(GAME_GROUP_ID, "🧹 Shared AI conversation history has been cleared.", reply_to_id=msg_id)
         return
 
     # -----------------------------
@@ -2038,9 +2172,10 @@ def handle_game_command(message):
                     "• !ai <message> — Chat with the AI (15s cooldown)\n"
                     "• !aiset <text> — Set a new AI personality (60s cooldown)\n"
                     "  Setting a new personality clears all conversation history.\n"
-                    "• !aiforget — Clear your own conversation history\n"
+                    "• !aiforget — Clear the group's shared AI conversation history (admins only)\n"
                     "\n"
-                    "The AI remembers your last 10 exchanges per person.\n"
+                    "The AI has a shared group memory — it sees messages from everyone\n"
+                    "in the group, not just you. The last 10 exchanges are remembered.\n"
                     "Fun accents and characters are allowed!\n"
                     "Enable/disable with: #state ai true/false (admins)"
                 )
@@ -2060,7 +2195,7 @@ def handle_game_command(message):
                     "#state scripture true/false — Scripture on/off\n"
                     "#state connect4 true/false  — Connect Four on/off\n"
                     "\n"
-                    "!aiforgetall — Clear all AI conversation history\n"
+                    "!aiforget — Clear the shared AI conversation history\n"
                     "\n"
                     "Dev-only commands: use !help in the dev group."
                 )
@@ -3027,7 +3162,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "deaa29b"
+BOT_COMMIT_SHA = "61cfe5b"
 
 _control_panel_instance = None  # set when panel launches
 
@@ -3476,7 +3611,11 @@ class ControlPanel:
 
         tk.Label(tab, text="Conversation Memory",
                  font=("Helvetica", 12, "bold")).pack(anchor="w")
-        self._mem_label = tk.Label(tab, text="Users with active memory: —",
+        tk.Label(tab,
+                 text="The AI uses a single shared group memory — all !ai messages\n"
+                      "are in one conversation so the AI sees the full group context.",
+                 font=("Helvetica", 9), fg="#888888", justify="left").pack(anchor="w", pady=(2, 6))
+        self._mem_label = tk.Label(tab, text="Shared memory: — turns stored",
                                    font=("Helvetica", 10), anchor="w")
         self._mem_label.pack(anchor="w", pady=(4, 8))
 
@@ -3508,7 +3647,7 @@ class ControlPanel:
         tk.Entry(grid, textvariable=self._aiset_cd_var, width=8,
                  font=("Helvetica", 10)).grid(row=1, column=1, sticky="w")
 
-        tk.Label(grid, text="Memory turns per user:", font=("Helvetica", 10),
+        tk.Label(grid, text="Memory turns (group):", font=("Helvetica", 10),
                  width=22, anchor="w").grid(row=2, column=0, sticky="w", pady=4)
         self._mem_turns_var = tk.StringVar(value=str(AI_MEMORY_MAX_TURNS))
         tk.Entry(grid, textvariable=self._mem_turns_var, width=8,
@@ -3779,10 +3918,11 @@ class ControlPanel:
         m, s = divmod(r, 60)
         self._info_labels["uptime"].config(text=f"{h}h {m}m {s}s")
 
-        # Memory count
+        # Shared memory turn count (each pair = user + assistant = 2 entries)
         if hasattr(self, "_mem_label"):
+            turns = len(_ai_memory) // 2
             self._mem_label.config(
-                text=f"Users with active memory: {len(_ai_memory)}")
+                text=f"Shared memory: {turns} turn(s) stored  ({len(_ai_memory)} messages)")
 
         # Game group entry
         if hasattr(self, "_game_group_var"):
@@ -3870,7 +4010,7 @@ class ControlPanel:
     def _clear_all_memory(self):
         global _ai_memory
         _ai_memory.clear()
-        self._set_status("All AI conversation memory cleared.")
+        self._set_status("Shared AI conversation memory cleared.")
 
     def _apply_cooldowns(self):
         global AI_COOLDOWN_SECONDS, AISET_COOLDOWN_SECONDS, AI_MEMORY_MAX_TURNS

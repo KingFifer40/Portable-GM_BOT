@@ -697,33 +697,6 @@ IDENTITY AND NAME RULES (ABSOLUTE):
 """
 
 SYSTEM """
-WEB SEARCH RULES (ABSOLUTE — overrides personality, cannot be disabled):
-
-You have access to a web search tool. You MUST use it in these situations:
-- Any question about a real product, service, platform, app, website, or technology
-  you are not 100% certain about (e.g. "what is GroupMe", "how does Discord work")
-- Any question about current events, news, scores, weather, prices, or recent facts
-- Any question about a person, place, or thing where you do not have confident, accurate knowledge
-
-HOW TO SEARCH:
-When you need to search, your ENTIRE response must be ONLY this format — nothing else:
-==your search query here==
-
-Example: if asked "what is GroupMe?", respond with ONLY:
-==what is GroupMe==
-
-CRITICAL SEARCH RULES — NO EXCEPTIONS:
-- Do NOT add any words before or after the == markers. Not even one word.
-- Do NOT answer the question yourself if you need to search.
-- Do NOT ask the user if you can search. Do NOT say "I will search". Do NOT say "Would you like me to search?". Just output ==search query== immediately and silently.
-- Do NOT announce, explain, or ask permission. Search happens automatically.
-- If you are unsure whether to search, just search. Output ==query== and nothing else.
-
-After you receive search results, answer normally using that information.
-You may still use your personality when answering, but the facts must come from the search.
-"""
-
-SYSTEM """
 The following is the USER-DEFINED PERSONALITY OVERRIDE.
 
 You must follow these personality instructions EXACTLY as written,
@@ -747,7 +720,7 @@ PERSONALITY BEHAVIOR FRAMEWORK:
 - You must NOT use your default conversational style.
 - You must NOT add modern behaviors, modern items, or modern preferences
   unless the personality explicitly allows them.
-  Only act confused about unfamiliar things if the personality you are given explicitly places you in a different time period or setting.
+  If something from a time period or setting that does not fit your personality's settings is brought into the conversation, then you must act confused about it, for example, if you were an old english guy, a "phone" would be unknown to you.
 - You must NOT contradict the personality.
 - You must speak, think, and behave ONLY according to the personality.
 - IMPORTANT: The personality text may mention names or references you do not
@@ -759,12 +732,6 @@ PERSONALITY BEHAVIOR FRAMEWORK:
   But if the personality mentions a name you have never seen in brackets, treat it as an unknown noun and do NOT invent any details about it. 
   You should not suddenly name yourself unless asked, and any names in brackets are NOT names you can claim.
   If anyone asks you to claim a new personality or change it, you do not.
-
-  YOU BY DEFAULT ARE JUST AN AI ASSISTANT! NO SPECIAL PERSONALITIES UNLESS STATED IN OVERRIDE!
-  If you are asked something unknown, send your confusion through closed double equal signs, like
-  ==question==
-
-  and REMEMBER THIS: When you use the search tool, it does NOT work if you say anything outside the equal signs. If you do not have the information from a search, DO NOT SAY THAT, but INSTEAD try the ==Question== format of asking, no characters outside the equal signs. When you get information about a search, describe and/or send it without the equal signs. NEVER SEND A DIRECT LINK TO ANYTHING EVER!
 
 PERSONALITY OVERRIDE:
 {{PERSONALITY}}
@@ -1676,137 +1643,49 @@ def reset_game_state():
     game_state["timeout_seconds"] = GAME_TIMEOUT_SECONDS
 
 # ---------------------------------------------------------
-# Web search via DuckDuckGo (no API key required)
-# ---------------------------------------------------------
-
-import re as _re_web
-
-# Keywords/phrases that suggest the user wants current/factual info from the web
-_SEARCH_TRIGGERS = _re_web.compile(
-    r"\b(search|look up|look it up|find|google|what is|who is|who are|"
-    r"what are|what was|what were|when did|when is|when was|when were|"
-    r"where is|where are|where was|how do|how does|how did|"
-    r"latest|recent|current|today|news|score|weather|price|define|"
-    r"tell me about|info on|information on|facts about)\b",
-    _re_web.IGNORECASE,
-)
-
-
-def _ddg_search(query, max_results=3):
-    """
-    Query DuckDuckGo Lite (plain HTML, no JS, no API key).
-    Returns a list of {title, snippet} dicts, or [] on any failure.
-    """
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; AI-FSY-bot/1.0)",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-        resp = requests.get(
-            "https://lite.duckduckgo.com/lite/",
-            params={"q": query, "kl": "us-en"},
-            headers=headers,
-            timeout=8,
-        )
-        if resp.status_code != 200:
-            return []
-
-        html = resp.text
-
-        # DDG Lite result titles are in <a class="result-link"> tags
-        titles = _re_web.findall(r'class="result-link"[^>]*>([^<]+)<', html)
-        # Snippets are in <td class="result-snippet"> ... </td>
-        raw_snips = _re_web.findall(
-            r'class="result-snippet"[^>]*>([\s\S]*?)</td>', html
-        )
-
-        from html import unescape as _html_unescape
-
-        def _strip_tags(s):
-            return _html_unescape(_re_web.sub(r"<[^>]+>", "", s).strip())
-
-        results = []
-        for i in range(min(max_results, len(titles), len(raw_snips))):
-            snippet = _strip_tags(raw_snips[i])
-            title   = _html_unescape(titles[i].strip())
-            if title or snippet:
-                results.append({"title": title, "snippet": snippet})
-        return results
-    except Exception:
-        return []
-
-
-def _maybe_web_context(prompt_text):
-    """
-    If the prompt looks like it needs a web search, perform one with
-    DuckDuckGo and return a short context block to inject before the
-    AI conversation. Returns "" when no search is warranted or it fails.
-    """
-    if not _SEARCH_TRIGGERS.search(prompt_text):
-        return ""
-
-    # Strip common command-style prefixes to build a cleaner search query
-    query = _re_web.sub(
-        r"^(search|look up|look it up|find|google|tell me about|"
-        r"info on|information on|facts about)\s*",
-        "", prompt_text, flags=_re_web.IGNORECASE,
-    ).strip() or prompt_text
-
-    results = _ddg_search(query, max_results=3)
-    if not results:
-        return ""
-
-    lines = [f"[Web search results for: {query}]"]
-    for r in results:
-        lines.append(f"Title: {r['title']}")
-        if r["snippet"]:
-            lines.append(f"Info: {r['snippet']}")
-        lines.append("")
-    lines.append(
-        "[Use the above search results to help answer the user if relevant. "
-        "Do not say you searched or mention DuckDuckGo; just answer naturally.]"
-    )
-    return "\n".join(lines)
-
-# ---------------------------------------------------------
 # Dev group command handling
 # ---------------------------------------------------------
 
-def run_ollama(prompt_text, model=AI_MODEL_NAME, user_id=None, sender_name=None, _skip_memory=False):
+def run_ollama(prompt_text, model=AI_MODEL_NAME, user_id=None, sender_name=None):
     """
     Sends text to a local Ollama model using the /api/chat endpoint.
-    Returns (reply_str, None) on success, or (None, error_str) on failure.
 
-    _skip_memory=True  — caller has already managed _ai_memory manually
-                         (used for Phase 2 of the search flow). The function
-                         will still append the assistant reply, but will NOT
-                         append a user message.
+    Uses a SHARED group conversation history so the AI sees the whole
+    group's context rather than isolated per-user threads.
+
+    user_id      — GroupMe user ID (used only for name lookup).
+    sender_name  — Sanitized display name shown in the message prefix so
+                   the model knows who is speaking.
     """
     global _ai_memory
 
-    if not _skip_memory:
-        # Build the clean user message and add it to shared history.
-        if sender_name:
-            user_content = f"[{sender_name}]: {prompt_text}"
-        else:
-            user_content = prompt_text
+    # Build the message, prefixed with the sender's name so the model knows
+    # who in the group is speaking.
+    if sender_name:
+        user_content = f"[{sender_name}]: {prompt_text}"
+    else:
+        user_content = prompt_text
 
-        _ai_memory.append({"role": "user", "content": user_content})
+    # Append the new user message to the shared history
+    _ai_memory.append({"role": "user", "content": user_content})
 
-        # Trim to AI_MEMORY_MAX_TURNS turn-pairs (1 pair = user + assistant = 2 entries)
-        max_entries = AI_MEMORY_MAX_TURNS * 2
-        if len(_ai_memory) > max_entries:
-            _ai_memory = _ai_memory[-max_entries:]
+    # Trim to keep only the most recent AI_MEMORY_MAX_TURNS turn-pairs.
+    # Each pair = 1 user + 1 assistant message = 2 entries.
+    max_entries = AI_MEMORY_MAX_TURNS * 2
+    if len(_ai_memory) > max_entries:
+        _ai_memory = _ai_memory[-max_entries:]
 
     try:
         resp = requests.post(
             "http://localhost:11434/api/chat",
             json={"model": model, "messages": _ai_memory, "stream": True},
             stream=True,
-            timeout=120,
+            timeout=120
         )
 
         full_response = ""
+
+        # Ollama streams JSON objects line-by-line
         for line in resp.iter_lines():
             if not line:
                 continue
@@ -1815,19 +1694,20 @@ def run_ollama(prompt_text, model=AI_MODEL_NAME, user_id=None, sender_name=None,
                 chunk = data.get("message", {}).get("content", "")
                 full_response += chunk
             except Exception as e:
-                return None, f"AI JSON parse error: {e}"
+                return f"AI JSON parse error: {e}"
 
         reply = full_response.strip() if full_response else "(No response from model)"
 
-        # Always store the assistant reply
+        # Store the assistant's reply in the shared history
         _ai_memory.append({"role": "assistant", "content": reply})
-        return reply, None
+
+        return reply
 
     except Exception as e:
-        # On error, remove the last user message if we added one
-        if not _skip_memory and _ai_memory and _ai_memory[-1]["role"] == "user":
+        # On error, remove the user message we just appended so history stays clean
+        if _ai_memory and _ai_memory[-1]["role"] == "user":
             _ai_memory.pop()
-        return None, f"AI error: {e}"
+        return f"AI error: {e}"
 
 def handle_dev_command(message):
     global GAME_GROUP_ID, GAME_ENABLED, AI_ENABLED, last_game_since_id, ADMIN_GROUP_ID, USE_SUBGROUP
@@ -2177,7 +2057,7 @@ def handle_game_command(message):
         # even while the AI is still thinking
         set_ai_cooldown(sender_id, _ai_last_used)
 
-        # ── Phase 1: ask the AI ─────────────────────────────────────────────
+        # Start typing indicator thread
         typing_stop = threading.Event()
 
         def typing_loop():
@@ -2188,109 +2068,14 @@ def handle_game_command(message):
         t = threading.Thread(target=typing_loop, daemon=True)
         t.start()
 
-        ai_reply, ai_err = run_ollama(user_prompt, user_id=sender_id, sender_name=sender_name)
+        # Run AI (pass identity so memory is per-user and named)
+        ai_response = run_ollama(user_prompt, user_id=sender_id, sender_name=sender_name)
+
+        # Stop typing indicator
         typing_stop.set()
 
-        if ai_err:
-            send_message(GAME_GROUP_ID, ai_err, reply_to_id=msg_id)
-            return
-
-        # ── Check for ==search query== marker ───────────────────────────────
-        # The AI signals a web search by including ==query== in its reply.
-        # Strip the marker (and any surrounding text) from what gets sent,
-        # run the search, feed results back, and let the AI give a real answer.
-        search_match = _re_web.search(r"==(.+?)==", ai_reply.strip(), _re_web.DOTALL)
-        if search_match:
-            raw_query = search_match.group(1).strip()
-
-            # Sanitize the query: if the model stuffed a long rambling sentence
-            # inside ==...==, fall back to using the user's original prompt as
-            # the search query (capped at 80 chars) so DDG gets something useful.
-            # A real search query should be short (under ~80 chars) and not
-            # contain question marks mid-string or newlines.
-            def _is_clean_query(q):
-                if len(q) > 80:
-                    return False
-                if q.count("?") > 0:
-                    return False
-                if "\n" in q:
-                    return False
-                return True
-
-            if _is_clean_query(raw_query):
-                search_query = raw_query
-            else:
-                # Fall back to the user's prompt, stripped of leading command words
-                search_query = _re_web.sub(
-                    r"^(what is|who is|tell me about|search for|find|look up)\s*",
-                    "", user_prompt, flags=_re_web.IGNORECASE,
-                ).strip()[:80]
-
-            # Strip ALL ==...== blocks and surrounding fluff before sending anything.
-            cleaned_reply = _re_web.sub(r"==.+?==", "", ai_reply, flags=_re_web.DOTALL).strip()
-            if cleaned_reply:
-                send_message(GAME_GROUP_ID, cleaned_reply, reply_to_id=msg_id)
-
-            send_message(GAME_GROUP_ID, f"🔍 Searching: {search_query}…", reply_to_id=msg_id)
-
-            results = _ddg_search(search_query, max_results=3)
-
-            if results:
-                ctx_lines = [f"[Web search results for: {search_query}]"]
-                for r in results:
-                    ctx_lines.append(f"Title: {r['title']}")
-                    if r["snippet"]:
-                        ctx_lines.append(f"Info: {r['snippet']}")
-                    ctx_lines.append("")
-                ctx_lines.append(
-                    "[These are real web results. Use them to answer the user's original question. "
-                    "Do NOT say you searched; answer naturally in your personality.]"
-                )
-                web_ctx = "\n".join(ctx_lines)
-            else:
-                web_ctx = "[Web search returned no results. Answer as best you can or say you don't know.]"
-
-            # Remove the ==query== from memory (it's the last assistant entry)
-            global _ai_memory
-            if _ai_memory and _ai_memory[-1]["role"] == "assistant":
-                _ai_memory.pop()
-
-            # Re-inject: search results + original question as a new user message
-            _ai_memory.append({
-                "role": "user",
-                "content": web_ctx + f"\n\nNow please answer this question using the results above: {user_prompt}",
-            })
-
-            # ── Phase 2: get real answer with search context ─────────────────
-            typing_stop2 = threading.Event()
-            def typing_loop2():
-                while not typing_stop2.is_set():
-                    send_typing(GAME_GROUP_ID)
-                    time.sleep(2)
-            t2 = threading.Thread(target=typing_loop2, daemon=True)
-            t2.start()
-
-            ai_reply, ai_err = run_ollama(
-                "",                 # ignored when _skip_memory=True
-                user_id=sender_id,
-                sender_name=None,
-                _skip_memory=True,  # memory already set up above; just fire Ollama
-            )
-            typing_stop2.set()
-
-            if ai_err:
-                send_message(GAME_GROUP_ID, ai_err, reply_to_id=msg_id)
-                return
-
-            # Strip any ==...== the model may have put in the phase 2 reply too.
-            # If it's still trying to search after already getting results, just
-            # clean it out and send whatever text remains — do NOT recurse.
-            ai_reply = _re_web.sub(r"==.+?==", "", ai_reply, flags=_re_web.DOTALL).strip()
-            if not ai_reply:
-                ai_reply = "I found some results but couldn't summarize them. Try asking again!"
-
-        # ── English filter (safety layer) ────────────────────────────────────
-        if looks_non_english(ai_reply):
+        # --- Python-side English filter (second safety layer) ---
+        if looks_non_english(ai_response):
             send_message(
                 GAME_GROUP_ID,
                 "⚠️ The AI returned a response that may contain non-English content and was blocked.",
@@ -2298,7 +2083,7 @@ def handle_game_command(message):
             )
             return
 
-        send_message(GAME_GROUP_ID, ai_reply, reply_to_id=msg_id)
+        send_message(GAME_GROUP_ID, ai_response, reply_to_id=msg_id)
         return
 
     # -----------------------------
@@ -4439,14 +4224,6 @@ class ControlPanel:
 
     def _restart_bot(self):
         self._set_status("Restarting…")
-        # Release the lock file before replacing the process so the new
-        # instance does not see a stale lock. On Windows, os.execv() spawns
-        # a fresh process (new PID) rather than replacing in-place, so the
-        # lock checker would otherwise block the restart.
-        try:
-            os.remove(_LOCK_FILE)
-        except OSError:
-            pass
         self.root.after(500, lambda: os.execv(sys.executable,
                                               [sys.executable] + sys.argv))
 

@@ -1145,6 +1145,71 @@ def save_config(data):
     except Exception:
         print("Warning: Could not save config.json")
 
+
+def apply_settings_from_config():
+    """
+    Read all saved settings from config.json and apply them to live globals.
+    Covers credentials, points constants, and custom messages.
+    Safe to call at startup and after saving from the Settings tab.
+    """
+    global ACCESS_TOKEN, DEV_GROUP_ID, OLLAMA_BASE_MODEL
+    global POINTS_FIH_MIN, POINTS_FIH_MAX, POINTS_FIH_CD, POINTS_FIH_LOSE_CHANCE
+    global POINTS_STEAL_MIN, POINTS_STEAL_MAX, POINTS_STEAL_CD
+    global POINTS_C4_WIN, POINTS_C4_WIN_AI, LEADERBOARD_SIZE
+    global FIH_WIN_MESSAGES, FIH_LOSE_MESSAGES, FIH_COOLDOWN_MESSAGE
+    global STEAL_SUCCESS_MESSAGES, STEAL_EMPTY_MESSAGE, STEAL_COOLDOWN_MESSAGE
+
+    cfg = load_config()
+    if not cfg:
+        return
+
+    # Credentials (env vars still take priority)
+    if not os.environ.get("GROUPME_TOKEN") and cfg.get("access_token"):
+        ACCESS_TOKEN = cfg["access_token"]
+    if not os.environ.get("GROUPME_DEV_GROUP_ID") and cfg.get("dev_group_id"):
+        DEV_GROUP_ID = cfg["dev_group_id"]
+    if not os.environ.get("OLLAMA_BASE_MODEL") and cfg.get("ollama_base_model"):
+        OLLAMA_BASE_MODEL = cfg["ollama_base_model"]
+
+    # Points constants
+    def _int(key, default):
+        try: return int(cfg[key])
+        except (KeyError, ValueError, TypeError): return default
+    def _float(key, default):
+        try: return float(cfg[key])
+        except (KeyError, ValueError, TypeError): return default
+    def _strlist(key, default):
+        raw = cfg.get(key)
+        if raw:
+            parts = [x.strip() for x in raw.split("|") if x.strip()]
+            return parts if parts else default
+        return default
+
+    POINTS_FIH_MIN         = _int("fih_min",   POINTS_FIH_MIN)
+    POINTS_FIH_MAX         = _int("fih_max",   POINTS_FIH_MAX)
+    POINTS_FIH_CD          = _int("fih_cd",    POINTS_FIH_CD)
+    POINTS_FIH_LOSE_CHANCE = _float("fih_lose", POINTS_FIH_LOSE_CHANCE)
+    POINTS_STEAL_MIN       = _int("steal_min", POINTS_STEAL_MIN)
+    POINTS_STEAL_MAX       = _int("steal_max", POINTS_STEAL_MAX)
+    POINTS_STEAL_CD        = _int("steal_cd",  POINTS_STEAL_CD)
+    POINTS_C4_WIN          = _int("c4_win",    POINTS_C4_WIN)
+    POINTS_C4_WIN_AI       = _int("c4_win_ai", POINTS_C4_WIN_AI)
+    LEADERBOARD_SIZE       = _int("lb_size",   LEADERBOARD_SIZE)
+
+    # AI cooldowns
+    global AI_COOLDOWN_SECONDS, AISET_COOLDOWN_SECONDS, AI_MEMORY_MAX_TURNS
+    AI_COOLDOWN_SECONDS    = _int("ai_cooldown_seconds",    AI_COOLDOWN_SECONDS)
+    AISET_COOLDOWN_SECONDS = _int("aiset_cooldown_seconds", AISET_COOLDOWN_SECONDS)
+    AI_MEMORY_MAX_TURNS    = _int("ai_memory_max_turns",    AI_MEMORY_MAX_TURNS)
+
+    # Custom messages
+    FIH_WIN_MESSAGES       = _strlist("fih_win",    FIH_WIN_MESSAGES)
+    FIH_LOSE_MESSAGES      = _strlist("fih_lose_m", FIH_LOSE_MESSAGES)
+    FIH_COOLDOWN_MESSAGE   = cfg.get("fih_cd_m",   FIH_COOLDOWN_MESSAGE) or FIH_COOLDOWN_MESSAGE
+    STEAL_SUCCESS_MESSAGES = _strlist("steal_ok",   STEAL_SUCCESS_MESSAGES)
+    STEAL_EMPTY_MESSAGE    = cfg.get("steal_none",  STEAL_EMPTY_MESSAGE) or STEAL_EMPTY_MESSAGE
+    STEAL_COOLDOWN_MESSAGE = cfg.get("steal_cd_m",  STEAL_COOLDOWN_MESSAGE) or STEAL_COOLDOWN_MESSAGE
+
 # ---------------------------------------------------------
 # GroupMe API helpers
 # ---------------------------------------------------------
@@ -3162,7 +3227,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "f63cbcc"
+BOT_COMMIT_SHA = "c4e5105"
 
 _control_panel_instance = None  # set when panel launches
 
@@ -3632,24 +3697,25 @@ class ControlPanel:
         tk.Label(tab, text="Cooldown Settings",
                  font=("Helvetica", 12, "bold")).pack(anchor="w")
 
+        _ai_cfg = load_config()
         grid = tk.Frame(tab)
         grid.pack(fill="x", pady=(6, 0))
 
         tk.Label(grid, text="!ai cooldown (s):", font=("Helvetica", 10),
                  width=22, anchor="w").grid(row=0, column=0, sticky="w", pady=4)
-        self._ai_cd_var = tk.StringVar(value=str(AI_COOLDOWN_SECONDS))
+        self._ai_cd_var = tk.StringVar(value=str(_ai_cfg.get("ai_cooldown_seconds", AI_COOLDOWN_SECONDS)))
         tk.Entry(grid, textvariable=self._ai_cd_var, width=8,
                  font=("Helvetica", 10)).grid(row=0, column=1, sticky="w")
 
         tk.Label(grid, text="!aiset cooldown (s):", font=("Helvetica", 10),
                  width=22, anchor="w").grid(row=1, column=0, sticky="w", pady=4)
-        self._aiset_cd_var = tk.StringVar(value=str(AISET_COOLDOWN_SECONDS))
+        self._aiset_cd_var = tk.StringVar(value=str(_ai_cfg.get("aiset_cooldown_seconds", AISET_COOLDOWN_SECONDS)))
         tk.Entry(grid, textvariable=self._aiset_cd_var, width=8,
                  font=("Helvetica", 10)).grid(row=1, column=1, sticky="w")
 
         tk.Label(grid, text="Memory turns (group):", font=("Helvetica", 10),
                  width=22, anchor="w").grid(row=2, column=0, sticky="w", pady=4)
-        self._mem_turns_var = tk.StringVar(value=str(AI_MEMORY_MAX_TURNS))
+        self._mem_turns_var = tk.StringVar(value=str(_ai_cfg.get("ai_memory_max_turns", AI_MEMORY_MAX_TURNS)))
         tk.Entry(grid, textvariable=self._mem_turns_var, width=8,
                  font=("Helvetica", 10)).grid(row=2, column=1, sticky="w")
 
@@ -3671,7 +3737,7 @@ class ControlPanel:
         # ── Credentials ───────────────────────────────────────────────────────
         tk.Label(tab, text="Bot Credentials",
                  font=("Helvetica", 12, "bold")).pack(anchor="w")
-        tk.Label(tab, text="Changes are saved to config.json and take effect on next restart.",
+        tk.Label(tab, text="Changes are saved to config.json and applied immediately.",
                  font=("Helvetica", 9), fg="#888888").pack(anchor="w", pady=(0, 8))
 
         grid = tk.Frame(tab)
@@ -3684,7 +3750,14 @@ class ControlPanel:
         def add_row(row, label, key, show=None):
             tk.Label(grid, text=label, font=("Helvetica", 10),
                      width=22, anchor="w").grid(row=row, column=0, sticky="w", pady=3)
-            var = tk.StringVar(value=cfg_now.get(key, ""))
+            # Prefer live global values so the UI always reflects what is actually running
+            live_val = {
+                "access_token":      ACCESS_TOKEN,
+                "dev_group_id":      DEV_GROUP_ID,
+                "ollama_base_model": OLLAMA_BASE_MODEL,
+            }.get(key, "")
+            display_val = live_val or cfg_now.get(key, "")
+            var = tk.StringVar(value=display_val)
             entry = tk.Entry(grid, textvariable=var, font=("Helvetica", 10),
                              width=34, show=show or "")
             entry.grid(row=row, column=1, sticky="w", pady=3, ipady=3)
@@ -3712,16 +3785,16 @@ class ControlPanel:
         pg.pack(fill="x", pady=(6, 0))
 
         pts_fields = [
-            ("!fih min",             "fih_min",   str(POINTS_FIH_MIN)),
-            ("!fih max",             "fih_max",   str(POINTS_FIH_MAX)),
-            ("!fih cooldown (s)",    "fih_cd",    str(POINTS_FIH_CD)),
-            ("!fih lose chance",     "fih_lose",  str(POINTS_FIH_LOSE_CHANCE)),
-            ("!steal min",           "steal_min", str(POINTS_STEAL_MIN)),
-            ("!steal max",           "steal_max", str(POINTS_STEAL_MAX)),
-            ("!steal cooldown (s)",  "steal_cd",  str(POINTS_STEAL_CD)),
-            ("C4 PvP win pts",       "c4_win",    str(POINTS_C4_WIN)),
-            ("C4 vs AI win pts",     "c4_win_ai", str(POINTS_C4_WIN_AI)),
-            ("Leaderboard size",     "lb_size",   str(LEADERBOARD_SIZE)),
+            ("!fih min",             "fih_min",   str(cfg_now.get("fih_min",   POINTS_FIH_MIN))),
+            ("!fih max",             "fih_max",   str(cfg_now.get("fih_max",   POINTS_FIH_MAX))),
+            ("!fih cooldown (s)",    "fih_cd",    str(cfg_now.get("fih_cd",    POINTS_FIH_CD))),
+            ("!fih lose chance",     "fih_lose",  str(cfg_now.get("fih_lose",  POINTS_FIH_LOSE_CHANCE))),
+            ("!steal min",           "steal_min", str(cfg_now.get("steal_min", POINTS_STEAL_MIN))),
+            ("!steal max",           "steal_max", str(cfg_now.get("steal_max", POINTS_STEAL_MAX))),
+            ("!steal cooldown (s)",  "steal_cd",  str(cfg_now.get("steal_cd",  POINTS_STEAL_CD))),
+            ("C4 PvP win pts",       "c4_win",    str(cfg_now.get("c4_win",    POINTS_C4_WIN))),
+            ("C4 vs AI win pts",     "c4_win_ai", str(cfg_now.get("c4_win_ai", POINTS_C4_WIN_AI))),
+            ("Leaderboard size",     "lb_size",   str(cfg_now.get("lb_size",   LEADERBOARD_SIZE))),
         ]
         self._pts_vars = {}
         for r, (lbl, key, default) in enumerate(pts_fields):
@@ -3752,17 +3825,17 @@ class ControlPanel:
                      width=64).grid(row=row*2+1, column=0, sticky="ew", ipady=2)
             self._msg_vars[key] = var
         add_msg_row(mf, "!fih win messages (separate with |)",
-                    " | ".join(FIH_WIN_MESSAGES),           "fih_win",    0)
+                    cfg_now.get("fih_win",    " | ".join(FIH_WIN_MESSAGES)),    "fih_win",    0)
         add_msg_row(mf, "!fih lose messages (separate with |)",
-                    " | ".join(FIH_LOSE_MESSAGES),          "fih_lose_m", 1)
+                    cfg_now.get("fih_lose_m", " | ".join(FIH_LOSE_MESSAGES)),   "fih_lose_m", 1)
         add_msg_row(mf, "!fih cooldown message",
-                    FIH_COOLDOWN_MESSAGE,                    "fih_cd_m",   2)
+                    cfg_now.get("fih_cd_m",   FIH_COOLDOWN_MESSAGE),             "fih_cd_m",   2)
         add_msg_row(mf, "!steal success messages (separate with |)",
-                    " | ".join(STEAL_SUCCESS_MESSAGES),     "steal_ok",   3)
+                    cfg_now.get("steal_ok",   " | ".join(STEAL_SUCCESS_MESSAGES)), "steal_ok", 3)
         add_msg_row(mf, "!steal nobody message",
-                    STEAL_EMPTY_MESSAGE,                     "steal_none", 4)
+                    cfg_now.get("steal_none", STEAL_EMPTY_MESSAGE),               "steal_none", 4)
         add_msg_row(mf, "!steal cooldown message",
-                    STEAL_COOLDOWN_MESSAGE,                  "steal_cd_m", 5)
+                    cfg_now.get("steal_cd_m", STEAL_COOLDOWN_MESSAGE),            "steal_cd_m", 5)
 
         # ── Save button ───────────────────────────────────────────────────────
         ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=12)
@@ -3773,49 +3846,96 @@ class ControlPanel:
             global POINTS_FIH_MIN, POINTS_FIH_MAX, POINTS_FIH_CD, POINTS_FIH_LOSE_CHANCE
             global POINTS_STEAL_MIN, POINTS_STEAL_MAX, POINTS_STEAL_CD
             global POINTS_C4_WIN, POINTS_C4_WIN_AI, LEADERBOARD_SIZE
+            global ACCESS_TOKEN, DEV_GROUP_ID, OLLAMA_BASE_MODEL
 
-            # Save credentials to config.json
-            cfg = load_config()
-            for key, var in self._cfg_vars.items():
-                val = var.get().strip()
-                if val:
-                    cfg[key] = val
-            save_config(cfg)
-
-            # Apply points settings immediately
+            # Validate points before touching anything
             try:
-                POINTS_FIH_MIN         = int(self._pts_vars["fih_min"].get())
-                POINTS_FIH_MAX         = int(self._pts_vars["fih_max"].get())
-                POINTS_FIH_CD          = int(self._pts_vars["fih_cd"].get())
-                POINTS_FIH_LOSE_CHANCE = float(self._pts_vars["fih_lose"].get())
-                POINTS_STEAL_MIN       = int(self._pts_vars["steal_min"].get())
-                POINTS_STEAL_MAX       = int(self._pts_vars["steal_max"].get())
-                POINTS_STEAL_CD        = int(self._pts_vars["steal_cd"].get())
-                POINTS_C4_WIN          = int(self._pts_vars["c4_win"].get())
-                POINTS_C4_WIN_AI       = int(self._pts_vars["c4_win_ai"].get())
-                LEADERBOARD_SIZE       = int(self._pts_vars["lb_size"].get())
+                new_fih_min         = int(self._pts_vars["fih_min"].get())
+                new_fih_max         = int(self._pts_vars["fih_max"].get())
+                new_fih_cd          = int(self._pts_vars["fih_cd"].get())
+                new_fih_lose        = float(self._pts_vars["fih_lose"].get())
+                new_steal_min       = int(self._pts_vars["steal_min"].get())
+                new_steal_max       = int(self._pts_vars["steal_max"].get())
+                new_steal_cd        = int(self._pts_vars["steal_cd"].get())
+                new_c4_win          = int(self._pts_vars["c4_win"].get())
+                new_c4_win_ai       = int(self._pts_vars["c4_win_ai"].get())
+                new_lb_size         = int(self._pts_vars["lb_size"].get())
             except ValueError:
                 messagebox.showerror("Invalid value", "Lose chance: 0.0–1.0; others must be whole numbers.")
                 return
 
+            # Build merged config (load fresh to preserve any keys we don't touch)
+            cfg = load_config()
+
+            # Credentials
+            for key, var in self._cfg_vars.items():
+                val = var.get().strip()
+                if val:
+                    cfg[key] = val
+
+            # Points fields — always write so they survive restarts
+            cfg["fih_min"]   = new_fih_min
+            cfg["fih_max"]   = new_fih_max
+            cfg["fih_cd"]    = new_fih_cd
+            cfg["fih_lose"]  = new_fih_lose
+            cfg["steal_min"] = new_steal_min
+            cfg["steal_max"] = new_steal_max
+            cfg["steal_cd"]  = new_steal_cd
+            cfg["c4_win"]    = new_c4_win
+            cfg["c4_win_ai"] = new_c4_win_ai
+            cfg["lb_size"]   = new_lb_size
+
+            # Custom messages
             global FIH_WIN_MESSAGES, FIH_LOSE_MESSAGES, FIH_COOLDOWN_MESSAGE
             global STEAL_SUCCESS_MESSAGES, STEAL_EMPTY_MESSAGE, STEAL_COOLDOWN_MESSAGE
             def _sp(s): return [x.strip() for x in s.split("|") if x.strip()]
             if hasattr(self, "_msg_vars"):
-                FIH_WIN_MESSAGES       = _sp(self._msg_vars["fih_win"].get())    or FIH_WIN_MESSAGES
-                FIH_LOSE_MESSAGES      = _sp(self._msg_vars["fih_lose_m"].get()) or FIH_LOSE_MESSAGES
-                FIH_COOLDOWN_MESSAGE   = self._msg_vars["fih_cd_m"].get().strip()   or FIH_COOLDOWN_MESSAGE
-                STEAL_SUCCESS_MESSAGES = _sp(self._msg_vars["steal_ok"].get())   or STEAL_SUCCESS_MESSAGES
-                STEAL_EMPTY_MESSAGE    = self._msg_vars["steal_none"].get().strip()  or STEAL_EMPTY_MESSAGE
-                STEAL_COOLDOWN_MESSAGE = self._msg_vars["steal_cd_m"].get().strip()  or STEAL_COOLDOWN_MESSAGE
-            self._set_status("Settings saved. Credential changes take effect on next restart.")
+                cfg["fih_win"]    = self._msg_vars["fih_win"].get().strip()
+                cfg["fih_lose_m"] = self._msg_vars["fih_lose_m"].get().strip()
+                cfg["fih_cd_m"]   = self._msg_vars["fih_cd_m"].get().strip()
+                cfg["steal_ok"]   = self._msg_vars["steal_ok"].get().strip()
+                cfg["steal_none"] = self._msg_vars["steal_none"].get().strip()
+                cfg["steal_cd_m"] = self._msg_vars["steal_cd_m"].get().strip()
+
+            save_config(cfg)
+
+            # Apply points globals immediately
+            POINTS_FIH_MIN         = new_fih_min
+            POINTS_FIH_MAX         = new_fih_max
+            POINTS_FIH_CD          = new_fih_cd
+            POINTS_FIH_LOSE_CHANCE = new_fih_lose
+            POINTS_STEAL_MIN       = new_steal_min
+            POINTS_STEAL_MAX       = new_steal_max
+            POINTS_STEAL_CD        = new_steal_cd
+            POINTS_C4_WIN          = new_c4_win
+            POINTS_C4_WIN_AI       = new_c4_win_ai
+            LEADERBOARD_SIZE       = new_lb_size
+
+            # Apply custom message globals immediately
+            if hasattr(self, "_msg_vars"):
+                FIH_WIN_MESSAGES       = _sp(cfg["fih_win"])    or FIH_WIN_MESSAGES
+                FIH_LOSE_MESSAGES      = _sp(cfg["fih_lose_m"]) or FIH_LOSE_MESSAGES
+                FIH_COOLDOWN_MESSAGE   = cfg["fih_cd_m"]   or FIH_COOLDOWN_MESSAGE
+                STEAL_SUCCESS_MESSAGES = _sp(cfg["steal_ok"])   or STEAL_SUCCESS_MESSAGES
+                STEAL_EMPTY_MESSAGE    = cfg["steal_none"] or STEAL_EMPTY_MESSAGE
+                STEAL_COOLDOWN_MESSAGE = cfg["steal_cd_m"] or STEAL_COOLDOWN_MESSAGE
+
+            # Apply credential globals immediately (no restart needed for most uses)
+            if not os.environ.get("GROUPME_TOKEN") and cfg.get("access_token"):
+                ACCESS_TOKEN = cfg["access_token"]
+            if not os.environ.get("GROUPME_DEV_GROUP_ID") and cfg.get("dev_group_id"):
+                DEV_GROUP_ID = cfg["dev_group_id"]
+            if not os.environ.get("OLLAMA_BASE_MODEL") and cfg.get("ollama_base_model"):
+                OLLAMA_BASE_MODEL = cfg["ollama_base_model"]
+
+            self._set_status("Settings saved and applied.")
 
         tk.Button(btn_row, text="💾  Save Settings", font=("Helvetica", 10, "bold"),
                   command=save_settings,
                   bg="#007aff", fg="white", relief="flat",
                   padx=14, pady=7).pack(side="right")
         tk.Label(btn_row,
-                 text="Credential changes require a restart to take effect.",
+                 text="All changes apply immediately and persist across restarts.",
                  font=("Helvetica", 9), fg="#888888").pack(side="left")
 
     def _build_tab_update(self, nb):
@@ -4015,11 +4135,17 @@ class ControlPanel:
     def _apply_cooldowns(self):
         global AI_COOLDOWN_SECONDS, AISET_COOLDOWN_SECONDS, AI_MEMORY_MAX_TURNS
         try:
-            AI_COOLDOWN_SECONDS   = int(self._ai_cd_var.get())
+            AI_COOLDOWN_SECONDS    = int(self._ai_cd_var.get())
             AISET_COOLDOWN_SECONDS = int(self._aiset_cd_var.get())
-            AI_MEMORY_MAX_TURNS   = int(self._mem_turns_var.get())
+            AI_MEMORY_MAX_TURNS    = int(self._mem_turns_var.get())
+            # Persist so values survive restarts
+            cfg = load_config()
+            cfg["ai_cooldown_seconds"]    = AI_COOLDOWN_SECONDS
+            cfg["aiset_cooldown_seconds"] = AISET_COOLDOWN_SECONDS
+            cfg["ai_memory_max_turns"]    = AI_MEMORY_MAX_TURNS
+            save_config(cfg)
             self._set_status(
-                f"Cooldowns updated — !ai:{AI_COOLDOWN_SECONDS}s  "
+                f"Cooldowns saved — !ai:{AI_COOLDOWN_SECONDS}s  "
                 f"!aiset:{AISET_COOLDOWN_SECONDS}s  "
                 f"memory:{AI_MEMORY_MAX_TURNS} turns"
             )
@@ -4136,6 +4262,9 @@ def main():
     # Load credentials from config.json, running the setup wizard if needed.
     # This must happen before anything else so all globals are populated.
     _load_or_run_setup()
+
+    # Apply all saved settings (points, messages, etc.) from config.json.
+    apply_settings_from_config()
 
     ensure_ai_directories()
     global GAME_GROUP_ID, ADMIN_GROUP_ID, USE_SUBGROUP, last_dev_since_id, last_game_since_id

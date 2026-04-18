@@ -746,7 +746,7 @@ PERSONALITY BEHAVIOR FRAMEWORK:
 - You must NOT use your default conversational style.
 - You must NOT add modern behaviors, modern items, or modern preferences
   unless the personality explicitly allows them.
-  If something from a time period or setting that does not fit your personality's settings is brought into the conversation, then you must act confused about it, for example, if you were an old english guy, a "phone" would be unknown to you.
+  Only act confused about unfamiliar things if the personality you are given explicitly places you in a different time period or setting.
 - You must NOT contradict the personality.
 - You must speak, think, and behave ONLY according to the personality.
 - IMPORTANT: The personality text may mention names or references you do not
@@ -2198,7 +2198,7 @@ def handle_game_command(message):
         # When the AI doesn't know something it responds with ONLY ==query==.
         # We intercept that, run the search, feed the results back, and let
         # the AI produce a real answer which goes out as a second message.
-        search_match = _re_web.fullmatch(r"==(.+?)==", ai_reply.strip(), _re_web.DOTALL)
+        search_match = _re_web.search(r"==(.+?)==", ai_reply.strip(), _re_web.DOTALL)
         if search_match:
             search_query = search_match.group(1).strip()
 

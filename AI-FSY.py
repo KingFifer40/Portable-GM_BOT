@@ -3320,6 +3320,13 @@ class ControlPanel:
         root.resizable(True, True)
         root.minsize(520, 480)
 
+        # Clamp the initial height to 85 % of the screen so the window is
+        # never taller than the display, regardless of content or DPI.
+        root.update_idletasks()
+        screen_h = root.winfo_screenheight()
+        win_h    = min(700, int(screen_h * 0.85))
+        root.geometry(f"560x{win_h}")
+
         self._build_ui()
         self._schedule_refresh()
 

@@ -2201,16 +2201,36 @@ def handle_game_command(message):
         # run the search, feed results back, and let the AI give a real answer.
         search_match = _re_web.search(r"==(.+?)==", ai_reply.strip(), _re_web.DOTALL)
         if search_match:
-            search_query = search_match.group(1).strip()
+            raw_query = search_match.group(1).strip()
 
-            # Strip the ==...== block and any surrounding fluff from the reply.
-            # If there's meaningful text left over outside the markers, send it;
-            # otherwise just show the "Searching…" notice.
+            # Sanitize the query: if the model stuffed a long rambling sentence
+            # inside ==...==, fall back to using the user's original prompt as
+            # the search query (capped at 80 chars) so DDG gets something useful.
+            # A real search query should be short (under ~80 chars) and not
+            # contain question marks mid-string or newlines.
+            def _is_clean_query(q):
+                if len(q) > 80:
+                    return False
+                if q.count("?") > 0:
+                    return False
+                if "\n" in q:
+                    return False
+                return True
+
+            if _is_clean_query(raw_query):
+                search_query = raw_query
+            else:
+                # Fall back to the user's prompt, stripped of leading command words
+                search_query = _re_web.sub(
+                    r"^(what is|who is|tell me about|search for|find|look up)\s*",
+                    "", user_prompt, flags=_re_web.IGNORECASE,
+                ).strip()[:80]
+
+            # Strip ALL ==...== blocks and surrounding fluff before sending anything.
             cleaned_reply = _re_web.sub(r"==.+?==", "", ai_reply, flags=_re_web.DOTALL).strip()
-
-            # Let the group know a search is happening (replaces or follows any cleaned text)
             if cleaned_reply:
                 send_message(GAME_GROUP_ID, cleaned_reply, reply_to_id=msg_id)
+
             send_message(GAME_GROUP_ID, f"🔍 Searching: {search_query}…", reply_to_id=msg_id)
 
             results = _ddg_search(search_query, max_results=3)
@@ -2261,6 +2281,13 @@ def handle_game_command(message):
             if ai_err:
                 send_message(GAME_GROUP_ID, ai_err, reply_to_id=msg_id)
                 return
+
+            # Strip any ==...== the model may have put in the phase 2 reply too.
+            # If it's still trying to search after already getting results, just
+            # clean it out and send whatever text remains — do NOT recurse.
+            ai_reply = _re_web.sub(r"==.+?==", "", ai_reply, flags=_re_web.DOTALL).strip()
+            if not ai_reply:
+                ai_reply = "I found some results but couldn't summarize them. Try asking again!"
 
         # ── English filter (safety layer) ────────────────────────────────────
         if looks_non_english(ai_reply):

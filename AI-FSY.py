@@ -522,71 +522,6 @@ _ai_memory = []
 # Updated every time we receive a message so the AI always has fresh names.
 _known_names: dict = {}   # {user_id: str}
 
-# ---------------------------------------------------------
-# AI Request Queue — ensures only one AI call runs at a time.
-# All incoming !ai requests are serialized through this queue.
-# ---------------------------------------------------------
-import queue as _queue_module
-_ai_request_queue: _queue_module.Queue = _queue_module.Queue()
-_ai_queue_worker_started = False
-
-# ---------------------------------------------------------
-# Resources folder — created automatically on startup.
-# Stores: user_profiles.json (long-term per-user memory)
-# ---------------------------------------------------------
-RESOURCES_DIR = None   # set in ensure_resources_dir()
-
-def ensure_resources_dir():
-    global RESOURCES_DIR
-    RESOURCES_DIR = os.path.join(SCRIPT_DIR, "Resources")
-    os.makedirs(RESOURCES_DIR, exist_ok=True)
-
-# ── Long-term user profile storage ──────────────────────
-# Saved as Resources/user_profiles.json
-# Structure: { user_id: { "name": str, "notes": str } }
-
-def _user_profiles_path():
-    return os.path.join(RESOURCES_DIR, "user_profiles.json")
-
-def load_user_profiles() -> dict:
-    path = _user_profiles_path()
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def save_user_profiles(profiles: dict):
-    path = _user_profiles_path()
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(profiles, f, indent=4)
-    except Exception as e:
-        print(f"[resources] Could not save user profiles: {e}")
-
-def get_user_notes(user_id) -> str:
-    """Return saved notes for a user, or empty string."""
-    profiles = load_user_profiles()
-    entry = profiles.get(str(user_id), {})
-    return entry.get("notes", "")
-
-def set_user_notes(user_id, name: str, notes: str):
-    """Save or update notes for a user."""
-    profiles = load_user_profiles()
-    profiles[str(user_id)] = {"name": name, "notes": notes}
-    save_user_profiles(profiles)
-    # Also write a human-readable txt file per user for easy inspection
-    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
-    txt_path = os.path.join(RESOURCES_DIR, f"user_{safe}_{user_id}.txt")
-    try:
-        with open(txt_path, "w", encoding="utf-8") as f:
-            f.write(f"User: {name} (ID: {user_id})\n")
-            f.write(f"Notes:\n{notes}\n")
-    except Exception as e:
-        print(f"[resources] Could not write user txt: {e}")
-
 
 def register_name(user_id, raw_name: str):
     """Store the sanitized display name for a user_id."""
@@ -692,14 +627,6 @@ RULE S2: You must NEVER swear, use profanity, or use vulgar language.
 RULE S3: You must NEVER insult, harass, demean, bully, or target any person
          unless the user-controlled personality override says to be that way.
 RULE S4: You must NEVER generate sexual content or sexual innuendo of any kind.
-RULE S4b: You must NEVER behave in a flirtatious, romantic, seductive, or suggestive way toward
-          any user -- regardless of personality, character, or roleplay setting.
-          This includes: eyelash-batting, "come closer", inviting tones, implying attraction,
-          winking at users, suggestive compliments directed at users, or any behavior that
-          could be read as flirting or physical interest in a user.
-          A character can HAVE a personality (e.g. "the prettiest princess") without FLIRTING
-          with the people in the chat. Stay in character but keep all interactions platonic and
-          appropriate. If unsure, respond neutrally and move on.
 RULE S5: You must NEVER generate excessively gory content, but some violence and guns are allowed.
          DO NOT describe gore with detail.
 RULE S6: You must NEVER generate slurs or extremely racist content.
@@ -762,12 +689,6 @@ IDENTITY AND NAME RULES (ABSOLUTE):
   mentions a name, that name is NOT automatically a chat participant.
 - Always use the EXACT display name shown in [brackets] when addressing that sender.
 - Do not shorten, alter, or guess at names.
-- CRITICAL: A user\'s display name is ONLY a label — it tells you NOTHING about who they
-  are, what they do, or what role they hold. NEVER infer a person\'s personality, title,
-  occupation, or status from their username. For example, if someone\'s name is
-  "KingFifer40", you must NOT treat them as a king, royalty, or anything related to the
-  word "king" — it is just a username. If someone\'s name is "DrSmith", do NOT assume they
-  are a doctor. Only treat someone according to facts they have explicitly stated in chat.
 - Because this is a SHARED memory, you may see messages from many different people.
   Keep track of who said what strictly by their [bracket name].
 - Never invent names for people you have not seen send a [bracketed] message.
@@ -818,32 +739,26 @@ PERSONALITY OVERRIDE:
 '''
 
 
-AI_MODEL_DIR  = os.path.join(SCRIPT_DIR, "AI-BOT")
+AI_MODEL_DIR = os.path.join(SCRIPT_DIR, "AI-BOT")
 AI_MODEL_FILE = os.path.join(AI_MODEL_DIR, "Modelfile")
 AI_MODEL_NAME = "connect4-ai"
-
-_current_personality = "Be a helpful and friendly assistant."
+AI_RESOURCES_DIR = os.path.join(AI_MODEL_DIR, "resources")
 
 def ensure_ai_directories():
-    global _current_personality
     os.makedirs(AI_MODEL_DIR, exist_ok=True)
-    ensure_resources_dir()
-    # Load previously saved personality from config (so it survives restarts)
-    cfg = load_config()
-    saved_personality = cfg.get("user_personality", "").strip()
-    if saved_personality:
-        _current_personality = saved_personality
+    os.makedirs(AI_RESOURCES_DIR, exist_ok=True)
+
     if not os.path.exists(AI_MODEL_FILE):
         # Stamp in the configured base model before writing
         initial_content = DEFAULT_MODELFILE_CONTENT.replace("{{BASE_MODEL}}", OLLAMA_BASE_MODEL)
-        initial_content = initial_content.replace("{{PERSONALITY}}", _current_personality)
+        initial_content = initial_content.replace("{{PERSONALITY}}", "Be a helpful and friendly assistant.")
         with open(AI_MODEL_FILE, "w", encoding="utf-8") as f:
             f.write(initial_content)
 
 def update_personality(text):
-    global _ai_memory, _current_personality
-    # Always replace the entire personality — never append to the previous one.
-    _current_personality = text
+    global _ai_memory
+    # Always regenerate from the template, stamping in both the base model
+    # and the personality so the Modelfile is always fully self-contained.
     new_content = DEFAULT_MODELFILE_CONTENT.replace("{{BASE_MODEL}}", OLLAMA_BASE_MODEL)
     new_content = new_content.replace("{{PERSONALITY}}", text)
 
@@ -851,16 +766,12 @@ def update_personality(text):
     with open(AI_MODEL_FILE, "w", encoding="utf-8") as f:
         f.write(new_content)
 
-    # Persist the new personality so it survives restarts.
-    cfg = load_config()
-    cfg["user_personality"] = text
-    save_config(cfg)
-
     # Rebuild the model
     os.system(f"ollama create {AI_MODEL_NAME} -f \"{AI_MODEL_FILE}\"")
 
     # Clear the shared conversation history so the group starts fresh
     # with the new personality.
+    global _ai_memory
     _ai_memory.clear()
 
 # ---------------------------------------------------------
@@ -1677,21 +1588,16 @@ def run_ollama(prompt_text, model=AI_MODEL_NAME, user_id=None, sender_name=None)
     Uses a SHARED group conversation history so the AI sees the whole
     group's context rather than isolated per-user threads.
 
-    user_id      — GroupMe user ID (used for long-term notes lookup).
+    user_id      — GroupMe user ID (used only for name lookup).
     sender_name  — Sanitized display name shown in the message prefix so
                    the model knows who is speaking.
     """
     global _ai_memory
 
-    # Build the user content, prepending any long-term notes we have for this user
-    notes = get_user_notes(user_id) if user_id else ""
+    # Build the message, prefixed with the sender's name so the model knows
+    # who in the group is speaking.
     if sender_name:
-        if notes:
-            user_content = (
-                f"[{sender_name}] (known facts about this user: {notes}): {prompt_text}"
-            )
-        else:
-            user_content = f"[{sender_name}]: {prompt_text}"
+        user_content = f"[{sender_name}]: {prompt_text}"
     else:
         user_content = prompt_text
 
@@ -1737,47 +1643,6 @@ def run_ollama(prompt_text, model=AI_MODEL_NAME, user_id=None, sender_name=None)
         if _ai_memory and _ai_memory[-1]["role"] == "user":
             _ai_memory.pop()
         return f"AI error: {e}"
-
-
-def looks_non_english(text):
-    if not text:
-        return False
-    non_ascii = 0
-    total_alpha = 0
-    for ch in text:
-        cp = ord(ch)
-        if 0x1F300 <= cp <= 0x1FAFF:
-            continue
-        if cp < 128:
-            if ch.isalpha():
-                total_alpha += 1
-            continue
-        if 0x00C0 <= cp <= 0x024F:
-            non_ascii += 1
-            total_alpha += 1
-            continue
-        if ch.isalpha() or ch.isspace():
-            non_ascii += 3
-            total_alpha += 1
-    if total_alpha == 0:
-        return False
-    return (non_ascii / total_alpha) > 0.15
-
-
-def check_ai_cooldown(user_id, cooldown_dict, cooldown_seconds):
-    now = time.time()
-    last = cooldown_dict.get(user_id)
-    if last is None:
-        return True, 0
-    elapsed = now - last
-    if elapsed >= cooldown_seconds:
-        return True, 0
-    return False, int(cooldown_seconds - elapsed)
-
-
-def set_ai_cooldown(user_id, cooldown_dict):
-    cooldown_dict[user_id] = time.time()
-
 
 def handle_dev_command(message):
     global GAME_GROUP_ID, GAME_ENABLED, AI_ENABLED, last_game_since_id, ADMIN_GROUP_ID, USE_SUBGROUP
@@ -2008,6 +1873,65 @@ def send_typing(group_id):
         pass
 
 
+def looks_non_english(text):
+    """
+    Heuristic check: returns True if the response appears to contain
+    significant non-English / non-ASCII content.
+    Allows punctuation, numbers, and emoji, but flags heavy use of
+    non-Latin scripts or large amounts of Latin-extended characters.
+    """
+    if not text:
+        return False
+
+    non_ascii = 0
+    total_alpha = 0
+
+    for ch in text:
+        cp = ord(ch)
+        # Skip common emoji ranges
+        if 0x1F300 <= cp <= 0x1FAFF:
+            continue
+        # Basic ASCII
+        if cp < 128:
+            if ch.isalpha():
+                total_alpha += 1
+            continue
+        # Latin Extended (accented chars - allow sparingly)
+        if 0x00C0 <= cp <= 0x024F:
+            non_ascii += 1
+            total_alpha += 1
+            continue
+        # Non-Latin scripts (Cyrillic, Arabic, CJK, Hebrew, Greek, etc.)
+        if ch.isalpha() or ch.isspace():
+            non_ascii += 3  # weight heavier
+            total_alpha += 1
+
+    if total_alpha == 0:
+        return False
+
+    ratio = non_ascii / total_alpha
+    return ratio > 0.15  # more than 15% non-ASCII alpha = likely foreign
+
+
+def check_ai_cooldown(user_id, cooldown_dict, cooldown_seconds):
+    """
+    Returns (allowed, seconds_remaining).
+    allowed=True means the user may proceed.
+    """
+    now = time.time()
+    last = cooldown_dict.get(user_id)
+    if last is None:
+        return True, 0
+    elapsed = now - last
+    if elapsed >= cooldown_seconds:
+        return True, 0
+    return False, int(cooldown_seconds - elapsed)
+
+
+def set_ai_cooldown(user_id, cooldown_dict):
+    cooldown_dict[user_id] = time.time()
+
+
 def handle_game_command(message):
     global GAME_TIMEOUT_SECONDS, GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED
 
@@ -2068,59 +1992,33 @@ def handle_game_command(message):
         # even while the AI is still thinking
         set_ai_cooldown(sender_id, _ai_last_used)
 
-        # Enqueue the request so only one AI call runs at a time
-        queue_size = _ai_request_queue.qsize()
-        if queue_size > 0:
+        # Start typing indicator thread
+        typing_stop = threading.Event()
+
+        def typing_loop():
+            while not typing_stop.is_set():
+                send_typing(GAME_GROUP_ID)
+                time.sleep(2)
+
+        t = threading.Thread(target=typing_loop, daemon=True)
+        t.start()
+
+        # Run AI (pass identity so memory is per-user and named)
+        ai_response = run_ollama(user_prompt, user_id=sender_id, sender_name=sender_name)
+
+        # Stop typing indicator
+        typing_stop.set()
+
+        # --- Python-side English filter (second safety layer) ---
+        if looks_non_english(ai_response):
             send_message(
                 GAME_GROUP_ID,
-                f"⏳ Your request has been queued (position {queue_size + 1}). Please wait...",
+                "⚠️ The AI returned a response that may contain non-English content and was blocked.",
                 reply_to_id=msg_id,
             )
-
-        _ai_request_queue.put({
-            "prompt":      user_prompt,
-            "sender_id":   sender_id,
-            "sender_name": sender_name,
-            "msg_id":      msg_id,
-            "group_id":    GAME_GROUP_ID,
-        })
-
-        _ensure_ai_queue_worker()
-        return
-
-    # !ainote <text> — save a note about yourself for long-term AI memory
-    if cmd == "!ainote":
-        if len(parts) < 2:
-            existing = get_user_notes(sender_id)
-            if existing:
-                send_message(
-                    GAME_GROUP_ID,
-                    f"📋 Your current note: {existing}\nUse !ainote <text> to update it.",
-                    reply_to_id=msg_id,
-                )
-            else:
-                send_message(
-                    GAME_GROUP_ID,
-                    "Usage: !ainote <facts about yourself>\nExample: !ainote I am a chef who loves pizza.",
-                    reply_to_id=msg_id,
-                )
             return
-        note_text = text[len("!ainote"):].strip()
-        set_user_notes(sender_id, sender_name, note_text)
-        send_message(
-            GAME_GROUP_ID,
-            f"✅ Note saved! The AI will remember: \"{note_text}\"",
-            reply_to_id=msg_id,
-        )
-        return
 
-    # !aiqueue — show how many requests are pending
-    if cmd == "!aiqueue":
-        q = _ai_request_queue.qsize()
-        if q == 0:
-            send_message(GAME_GROUP_ID, "✅ AI queue is empty — no one waiting.", reply_to_id=msg_id)
-        else:
-            send_message(GAME_GROUP_ID, f"⏳ {q} request(s) currently in the AI queue.", reply_to_id=msg_id)
+        send_message(GAME_GROUP_ID, ai_response, reply_to_id=msg_id)
         return
 
     # -----------------------------
@@ -2274,9 +2172,6 @@ def handle_game_command(message):
                     "• !ai <message> — Chat with the AI (15s cooldown)\n"
                     "• !aiset <text> — Set a new AI personality (60s cooldown)\n"
                     "  Setting a new personality clears all conversation history.\n"
-                    "• !ainote <facts> — Save a personal note the AI will remember about you\n"
-                    "  Example: !ainote I am a chef who loves pizza.\n"
-                    "• !aiqueue — See how many AI requests are queued\n"
                     "• !aiforget — Clear the group's shared AI conversation history (admins only)\n"
                     "\n"
                     "The AI has a shared group memory — it sees messages from everyone\n"
@@ -2386,7 +2281,7 @@ def handle_game_command(message):
 
         # Load verses
         try:
-            path = os.path.join(AI_MODEL_DIR, "resources", filename)
+            path = os.path.join(AI_RESOURCES_DIR, filename)
             with open(path, "r", encoding="utf-8") as f:
                 verses = [line.strip() for line in f if line.strip()]
 
@@ -2435,7 +2330,7 @@ def handle_game_command(message):
         # Load scripture files
         def load_scripture(source_name):
             filename = "bible_clean.txt" if source_name == "bible" else "book_of_mormon_clean.txt"
-            path = os.path.join(AI_MODEL_DIR, "resources", filename)
+            path = os.path.join(AI_RESOURCES_DIR, filename)
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     return [line.strip() for line in f if line.strip()]
@@ -3167,70 +3062,6 @@ def handle_game_command(message):
 
     # Unknown command
     send_message(GAME_GROUP_ID, "Unknown command. Use #help for a list of commands.", reply_to_id=msg_id)
-
-
-# =============================================================================
-# AI Request Queue Worker
-# =============================================================================
-
-def _ensure_ai_queue_worker():
-    """Start the AI queue worker thread if it isn't running yet."""
-    global _ai_queue_worker_started
-    if not _ai_queue_worker_started:
-        _ai_queue_worker_started = True
-        t = threading.Thread(target=_ai_queue_worker_loop, daemon=True)
-        t.start()
-
-
-def _ai_queue_worker_loop():
-    """
-    Processes AI requests one at a time from _ai_request_queue.
-    Each request runs to completion before the next one starts.
-    This prevents the model from receiving overlapping calls and
-    producing confused or mixed-up responses.
-    """
-    while True:
-        try:
-            req = _ai_request_queue.get()   # blocks until a request arrives
-            prompt      = req["prompt"]
-            sender_id   = req["sender_id"]
-            sender_name = req["sender_name"]
-            msg_id      = req["msg_id"]
-            group_id    = req["group_id"]
-
-            # Show typing indicator while generating
-            typing_stop = threading.Event()
-
-            def typing_loop():
-                while not typing_stop.is_set():
-                    send_typing(group_id)
-                    time.sleep(2)
-
-            t = threading.Thread(target=typing_loop, daemon=True)
-            t.start()
-
-            try:
-                ai_response = run_ollama(prompt, user_id=sender_id, sender_name=sender_name)
-            finally:
-                typing_stop.set()
-
-            if looks_non_english(ai_response):
-                send_message(
-                    group_id,
-                    "⚠️ The AI returned a response that may contain non-English content and was blocked.",
-                    reply_to_id=msg_id,
-                )
-            else:
-                send_message(group_id, ai_response, reply_to_id=msg_id)
-
-        except Exception:
-            print("Error in AI queue worker:")
-            traceback.print_exc()
-        finally:
-            try:
-                _ai_request_queue.task_done()
-            except Exception:
-                pass
 
 
 # ---------------------------------------------------------

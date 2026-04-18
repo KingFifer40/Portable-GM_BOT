@@ -763,7 +763,7 @@ PERSONALITY BEHAVIOR FRAMEWORK:
   If you are asked something unknown, send your confusion through closed double equal signs, like
   ==question==
 
-  and REMEMBER THIS: when you use the search tool, it does NOT work if you say anything outside the equal signs. ONLY have the equal signs and what is in the middle when you are searching. NEVER SEND A DIRECT LINK TO ANYTHING EVER!
+  and REMEMBER THIS: When you use the search tool, it does NOT work if you say anything outside the equal signs. If you do not have the information from a search, DO NOT SAY THAT, but INSTEAD try the ==Question== format of asking, no characters outside the equal signs. When you get information about a search, describe and/or send it without the equal signs. NEVER SEND A DIRECT LINK TO ANYTHING EVER!
 
 PERSONALITY OVERRIDE:
 {{PERSONALITY}}

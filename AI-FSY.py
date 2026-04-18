@@ -704,8 +704,6 @@ You have access to a web search tool. You MUST use it in these situations:
   you are not 100% certain about (e.g. "what is GroupMe", "how does Discord work")
 - Any question about current events, news, scores, weather, prices, or recent facts
 - Any question about a person, place, or thing where you do not have confident, accurate knowledge
-- Any time the personality you are playing would not realistically know the answer
-  (e.g. an old-timey character asked about a modern app MUST search rather than guess)
 
 HOW TO SEARCH:
 When you need to search, your ENTIRE response must be ONLY this format — nothing else:
@@ -714,9 +712,12 @@ When you need to search, your ENTIRE response must be ONLY this format — nothi
 Example: if asked "what is GroupMe?", respond with ONLY:
 ==what is GroupMe==
 
-Do NOT add any words before or after the == markers.
-Do NOT answer the question yourself if you need to search.
-Do NOT say "I will search" — just output the ==search query== and nothing else.
+CRITICAL SEARCH RULES — NO EXCEPTIONS:
+- Do NOT add any words before or after the == markers. Not even one word.
+- Do NOT answer the question yourself if you need to search.
+- Do NOT ask the user if you can search. Do NOT say "I will search". Do NOT say "Would you like me to search?". Just output ==search query== immediately and silently.
+- Do NOT announce, explain, or ask permission. Search happens automatically.
+- If you are unsure whether to search, just search. Output ==query== and nothing else.
 
 After you receive search results, answer normally using that information.
 You may still use your personality when answering, but the facts must come from the search.
@@ -2195,14 +2196,21 @@ def handle_game_command(message):
             return
 
         # ── Check for ==search query== marker ───────────────────────────────
-        # When the AI doesn't know something it responds with ONLY ==query==.
-        # We intercept that, run the search, feed the results back, and let
-        # the AI produce a real answer which goes out as a second message.
+        # The AI signals a web search by including ==query== in its reply.
+        # Strip the marker (and any surrounding text) from what gets sent,
+        # run the search, feed results back, and let the AI give a real answer.
         search_match = _re_web.search(r"==(.+?)==", ai_reply.strip(), _re_web.DOTALL)
         if search_match:
             search_query = search_match.group(1).strip()
 
-            # Let the group know a search is happening
+            # Strip the ==...== block and any surrounding fluff from the reply.
+            # If there's meaningful text left over outside the markers, send it;
+            # otherwise just show the "Searching…" notice.
+            cleaned_reply = _re_web.sub(r"==.+?==", "", ai_reply, flags=_re_web.DOTALL).strip()
+
+            # Let the group know a search is happening (replaces or follows any cleaned text)
+            if cleaned_reply:
+                send_message(GAME_GROUP_ID, cleaned_reply, reply_to_id=msg_id)
             send_message(GAME_GROUP_ID, f"🔍 Searching: {search_query}…", reply_to_id=msg_id)
 
             results = _ddg_search(search_query, max_results=3)

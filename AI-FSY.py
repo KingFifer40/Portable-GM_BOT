@@ -1643,6 +1643,99 @@ def reset_game_state():
     game_state["timeout_seconds"] = GAME_TIMEOUT_SECONDS
 
 # ---------------------------------------------------------
+# Web search via DuckDuckGo (no API key required)
+# ---------------------------------------------------------
+
+import re as _re_web
+
+# Keywords/phrases that suggest the user wants current/factual info from the web
+_SEARCH_TRIGGERS = _re_web.compile(
+    r"\b(search|look up|look it up|find|google|what is|who is|who are|"
+    r"what are|what was|what were|when did|when is|when was|when were|"
+    r"where is|where are|where was|how do|how does|how did|"
+    r"latest|recent|current|today|news|score|weather|price|define|"
+    r"tell me about|info on|information on|facts about)\b",
+    _re_web.IGNORECASE,
+)
+
+
+def _ddg_search(query, max_results=3):
+    """
+    Query DuckDuckGo Lite (plain HTML, no JS, no API key).
+    Returns a list of {title, snippet} dicts, or [] on any failure.
+    """
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; AI-FSY-bot/1.0)",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        resp = requests.get(
+            "https://lite.duckduckgo.com/lite/",
+            params={"q": query, "kl": "us-en"},
+            headers=headers,
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            return []
+
+        html = resp.text
+
+        # DDG Lite result titles are in <a class="result-link"> tags
+        titles = _re_web.findall(r'class="result-link"[^>]*>([^<]+)<', html)
+        # Snippets are in <td class="result-snippet"> ... </td>
+        raw_snips = _re_web.findall(
+            r'class="result-snippet"[^>]*>([\s\S]*?)</td>', html
+        )
+
+        from html import unescape as _html_unescape
+
+        def _strip_tags(s):
+            return _html_unescape(_re_web.sub(r"<[^>]+>", "", s).strip())
+
+        results = []
+        for i in range(min(max_results, len(titles), len(raw_snips))):
+            snippet = _strip_tags(raw_snips[i])
+            title   = _html_unescape(titles[i].strip())
+            if title or snippet:
+                results.append({"title": title, "snippet": snippet})
+        return results
+    except Exception:
+        return []
+
+
+def _maybe_web_context(prompt_text):
+    """
+    If the prompt looks like it needs a web search, perform one with
+    DuckDuckGo and return a short context block to inject before the
+    AI conversation. Returns "" when no search is warranted or it fails.
+    """
+    if not _SEARCH_TRIGGERS.search(prompt_text):
+        return ""
+
+    # Strip common command-style prefixes to build a cleaner search query
+    query = _re_web.sub(
+        r"^(search|look up|look it up|find|google|tell me about|"
+        r"info on|information on|facts about)\s*",
+        "", prompt_text, flags=_re_web.IGNORECASE,
+    ).strip() or prompt_text
+
+    results = _ddg_search(query, max_results=3)
+    if not results:
+        return ""
+
+    lines = [f"[Web search results for: {query}]"]
+    for r in results:
+        lines.append(f"Title: {r['title']}")
+        if r["snippet"]:
+            lines.append(f"Info: {r['snippet']}")
+        lines.append("")
+    lines.append(
+        "[Use the above search results to help answer the user if relevant. "
+        "Do not say you searched or mention DuckDuckGo; just answer naturally.]"
+    )
+    return "\n".join(lines)
+
+# ---------------------------------------------------------
 # Dev group command handling
 # ---------------------------------------------------------
 
@@ -1659,14 +1752,15 @@ def run_ollama(prompt_text, model=AI_MODEL_NAME, user_id=None, sender_name=None)
     """
     global _ai_memory
 
-    # Build the message, prefixed with the sender's name so the model knows
-    # who in the group is speaking.
+    # Build the clean message stored in conversation history.
+    # The sender name prefix lets the AI know who in the group is speaking.
     if sender_name:
         user_content = f"[{sender_name}]: {prompt_text}"
     else:
         user_content = prompt_text
 
-    # Append the new user message to the shared history
+    # Append the CLEAN message to shared history so future turns are not
+    # polluted with stale search snippets from this request.
     _ai_memory.append({"role": "user", "content": user_content})
 
     # Trim to keep only the most recent AI_MEMORY_MAX_TURNS turn-pairs.
@@ -1675,10 +1769,22 @@ def run_ollama(prompt_text, model=AI_MODEL_NAME, user_id=None, sender_name=None)
     if len(_ai_memory) > max_entries:
         _ai_memory = _ai_memory[-max_entries:]
 
+    # Optionally enrich the current request with live DuckDuckGo results.
+    # We build a one-shot messages list: full history as-is, but the last
+    # user entry replaced with a version that has the search context
+    # prepended. The AI sees fresh web data NOW without it bleeding into
+    # future turns stored in _ai_memory.
+    web_ctx = _maybe_web_context(prompt_text)
+    if web_ctx:
+        enriched = web_ctx + "\n\n" + user_content
+        messages_to_send = _ai_memory[:-1] + [{"role": "user", "content": enriched}]
+    else:
+        messages_to_send = _ai_memory
+
     try:
         resp = requests.post(
             "http://localhost:11434/api/chat",
-            json={"model": model, "messages": _ai_memory, "stream": True},
+            json={"model": model, "messages": messages_to_send, "stream": True},
             stream=True,
             timeout=120
         )
@@ -4224,6 +4330,14 @@ class ControlPanel:
 
     def _restart_bot(self):
         self._set_status("Restarting…")
+        # Release the lock file before replacing the process so the new
+        # instance does not see a stale lock. On Windows, os.execv() spawns
+        # a fresh process (new PID) rather than replacing in-place, so the
+        # lock checker would otherwise block the restart.
+        try:
+            os.remove(_LOCK_FILE)
+        except OSError:
+            pass
         self.root.after(500, lambda: os.execv(sys.executable,
                                               [sys.executable] + sys.argv))
 

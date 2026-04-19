@@ -9,7 +9,31 @@ import subprocess
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _bootstrap_dependencies():
-    required = ["requests", "Pillow"]
+    required = ["requests"]
+    # Pillow is imported as 'PIL' but installed as 'Pillow'
+    try:
+        __import__("PIL")
+    except ImportError:
+        print("[setup] Package 'Pillow' is not installed. Attempting to install...")
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "--user", "Pillow"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            __import__("PIL")
+            print("[setup] 'Pillow' installed successfully.")
+        except Exception as e:
+            print()
+            print("  ERROR: Could not install 'Pillow' automatically.")
+            print("  Please install it manually by running:")
+            print()
+            print("      pip install Pillow")
+            print()
+            print(f"  Then run the bot again. (Error detail: {e})")
+            print()
+            input("Press Enter to exit...")
+            sys.exit(1)
     for pkg in required:
         try:
             __import__(pkg)

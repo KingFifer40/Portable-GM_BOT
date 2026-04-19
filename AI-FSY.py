@@ -9,7 +9,7 @@ import subprocess
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _bootstrap_dependencies():
-    required = ["requests"]
+    required = ["requests", "Pillow"]
     for pkg in required:
         try:
             __import__(pkg)
@@ -1317,6 +1317,206 @@ def gm_post(path, data=None):
     return resp.json().get("response")
 
 
+# ---------------------------------------------------------
+# Profile-picture swap helpers
+# ---------------------------------------------------------
+# Paths where the two avatar images are cached next to the script.
+_PFP_ORIGINAL_PATH = os.path.join(SCRIPT_DIR, "AI-BOT", "pfp_original.jpg")
+_PFP_BOT_PATH      = os.path.join(SCRIPT_DIR, "AI-BOT", "pfp_bot.jpg")
+
+# GroupMe image-service URL (used to upload avatars)
+_GM_IMAGE_SERVICE = "https://image.groupme.com/pictures"
+
+# Brightness multiplier for the bot avatar (>1 = brighter)
+_PFP_BRIGHTNESS = 1.8
+
+
+def _fetch_my_avatar_url() -> str | None:
+    """
+    Calls /users/me and returns the current avatar_url, or None on failure.
+    """
+    try:
+        resp = requests.get(
+            f"{BASE_URL}/users/me",
+            params={"token": ACCESS_TOKEN},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return resp.json().get("response", {}).get("avatar_url")
+    except Exception as e:
+        print(f"[pfp] Could not fetch /users/me: {e}")
+    return None
+
+
+def _download_image(url: str, dest_path: str) -> bool:
+    """Download an image from *url* and save it to *dest_path*. Returns True on success."""
+    try:
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        with open(dest_path, "wb") as fh:
+            fh.write(r.content)
+        return True
+    except Exception as e:
+        print(f"[pfp] Download failed ({url}): {e}")
+        return False
+
+
+def _make_bot_pfp(src_path: str, dst_path: str) -> bool:
+    """
+    Creates the bright 'BOT' overlay avatar from *src_path* and saves to *dst_path*.
+    Returns True on success.
+    """
+    try:
+        from PIL import Image, ImageEnhance, ImageDraw, ImageFont
+
+        img = Image.open(src_path).convert("RGB")
+
+        # ── Brighten ──────────────────────────────────────────────────────
+        enhancer = ImageEnhance.Brightness(img)
+        img = enhancer.enhance(_PFB_BRIGHTNESS if hasattr(img, "_pfb") else _PFP_BRIGHTNESS)
+
+        # ── Draw "BOT" banner across the center ───────────────────────────
+        draw = ImageDraw.Draw(img)
+        w, h = img.size
+
+        # Try to load a truetype font; fall back to the default bitmap font
+        font_size = max(24, h // 5)
+        try:
+            font = ImageFont.truetype("arial.ttf", font_size)
+        except Exception:
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
+            except Exception:
+                font = ImageFont.load_default()
+
+        text = "BOT"
+        # Use textbbox when available (Pillow ≥ 9.2), fall back to textsize
+        try:
+            bbox = draw.textbbox((0, 0), text, font=font)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+        except AttributeError:
+            tw, th = draw.textsize(text, font=font)
+
+        tx = (w - tw) / 2
+        ty = (h - th) / 2
+
+        # Semi-transparent black bar behind the text
+        bar_pad = th // 4
+        draw.rectangle(
+            [0, ty - bar_pad, w, ty + th + bar_pad],
+            fill=(0, 0, 0, 160),
+        )
+        # White text with a thin black outline for readability
+        for dx, dy in [(-2, 0), (2, 0), (0, -2), (0, 2)]:
+            draw.text((tx + dx, ty + dy), text, font=font, fill=(0, 0, 0))
+        draw.text((tx, ty), text, font=font, fill=(255, 255, 255))
+
+        img.save(dst_path, "JPEG", quality=90)
+        return True
+
+    except Exception as e:
+        print(f"[pfp] Could not create bot avatar: {e}")
+        return False
+
+
+def _upload_pfp_to_groupme(image_path: str) -> str | None:
+    """
+    Uploads a local JPEG to the GroupMe image service.
+    Returns the hosted URL, or None on failure.
+    """
+    try:
+        with open(image_path, "rb") as fh:
+            resp = requests.post(
+                _GM_IMAGE_SERVICE,
+                headers={"X-Access-Token": ACCESS_TOKEN, "Content-Type": "image/jpeg"},
+                data=fh,
+                timeout=20,
+            )
+        resp.raise_for_status()
+        url = resp.json().get("payload", {}).get("url")
+        return url
+    except Exception as e:
+        print(f"[pfp] Upload failed: {e}")
+        return None
+
+
+def _set_my_avatar(image_url: str) -> bool:
+    """
+    PATCHes /users/update with a new avatar_url.
+    Returns True on success.
+    """
+    try:
+        resp = requests.post(
+            f"{BASE_URL}/users/update",
+            params={"token": ACCESS_TOKEN},
+            json={"user": {"avatar_url": image_url}},
+            timeout=10,
+        )
+        return resp.status_code in (200, 201)
+    except Exception as e:
+        print(f"[pfp] Could not update avatar: {e}")
+        return False
+
+
+def pfp_startup_check():
+    """
+    Called once at startup.
+    • Downloads the current avatar as pfp_original.jpg (if not already present).
+    • Generates pfp_bot.jpg (bright + BOT text) from the original.
+    Both files are saved in the AI-BOT/ folder next to the script.
+    """
+    ensure_ai_directories()
+
+    # Only re-download the original if we don't have it yet
+    if not os.path.exists(_PFP_ORIGINAL_PATH):
+        print("[pfp] Downloading your current GroupMe avatar...")
+        avatar_url = _fetch_my_avatar_url()
+        if not avatar_url:
+            print("[pfp] WARNING: Could not find your avatar URL. Profile-picture swapping will be skipped.")
+            return
+        if not _download_image(avatar_url, _PFP_ORIGINAL_PATH):
+            print("[pfp] WARNING: Avatar download failed. Profile-picture swapping will be skipped.")
+            return
+        print(f"[pfp] Avatar saved to {_PFP_ORIGINAL_PATH}")
+    else:
+        print(f"[pfp] Original avatar already cached at {_PFP_ORIGINAL_PATH}")
+
+    # Always regenerate the bot pfp so brightness/text changes take effect
+    print("[pfp] Generating bright 'BOT' avatar...")
+    if _make_bot_pfp(_PFP_ORIGINAL_PATH, _PFP_BOT_PATH):
+        print(f"[pfp] Bot avatar saved to {_PFP_BOT_PATH}")
+    else:
+        print("[pfp] WARNING: Could not generate bot avatar. Swapping will be skipped.")
+
+
+def send_message_as_bot(group_id: str, text: str, reply_to_id=None):
+    """
+    Wrapper around send_message that:
+      1. Swaps the account avatar to the bright 'BOT' image.
+      2. Sends the message.
+      3. Reverts the avatar back to the original.
+    Falls back to a plain send_message if pfp images are missing.
+    """
+    # If we don't have both avatar files ready, just send normally
+    if not os.path.exists(_PFP_BOT_PATH) or not os.path.exists(_PFP_ORIGINAL_PATH):
+        send_message(group_id, text, reply_to_id=reply_to_id)
+        return
+
+    # ── Step 1: Upload & apply the bot avatar ────────────────────────────
+    bot_url = _upload_pfp_to_groupme(_PFP_BOT_PATH)
+    if bot_url:
+        _set_my_avatar(bot_url)
+
+    # ── Step 2: Send the message ─────────────────────────────────────────
+    send_message(group_id, text, reply_to_id=reply_to_id)
+
+    # ── Step 3: Revert to the original avatar ────────────────────────────
+    orig_url = _upload_pfp_to_groupme(_PFP_ORIGINAL_PATH)
+    if orig_url:
+        _set_my_avatar(orig_url)
+
+
 def send_message(group_id, text, reply_to_id=None):
     # Add clanker signature
     text = f"{text}\n-bot"
@@ -2083,7 +2283,7 @@ def handle_game_command(message):
             )
             return
 
-        send_message(GAME_GROUP_ID, ai_response, reply_to_id=msg_id)
+        send_message_as_bot(GAME_GROUP_ID, ai_response, reply_to_id=msg_id)
         return
 
     # -----------------------------
@@ -3227,7 +3427,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "c4e5105"
+BOT_COMMIT_SHA = "005ede0"
 
 _control_panel_instance = None  # set when panel launches
 
@@ -4274,6 +4474,7 @@ def main():
     apply_settings_from_config()
 
     ensure_ai_directories()
+    pfp_startup_check()
     global GAME_GROUP_ID, ADMIN_GROUP_ID, USE_SUBGROUP, last_dev_since_id, last_game_since_id
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)

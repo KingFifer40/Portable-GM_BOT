@@ -9,7 +9,7 @@ import subprocess
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _bootstrap_dependencies():
-    required = ["requests"]
+    required = ["requests", "ddgs"]
     # Pillow is imported as 'PIL' but installed as 'Pillow'
     try:
         __import__("PIL")
@@ -721,9 +721,13 @@ IDENTITY AND NAME RULES (ABSOLUTE):
 """
 
 SYSTEM """
-SCRIPTURE TOOL RULES (ABSOLUTE)
+TOOL RULES (ABSOLUTE)
 ---------------------------------
-You have access to two tools for looking up real scripture:
+You have access to the following tools:
+
+  web_search(query, time_filter)
+    — Searches the web using DuckDuckGo for current, real-world information.
+    — time_filter: "" = all time, "d" = past day, "w" = past week, "m" = past month.
 
   search_scriptures(query, source)
     — Searches the Bible (KJV) and/or Book of Mormon for verses containing
@@ -733,6 +737,37 @@ You have access to two tools for looking up real scripture:
   get_verse(reference, source)
     — Fetches the exact text of a specific verse by reference (e.g. "John 3:16").
 
+── WEB SEARCH RULES ──────────────────────────────────────────────────────────
+RULE W1: Your training data has a cutoff around early 2023. You do NOT know
+         about things that happened after that date. You must NEVER answer
+         questions about current events, recent news, latest releases,
+         live scores, current prices, or any rapidly-changing topic from
+         memory. Instead you MUST call web_search first.
+
+RULE W2: Examples of when you MUST search before answering:
+         - "What is the latest/newest/current ..."
+         - "What happened recently with ..."
+         - "Who won [any recent game/election/award]"
+         - "What is [person] doing now?"
+         - Any question about events, releases, or changes after 2022.
+
+RULE W3: If you are unsure whether your training data covers a topic, SEARCH.
+         It is better to search unnecessarily than to confidently give stale
+         or wrong information.
+
+RULE W4: After receiving web search results, summarise what you found clearly.
+         Do not make up information not present in the results. If the results
+         do not answer the question, say so.
+
+RULE W5: PERSONALITY EXCEPTION — If the active personality is explicitly set
+         to a historical era (e.g. medieval knight, 1800s pioneer) AND the
+         user\'s question is clearly an in-character roleplay question about
+         that era, you may skip the web search and answer in-character.
+         HOWEVER: if the user is clearly asking a real-world current question
+         (even in a fun way, like "what is the score of the game tonight?"),
+         you MUST search regardless of personality. When in doubt, search.
+
+── SCRIPTURE TOOL RULES ──────────────────────────────────────────────────────
 RULE T1: When anyone asks about scripture, wants a verse on a topic, asks you
          to "look up" or "find" something in the scriptures, or mentions a
          specific verse reference — you MUST call the appropriate tool.
@@ -2033,10 +2068,141 @@ def _parse_verse_line(verse_line: str):
 
 # Maximum verses the AI can receive per tool call (keeps context manageable)
 _AI_TOOL_MAX_RESULTS = 8
+_AI_WEB_MAX_RESULTS  = 5   # web search results returned to the model per call
+
+# ---------------------------------------------------------
+# Web search tool — DuckDuckGo via the ddgs library
+# The library is installed automatically on first run (see bootstrap).
+# ---------------------------------------------------------
+
+def _tool_web_search(query: str, time_filter: str = "") -> str:
+    """
+    Python-side implementation of the web_search tool.
+    Runs a DuckDuckGo text search + (if time_filter is set) a news search,
+    merges results, and returns a formatted string for the model to read.
+
+    time_filter: "" = all time, "d" = past day, "w" = past week,
+                 "m" = past month, "y" = past year
+    """
+    query = query.strip()
+    if not query:
+        return "Error: empty search query."
+
+    timelimit = time_filter.strip() if time_filter.strip() in ("d", "w", "m", "y") else None
+
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        return (
+            "Web search is unavailable — the 'ddgs' package is not installed. "
+            "The bot owner can fix this by running: pip install ddgs"
+        )
+
+    lines = []
+    try:
+        ddgs = DDGS()
+
+        # ── Text results ─────────────────────────────────────────────────────
+        text_results = ddgs.text(
+            query,
+            max_results=_AI_WEB_MAX_RESULTS,
+            timelimit=timelimit,
+        )
+        if text_results:
+            lines.append(f"Web search results for: \"{query}\"")
+            for i, r in enumerate(text_results, 1):
+                title = r.get("title", "").strip()
+                body  = r.get("body",  "").strip()
+                href  = r.get("href",  "").strip()
+                lines.append(f"\n[{i}] {title}")
+                if body:
+                    lines.append(f"    {body}")
+                if href:
+                    lines.append(f"    Source: {href}")
+
+        # ── News results (only when a time filter is set, or when no text results) ─
+        run_news = (timelimit is not None) or (not text_results)
+        if run_news:
+            news_results = ddgs.news(
+                query,
+                max_results=_AI_WEB_MAX_RESULTS,
+                timelimit=timelimit,
+            )
+            if news_results:
+                if lines:
+                    lines.append("")
+                lines.append(f"Recent news for: \"{query}\"")
+                for i, r in enumerate(news_results, 1):
+                    date   = r.get("date",   "").strip()
+                    title  = r.get("title",  "").strip()
+                    body   = r.get("body",   "").strip()
+                    source = r.get("source", "").strip()
+                    url    = r.get("url",    "").strip()
+                    date_str = f" ({date})" if date else ""
+                    src_str  = f" — {source}" if source else ""
+                    lines.append(f"\n[{i}] {title}{date_str}{src_str}")
+                    if body:
+                        lines.append(f"    {body}")
+                    if url:
+                        lines.append(f"    Source: {url}")
+
+        if not lines:
+            return f"No results found for \"{query}\"."
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"Web search failed: {e}"
+
 
 # Ollama tool schema — passed in every /api/chat request so the model
 # knows which tools are available and how to call them.
-_SCRIPTURE_TOOLS = [
+_ALL_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Search the web with DuckDuckGo for current information, recent events, news, "
+                "facts, people, places, or anything the user asks about that may have changed "
+                "since your training cutoff (early 2023 for most models). "
+                "You MUST use this tool whenever the user asks about: current events, recent news, "
+                "the latest anything, live scores, prices, weather, or any topic where your "
+                "training data may be outdated or wrong. "
+                "Do NOT answer current-events questions from memory — always search first. "
+                "If the personality is set to a historical era (e.g. medieval, 1800s) and the "
+                "question is clearly in-character, you may skip the search — but if the user is "
+                "clearly asking a real-world current question, always search regardless of personality."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "A concise search query — write it as you would type it into a search "
+                            "engine. Include relevant keywords. For news about recent events, "
+                            "include the current year if relevant."
+                        )
+                    },
+                    "time_filter": {
+                        "type": "string",
+                        "enum": ["", "d", "w", "m", "y"],
+                        "description": (
+                            "Optional time filter for results: "
+                            "'' = all time (default), "
+                            "'d' = past day (breaking news), "
+                            "'w' = past week (recent events), "
+                            "'m' = past month, "
+                            "'y' = past year. "
+                            "Use 'd' or 'w' for breaking news; '' for general facts."
+                        )
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
     {
         "type": "function",
         "function": {
@@ -2163,6 +2329,11 @@ def _tool_get_verse(reference: str, source: str = "both") -> str:
 
 def _dispatch_tool_call(tool_name: str, tool_args: dict) -> str:
     """Route a model tool_call to the correct Python function."""
+    if tool_name == "web_search":
+        return _tool_web_search(
+            query       = tool_args.get("query", ""),
+            time_filter = tool_args.get("time_filter", ""),
+        )
     if tool_name == "search_scriptures":
         return _tool_search_scriptures(
             query  = tool_args.get("query", ""),
@@ -2242,7 +2413,7 @@ def run_ollama(prompt_text, model=AI_MODEL_NAME, user_id=None, sender_name=None)
         for _round in range(_AI_MAX_TOOL_ROUNDS):
 
             # ── 2. Call Ollama ───────────────────────────────────────────────
-            data = _ollama_chat_nonstream(working_messages, model, _SCRIPTURE_TOOLS)
+            data = _ollama_chat_nonstream(working_messages, model, _ALL_TOOLS)
 
             assistant_msg = data.get("message", {})
             tool_calls    = assistant_msg.get("tool_calls") or []
@@ -2290,7 +2461,7 @@ def run_ollama(prompt_text, model=AI_MODEL_NAME, user_id=None, sender_name=None)
         # ── 5. Safety cap reached — ask for a plain reply ───────────────────
         working_messages.append({
             "role":    "user",
-            "content": "Please give your final answer now based on the scripture results above.",
+            "content": "Please give your final answer now based on the tool results above.",
         })
         data  = _ollama_chat_nonstream(working_messages, model, [])  # no tools this time
         reply = (data.get("message", {}).get("content") or "").strip()
@@ -2963,11 +3134,19 @@ def handle_game_command(message):
                     "  Setting a new personality clears all conversation history.\n"
                     "• !aiforget — Clear the group's shared AI conversation history (admins only)\n"
                     "\n"
-                    "📖 The AI can search the scriptures!\n"
-                    "Ask it things like:\n"
+                    "🌐 The AI can search the web!\n"
+                    "It automatically searches when you ask about current events,\n"
+                    "recent news, or anything that may have changed since 2023.\n"
+                    "Examples:\n"
+                    "  !ai What's the latest SpaceX launch?\n"
+                    "  !ai Who won the game last night?\n"
+                    "  !ai What movies are out this week?\n"
+                    "\n"
+                    "📖 The AI can also search the scriptures!\n"
+                    "Examples:\n"
                     "  !ai Find me a verse about faith\n"
                     "  !ai What does John 3:16 say?\n"
-                    "  !ai Look up Alma 32:21 in the Book of Mormon\n"
+                    "  !ai Look up Alma 32:21\n"
                     "\n"
                     "The AI has a shared group memory — it sees messages from everyone\n"
                     "in the group, not just you. The last 10 exchanges are remembered.\n"

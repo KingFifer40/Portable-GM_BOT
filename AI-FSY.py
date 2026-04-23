@@ -911,11 +911,19 @@ def ensure_ollama_running():
 game_state = {
     "active": False,
     "board": None,
-    "players": {},       # {user_id: {"name": str, "symbol": str}}
-    "turn_order": [],    # [user_id1, user_id2]
-    "current_turn": 0,   # index into turn_order
+    "players": {},           # {user_id: {"name": str, "symbol": str}}
+    "turn_order": [],        # [user_id1, user_id2]
+    "current_turn": 0,       # index into turn_order
     "last_move_time": None,
     "timeout_seconds": GAME_TIMEOUT_SECONDS,
+    # AI difficulty: "easy" | "medium" | "hard"
+    "ai_difficulty": "medium",
+    # PvP bet pool: {user_id: amount_bet}  — only populated in PvP games
+    "pvp_bets": {},
+    # Whether both players have confirmed/skipped their bets (game can start)
+    "pvp_bet_locked": False,
+    # Spectator bets: {spectator_uid: {"amount": int, "on": player_uid, "on_name": str, "bettor_name": str}}
+    "spectator_bets": {},
 }
 
 # Emoji pieces
@@ -956,8 +964,11 @@ POINTS_FIH_LOSE_CHANCE = 0.25   # probability of losing points instead of gainin
 POINTS_STEAL_MIN       = 5      # minimum points stolen by !steal
 POINTS_STEAL_MAX       = 30     # maximum points stolen by !steal
 POINTS_STEAL_CD        = 300    # !steal cooldown in seconds
-POINTS_C4_WIN          = 50     # points winner gains (taken from loser in PvP)
-POINTS_C4_WIN_AI       = 25     # points gained for beating the AI
+POINTS_C4_WIN          = 50     # base points won in PvP (from pvp_bets pool)
+POINTS_C4_WIN_AI_EASY  = 50     # points gained for beating Easy AI
+POINTS_C4_WIN_AI_MED   = 125    # points gained for beating Medium AI
+POINTS_C4_WIN_AI_HARD  = 200    # points gained for beating Hard AI
+POINTS_C4_WIN_AI       = 125    # fallback (medium) — kept for config compat
 
 _fih_last_used   = {}    # {user_id: timestamp}
 _steal_last_used = {}    # {user_id: timestamp}
@@ -987,8 +998,20 @@ STEAL_COOLDOWN_MESSAGE = "Your crab is resting its claws! Try again in {m}m {s}s
 LEADERBOARD_SIZE = 10   # number of entries shown by #leaderboard (set in Settings tab)
 
 
+def _canonical_group_id(group_id):
+    """
+    Returns the canonical group ID for points storage.
+    In subgroup mode the bot operates inside a topic sub-group, but all data
+    should be stored under the main group so points persist across topics.
+    """
+    if USE_SUBGROUP and ADMIN_GROUP_ID and str(group_id) != str(ADMIN_GROUP_ID):
+        return str(ADMIN_GROUP_ID)
+    return str(group_id)
+
+
 def _user_points_path(group_id, user_id):
-    user_dir = os.path.join(SCRIPT_DIR, "groups", str(group_id), "users")
+    cid = _canonical_group_id(group_id)
+    user_dir = os.path.join(SCRIPT_DIR, "groups", cid, "users")
     os.makedirs(user_dir, exist_ok=True)
     return os.path.join(user_dir, f"{user_id}.json")
 
@@ -1018,7 +1041,8 @@ def load_points(group_id):
     """Load full ledger for a group by scanning user files."""
     if not group_id:
         return {}
-    user_dir = os.path.join(SCRIPT_DIR, "groups", str(group_id), "users")
+    cid = _canonical_group_id(group_id)
+    user_dir = os.path.join(SCRIPT_DIR, "groups", cid, "users")
     if not os.path.exists(user_dir):
         return {}
     ledger = {}
@@ -1844,10 +1868,16 @@ def ai_minimax(board, depth, alpha, beta, maximizing, ai_piece, human_piece):
 
         return best_col, best_score
 
-def ai_choose_move(board, ai_piece, human_piece):
+def ai_choose_move(board, ai_piece, human_piece, difficulty="medium"):
+    depth_map = {"easy": 2, "medium": 5, "hard": 8}
+    depth = depth_map.get(difficulty, 5)
+    # Easy mode: 40% chance of a random valid move so it's beatable
+    if difficulty == "easy" and random.random() < 0.40:
+        valid = ai_valid_moves(board)
+        return random.choice(valid) if valid else 0
     col, _ = ai_minimax(
         board,
-        depth=8,
+        depth=depth,
         alpha=-10**12,
         beta=10**12,
         maximizing=True,
@@ -1855,6 +1885,56 @@ def ai_choose_move(board, ai_piece, human_piece):
         human_piece=human_piece,
     )
     return col
+
+def _refund_all_bets(group_id):
+    """
+    Refund all PvP player bets and spectator bets back to their owners.
+    Returns a list of human-readable lines describing what was refunded.
+    """
+    lines = []
+    # Refund player PvP bets
+    for uid, amt in game_state["pvp_bets"].items():
+        if amt > 0:
+            pdata = game_state["players"].get(uid, {})
+            name = pdata.get("name") or uid
+            new_bal = add_points(group_id, uid, name, amt)
+            lines.append(f"  {name}: +{amt} pts refunded ({new_bal} pts)")
+    # Refund spectator bets
+    for uid, bdata in game_state["spectator_bets"].items():
+        amt = bdata["amount"]
+        name = bdata["bettor_name"]
+        new_bal = add_points(group_id, uid, name, amt)
+        lines.append(f"  {name}: +{amt} pts refunded ({new_bal} pts)")
+    return lines
+
+
+def _settle_spectator_bets(group_id, winner_id):
+    """
+    Pay out spectator bets. Those who bet on the winner get double their stake.
+    Those who bet on the loser lose their stake (already deducted).
+    Returns a list of human-readable result lines.
+    """
+    lines = []
+    winners = []
+    losers = []
+    for uid, bdata in game_state["spectator_bets"].items():
+        if str(bdata["on"]) == str(winner_id):
+            winners.append((uid, bdata))
+        else:
+            losers.append((uid, bdata))
+
+    if not winners and not losers:
+        return lines
+
+    lines.append("👥 Spectator Results:")
+    for uid, bdata in winners:
+        payout = bdata["amount"] * 2
+        new_bal = add_points(group_id, uid, bdata["bettor_name"], payout)
+        lines.append(f"  🎉 {bdata['bettor_name']} bet on {bdata['on_name']} and wins {payout} pts! ({new_bal} pts)")
+    for uid, bdata in losers:
+        lines.append(f"  😔 {bdata['bettor_name']} bet on {bdata['on_name']} and loses {bdata['amount']} pts.")
+    return lines
+
 
 def reset_game_state():
     global game_state
@@ -1865,6 +1945,10 @@ def reset_game_state():
     game_state["current_turn"] = 0
     game_state["last_move_time"] = None
     game_state["timeout_seconds"] = GAME_TIMEOUT_SECONDS
+    game_state["ai_difficulty"] = "medium"
+    game_state["pvp_bets"] = {}
+    game_state["pvp_bet_locked"] = False
+    game_state["spectator_bets"] = {}
 
 # ---------------------------------------------------------
 # Dev group command handling
@@ -2382,6 +2466,133 @@ def handle_game_command(message):
         send_message(GAME_GROUP_ID, "🧹 Shared AI conversation history has been cleared.", reply_to_id=msg_id)
         return
 
+    # ── POINTS COMMANDS (! prefix — must be checked before the # guard below) ──
+
+    # !points  — check own balance
+    if cmd == "!points":
+        bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
+        send_message(GAME_GROUP_ID, f"💰 {sender_name} has {bal} points.", reply_to_id=msg_id)
+        return
+
+    # !fih  — fish for points (win or lose!)
+    if cmd == "!fih":
+        allowed, remaining = check_ai_cooldown(sender_id, _fih_last_used, POINTS_FIH_CD)
+        if not allowed:
+            m, s = divmod(remaining, 60)
+            msg = FIH_COOLDOWN_MESSAGE.format(m=m, s=s)
+            send_message(GAME_GROUP_ID, f"🎣 {msg}", reply_to_id=msg_id)
+            return
+        set_ai_cooldown(sender_id, _fih_last_used)
+        amt  = random.randint(POINTS_FIH_MIN, POINTS_FIH_MAX)
+        lose = random.random() < POINTS_FIH_LOSE_CHANCE
+        new_bal = add_points(GAME_GROUP_ID, sender_id, sender_name, -amt if lose else amt)
+        pool   = FIH_LOSE_MESSAGES if lose else FIH_WIN_MESSAGES
+        prefix = "🦀 " if lose else "🎣 "
+        text   = random.choice(pool).format(name=sender_name, pts=amt, bal=new_bal)
+        send_message(GAME_GROUP_ID, prefix + text, reply_to_id=msg_id)
+        return
+
+    # !steal  — steal points from a random active user
+    if cmd == "!steal":
+        allowed, remaining = check_ai_cooldown(sender_id, _steal_last_used, POINTS_STEAL_CD)
+        if not allowed:
+            m, s = divmod(remaining, 60)
+            msg = STEAL_COOLDOWN_MESSAGE.format(m=m, s=s)
+            send_message(GAME_GROUP_ID, f"🦀 {msg}", reply_to_id=msg_id)
+            return
+        ledger = load_points(GAME_GROUP_ID)
+        victims = [
+            (uid, data) for uid, data in ledger.items()
+            if uid != str(sender_id) and data.get("points", 0) > 0
+        ]
+        if not victims:
+            send_message(GAME_GROUP_ID, f"🦀 {STEAL_EMPTY_MESSAGE}", reply_to_id=msg_id)
+            return
+        set_ai_cooldown(sender_id, _steal_last_used)
+        victim_id, victim_data = random.choice(victims)
+        amt = random.randint(POINTS_STEAL_MIN, POINTS_STEAL_MAX)
+        taken, v_new, s_new = transfer_points(
+            GAME_GROUP_ID, victim_id, victim_data["name"],
+            sender_id, sender_name, amt,
+        )
+        tmpl = random.choice(STEAL_SUCCESS_MESSAGES)
+        text = tmpl.format(
+            thief=sender_name, victim=victim_data["name"],
+            pts=taken, thief_bal=s_new, victim_bal=v_new,
+        )
+        send_message(GAME_GROUP_ID, f"🦀 {text}", reply_to_id=msg_id)
+        return
+
+    # !coin <h/t> <bet>  — coin flip gamble
+    if cmd == "!coin":
+        if len(parts) < 3:
+            send_message(GAME_GROUP_ID,
+                "Usage: !coin <h/t> <points>\nExample: !coin h 50",
+                reply_to_id=msg_id)
+            return
+        side_arg = parts[1].lower()
+        if side_arg not in ("h", "t", "heads", "tails"):
+            send_message(GAME_GROUP_ID, "Choose h (heads) or t (tails).", reply_to_id=msg_id)
+            return
+
+        # Reject non-integers (decimals etc.)
+        raw_bet = parts[2]
+        if "." in raw_bet:
+            send_message(GAME_GROUP_ID, "❌ Bets must be whole numbers, no decimals.", reply_to_id=msg_id)
+            return
+        try:
+            bet = int(raw_bet)
+            if bet <= 0:
+                raise ValueError
+        except ValueError:
+            send_message(GAME_GROUP_ID, "Bet must be a positive whole number.", reply_to_id=msg_id)
+            return
+
+        bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
+        if bal == 0:
+            send_message(GAME_GROUP_ID,
+                f"💸 {sender_name}, you have 0 points — earn some first with !fih!",
+                reply_to_id=msg_id)
+            return
+
+        allin = False
+        if bet >= bal:
+            bet = bal
+            allin = True
+
+        chosen_heads = side_arg in ("h", "heads")
+        send_message(GAME_GROUP_ID,
+            f"{'🎰 ALL IN! ' if allin else '🪙 '}{sender_name} bets {bet} pts on {'Heads' if chosen_heads else 'Tails'}... Flipping!",
+            reply_to_id=msg_id)
+        time.sleep(1.2)
+
+        result_heads = random.getrandbits(1) == 1  # fully unweighted random
+        result_word  = "Heads" if result_heads else "Tails"
+        won = (chosen_heads == result_heads)
+
+        if won:
+            new_bal = add_points(GAME_GROUP_ID, sender_id, sender_name, bet)
+            send_message(GAME_GROUP_ID,
+                f"🪙 {result_word}! {sender_name} wins {bet} pts! ({new_bal} pts total)",
+                reply_to_id=msg_id)
+        else:
+            new_bal = add_points(GAME_GROUP_ID, sender_id, sender_name, -bet)
+            send_message(GAME_GROUP_ID,
+                f"🪙 {result_word}! {sender_name} loses {bet} pts. ({new_bal} pts total)",
+                reply_to_id=msg_id)
+        return
+
+    # Catch common typo: player types =A through =G instead of #A through #G during a game
+    if game_state["active"] and len(game_state["players"]) >= 2 and len(text) >= 2 and text[0] == "=":
+        possible_col = text[1:].strip()
+        if column_letter_to_index(possible_col) is not None:
+            send_message(
+                GAME_GROUP_ID,
+                f"💡 Tip: use #{possible_col.upper()} (with a #) to drop a piece in that column.",
+                reply_to_id=msg_id,
+            )
+            return
+
     # -----------------------------
     # All remaining commands must start with "#"
     # -----------------------------
@@ -2407,10 +2618,11 @@ def handle_game_command(message):
             if topic == "game":
                 help_text = (
                     "🎮 *Connect Four Commands:*\n"
-                    "• #start — Begin a new game\n"
-                    "• #join — Join as Player 2\n"
+                    "• #start [easy|medium|hard] — Begin a new game\n"
+                    "  Default difficulty is medium.\n"
+                    "• #join — Join as Player 2 (triggers PvP betting phase)\n"
                     "• #addai — Add the AI engine as Player 2\n"
-                    "• #quit — End the current game\n"
+                    "• #quit — End the current game (bets refunded)\n"
                     "• #timeout <seconds> — Set inactivity timeout\n"
                     "• #A through #G — Drop your piece in that column\n"
                     "\n"
@@ -2494,17 +2706,45 @@ def handle_game_command(message):
             # POINTS HELP
             if topic == "points":
                 help_text = (
-                    "\U0001f4b0 *Points Commands:*\n"
-                    "\u2022 !points \u2014 Check your point balance\n"
-                    "\u2022 !fih \u2014 Fish for points — win or lose! (5 min cooldown)\n"
-                    "\u2022 !steal \u2014 Steal points from a random person (5 min cooldown)\n"
-                    "\u2022 !coin <h/t> <bet> \u2014 Flip a coin to gamble points\n"
+                    "💰 *Points Commands:*\n"
+                    "• !points — Check your point balance\n"
+                    "• !fih — Fish for points — win or lose! (5 min cooldown)\n"
+                    "• !steal — Steal points from a random person (5 min cooldown)\n"
+                    "• !coin <h/t> <bet> — Flip a coin to gamble points\n"
                     "  Example: !coin h 50\n"
-                    "\u2022 #leaderboard \u2014 Top 10 points ranking\n"
+                    "  Betting your full balance or more = All In!\n"
+                    "• #leaderboard — Top points ranking\n"
                     "\n"
-                    "Points are also earned/lost in Connect Four:\n"
-                    "PvP win: steal pts from loser\n"
-                    "vs AI win: earn bonus pts"
+                    "For game betting info, see: #help gamepoints"
+                )
+                send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
+                return
+
+            # GAME POINTS / BETTING HELP
+            if topic == "gamepoints":
+                help_text = (
+                    "🎲 *Game Points & Betting:*\n"
+                    "\n"
+                    "🎮 *vs AI:*\n"
+                    "• Win vs Easy AI: +50 pts\n"
+                    "• Win vs Medium AI: +125 pts\n"
+                    "• Win vs Hard AI: +200 pts\n"
+                    "• Lose vs AI: no points lost\n"
+                    "\n"
+                    "⚔️ *PvP Betting (players):*\n"
+                    "• After both join, use #pvpbet <amount> to wager on yourself\n"
+                    "• Use #pvpbet 0 to skip betting\n"
+                    "• Both players must bet (or skip) before play begins\n"
+                    "• Winner receives the loser's wagered points\n"
+                    "• Betting your full balance = All In!\n"
+                    "• If game ends early, bets are refunded\n"
+                    "\n"
+                    "👥 *Spectator Betting:*\n"
+                    "• #bet <amount> @player — Bet on a player\n"
+                    "• Win: receive double your bet\n"
+                    "• Lose: lose your bet\n"
+                    "• #quit to cancel your spectator bet and get it back\n"
+                    "• #stats — Show current game bets and info"
                 )
                 send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
                 return
@@ -2513,7 +2753,7 @@ def handle_game_command(message):
             send_message(
                 GAME_GROUP_ID,
                 "Unknown help topic.\n"
-                "Try: #help game, #help 8ball, #help scripture, #help ai, #help points, #help admin",
+                "Try: #help game, #help 8ball, #help scripture, #help ai, #help points, #help gamepoints, #help admin",
                 reply_to_id=msg_id,
             )
             return
@@ -2523,12 +2763,13 @@ def handle_game_command(message):
         # -----------------------------
         help_text = (
             "📚 *Help Topics:*\n"
-            "• #help game       — Connect Four\n"
-            "• #help 8ball      — Magic 8-Ball\n"
-            "• #help scripture  — Bible & Book of Mormon\n"
-            "• #help ai         — AI chat & personality\n"
-            "• #help points     — Points, fishing, crab & coin\n"
-            "• #help admin      — Admin feature controls\n"
+            "• #help game        — Connect Four\n"
+            "• #help 8ball       — Magic 8-Ball\n"
+            "• #help scripture   — Bible & Book of Mormon\n"
+            "• #help ai          — AI chat & personality\n"
+            "• #help points      — Fishing, stealing & coin flip\n"
+            "• #help gamepoints  — Game betting & AI rewards\n"
+            "• #help admin       — Admin feature controls\n"
             "\n"
             "Quick tip: start any message with ? for the 8-Ball!"
         )
@@ -2960,7 +3201,7 @@ def handle_game_command(message):
             )
         return
 
-    # #start
+    # #start  [easy|medium|hard]   (AI difficulty only matters when #addai is used)
     if cmd == "#start":
         if not CONNECT4_ENABLED:
             send_message(GAME_GROUP_ID, "🎮 Connect Four is currently disabled.", reply_to_id=msg_id)
@@ -2969,6 +3210,13 @@ def handle_game_command(message):
             send_message(GAME_GROUP_ID, "A game is already in progress.", reply_to_id=msg_id)
             return
 
+        # Parse optional difficulty argument
+        difficulty = "medium"
+        if len(parts) >= 2:
+            d = parts[1].lower()
+            if d in ("easy", "medium", "hard"):
+                difficulty = d
+
         reset_game_state()
         game_state["active"] = True
         game_state["board"] = init_board()
@@ -2976,11 +3224,12 @@ def handle_game_command(message):
         game_state["turn_order"] = [sender_id]
         game_state["current_turn"] = 0
         game_state["last_move_time"] = time.time()
+        game_state["ai_difficulty"] = difficulty
 
         send_message(
             GAME_GROUP_ID,
-            f"{sender_name} started a new Connect Four game!\n"
-            f"Waiting for a second player to #join.\n\n" +
+            f"🎮 {sender_name} started a new Connect Four game! (AI difficulty: {difficulty})\n"
+            f"Waiting for a second player to #join, or use #addai to play against the AI.\n\n" +
             cf_board_to_text(game_state["board"]),
             reply_to_id=msg_id,
         )
@@ -3012,14 +3261,19 @@ def handle_game_command(message):
 
         send_message(
             GAME_GROUP_ID,
-            f"{sender_name} joined as Player 2.\n"
-            f"{p1_name} is Player 1.\n\n" +
+            f"⚔️ {sender_name} joined as Player 2!\n"
+            f"{p1_name} 🔴 vs {sender_name} 🟡\n\n"
+            f"💰 *PvP Betting:* Both players can bet points on themselves before play begins.\n"
+            f"Use #pvpbet <amount> to wager (e.g. #pvpbet 50).\n"
+            f"If you don't want to bet, use #pvpbet 0 to skip.\n"
+            f"Both players must bet (or skip) before the game starts.\n\n"
+            f"Spectators: use #bet <amount> @player to wager on a player!\n\n" +
             cf_board_to_text(game_state["board"]),
             reply_to_id=msg_id,
         )
         return
 
-    # #addai
+    # #addai  [easy|medium|hard]
     if cmd == "#addai":
         if not CONNECT4_ENABLED:
             send_message(GAME_GROUP_ID, "🎮 Connect Four is currently disabled.", reply_to_id=msg_id)
@@ -3032,18 +3286,29 @@ def handle_game_command(message):
             send_message(GAME_GROUP_ID, "A second player already joined.", reply_to_id=msg_id)
             return
 
-        # Add AI as Player 2
+        # Optional difficulty argument on #addai overrides what was set at #start
+        if len(parts) >= 2:
+            d = parts[1].lower()
+            if d in ("easy", "medium", "hard"):
+                game_state["ai_difficulty"] = d
+
+        # Add AI as Player 2 — no points counter, no bets
         game_state["players"]["AI"] = {"name": "AI", "symbol": AI_PIECE}
         game_state["turn_order"].append("AI")
         game_state["last_move_time"] = time.time()
+        game_state["pvp_bet_locked"] = True  # no betting needed vs AI
 
         p1_id = game_state["turn_order"][0]
         p1_name = game_state["players"][p1_id]["name"]
+        diff = game_state["ai_difficulty"]
+        reward_map = {"easy": POINTS_C4_WIN_AI_EASY, "medium": POINTS_C4_WIN_AI_MED, "hard": POINTS_C4_WIN_AI_HARD}
+        reward = reward_map.get(diff, POINTS_C4_WIN_AI_MED)
 
         send_message(
             GAME_GROUP_ID,
-            f"AI joined as Player 2.\n"
-            f"{p1_name} is Player 1.\n\n" +
+            f"🟢 AI joined as Player 2 ({diff.capitalize()} difficulty).\n"
+            f"{p1_name} 🔴 vs AI 🟢\n"
+            f"Beat the AI to earn {reward} points! Lose and no points are lost.\n\n" +
             cf_board_to_text(game_state["board"]),
             reply_to_id=msg_id,
         )
@@ -3055,8 +3320,12 @@ def handle_game_command(message):
             send_message(GAME_GROUP_ID, "No active game to quit.", reply_to_id=msg_id)
             return
 
+        refund_lines = _refund_all_bets(GAME_GROUP_ID)
         reset_game_state()
-        send_message(GAME_GROUP_ID, f"Game ended by {sender_name}.", reply_to_id=msg_id)
+        msg_parts = [f"🚫 Game ended by {sender_name}."]
+        if refund_lines:
+            msg_parts.append("💰 Bets refunded:\n" + "\n".join(refund_lines))
+        send_message(GAME_GROUP_ID, "\n".join(msg_parts), reply_to_id=msg_id)
         return
 
     # #timeout
@@ -3100,6 +3369,17 @@ def handle_game_command(message):
             send_message(GAME_GROUP_ID, "Waiting for a second player to #join.", reply_to_id=msg_id)
             return
 
+        # PvP bet phase: both players must confirm before moves are accepted
+        is_pvp = "AI" not in game_state["players"]
+        if is_pvp and not game_state["pvp_bet_locked"]:
+            send_message(
+                GAME_GROUP_ID,
+                "⏳ Waiting for both players to set their bet.\n"
+                "Use #pvpbet <amount> to bet, or #pvpbet 0 to skip.",
+                reply_to_id=msg_id,
+            )
+            return
+
         current_player_id = game_state["turn_order"][game_state["current_turn"]]
         if sender_id != current_player_id:
             current_player_name = game_state["players"][current_player_id]["name"]
@@ -3116,36 +3396,63 @@ def handle_game_command(message):
 
         if check_winner(game_state["board"], symbol):
             board_text = cf_board_to_text(game_state["board"])
-            # Award points — PvP: take from loser; vs AI: flat bonus
-            points_msg = ""
+
+            # ── PvP win ──────────────────────────────────────────────────────
             opponent_id = None
             for pid in game_state["turn_order"]:
                 if pid != sender_id and pid != "AI":
                     opponent_id = pid
+
             if opponent_id:
                 opp_name = game_state["players"][opponent_id]["name"]
-                taken, opp_new, win_new = transfer_points(
-                    GAME_GROUP_ID, opponent_id, opp_name, sender_id, sender_name, POINTS_C4_WIN
+                points_lines = [f"🏆 {sender_name} wins!"]
+
+                # Settle PvP bets between the two players
+                w_bet = game_state["pvp_bets"].get(str(sender_id), 0)
+                l_bet = game_state["pvp_bets"].get(str(opponent_id), 0)
+                pot = w_bet + l_bet
+                if pot > 0:
+                    # Transfer loser's share from their account to winner
+                    # (winner already paid their share; loser now pays theirs)
+                    actual = min(l_bet, get_points(GAME_GROUP_ID, opponent_id, opp_name))
+                    if actual > 0:
+                        add_points(GAME_GROUP_ID, opponent_id, opp_name, -actual)
+                    win_new = add_points(GAME_GROUP_ID, sender_id, sender_name, actual)
+                    points_lines.append(f"💰 PvP pot: {pot} pts → {sender_name} gets {actual} pts from {opp_name}. ({win_new} pts)")
+
+                # Settle spectator bets
+                spec_lines = _settle_spectator_bets(GAME_GROUP_ID, str(sender_id))
+                points_lines.extend(spec_lines)
+
+                send_message(
+                    GAME_GROUP_ID,
+                    "\n".join(points_lines) + f"\n\n{board_text}",
+                    reply_to_id=msg_id,
                 )
-                points_msg = f"\n\n🏆 {sender_name} wins {taken} pts from {opp_name}! ({win_new} pts)"
+
             else:
-                win_new = add_points(GAME_GROUP_ID, sender_id, sender_name, POINTS_C4_WIN_AI)
-                points_msg = f"\n\n🏆 {sender_name} earns {POINTS_C4_WIN_AI} pts! ({win_new} pts)"
-            send_message(
-                GAME_GROUP_ID,
-                f"{sender_name} wins!\n\n{board_text}{points_msg}",
-                reply_to_id=msg_id,
-            )
+                # ── vs AI win ────────────────────────────────────────────────
+                diff = game_state["ai_difficulty"]
+                reward_map = {"easy": POINTS_C4_WIN_AI_EASY, "medium": POINTS_C4_WIN_AI_MED, "hard": POINTS_C4_WIN_AI_HARD}
+                reward = reward_map.get(diff, POINTS_C4_WIN_AI_MED)
+                win_new = add_points(GAME_GROUP_ID, sender_id, sender_name, reward)
+                send_message(
+                    GAME_GROUP_ID,
+                    f"🏆 {sender_name} beats the AI ({diff.capitalize()})!\n"
+                    f"Earned {reward} pts! ({win_new} pts)\n\n{board_text}",
+                    reply_to_id=msg_id,
+                )
+
             reset_game_state()
             return
 
         if board_full(game_state["board"]):
             board_text = cf_board_to_text(game_state["board"])
-            send_message(
-                GAME_GROUP_ID,
-                f"Game is a draw.\n\n{board_text}",
-                reply_to_id=msg_id,
-            )
+            refund_lines = _refund_all_bets(GAME_GROUP_ID)
+            draw_msg = f"🤝 Game is a draw.\n\n{board_text}"
+            if refund_lines:
+                draw_msg += "\n💰 Bets refunded:\n" + "\n".join(refund_lines)
+            send_message(GAME_GROUP_ID, draw_msg, reply_to_id=msg_id)
             reset_game_state()
             return
 
@@ -3156,44 +3463,33 @@ def handle_game_command(message):
         # If next player is AI, let it move
         if next_player_id == "AI":
 
-            # Announce thinking
-            send_message(GAME_GROUP_ID, "AI is thinking...")
+            send_message(GAME_GROUP_ID, "🤖 AI is thinking...")
 
-            # Start typing indicator
-            typing_active = True
+            typing_stop = threading.Event()
 
             def typing_loop():
-                while typing_active:
+                while not typing_stop.is_set():
                     send_typing(GAME_GROUP_ID)
                     time.sleep(2)
 
             t = threading.Thread(target=typing_loop, daemon=True)
             t.start()
 
-            # AI calculates move
-            ai_col = ai_choose_move(game_state["board"], AI_PIECE, P1)
+            diff = game_state["ai_difficulty"]
+            ai_col = ai_choose_move(game_state["board"], AI_PIECE, P1, difficulty=diff)
 
-            # Stop typing indicator
-            typing_active = False
+            typing_stop.set()
 
-            # Apply move
             row, col = drop_piece(game_state["board"], ai_col, AI_PIECE)
             game_state["last_move_time"] = time.time()
 
-            # AI win?
+            # AI win — player loses NO points (AI games are just for fun/earning)
             if check_winner(game_state["board"], AI_PIECE):
                 board_text = cf_board_to_text(game_state["board"])
-                # Player loses points to the AI (capped at their balance)
-                human_id   = game_state["turn_order"][0]
-                human_name = game_state["players"][human_id]["name"]
-                lost = min(POINTS_C4_WIN_AI, max(0, get_points(GAME_GROUP_ID, human_id, human_name)))
-                if lost:
-                    add_points(GAME_GROUP_ID, human_id, human_name, -lost)
-                new_bal = get_points(GAME_GROUP_ID, human_id, human_name)
-                pts_msg = f"\n\n😢 {human_name} loses {lost} pts to the AI. ({new_bal} pts)"
                 send_message(
                     GAME_GROUP_ID,
-                    f"AI plays column {chr(ai_col + 65)}.\nAI wins!\n\n{board_text}{pts_msg}",
+                    f"🟢 AI plays column {chr(ai_col + 65)}. AI wins!\n"
+                    f"Better luck next time — no points lost.\n\n{board_text}",
                     reply_to_id=msg_id,
                 )
                 reset_game_state()
@@ -3204,19 +3500,18 @@ def handle_game_command(message):
                 board_text = cf_board_to_text(game_state["board"])
                 send_message(
                     GAME_GROUP_ID,
-                    f"AI plays column {chr(ai_col + 65)}.\nGame is a draw.\n\n{board_text}",
+                    f"🟢 AI plays column {chr(ai_col + 65)}. Game is a draw.\n\n{board_text}",
                     reply_to_id=msg_id,
                 )
                 reset_game_state()
                 return
 
-            # Switch back to human
             game_state["current_turn"] = 0
             board_text = cf_board_to_text(game_state["board"])
             send_message(
                 GAME_GROUP_ID,
-                f"AI plays column {chr(ai_col + 65)}.\n"
-                f"It is now {sender_name}'s turn.\n\n{board_text}",
+                f"🟢 AI plays column {chr(ai_col + 65)}.\n"
+                f"Your turn, {sender_name}!\n\n{board_text}",
                 reply_to_id=msg_id,
             )
             return
@@ -3232,14 +3527,220 @@ def handle_game_command(message):
         )
         return
 
+    # ── #pvpbet <amount>  — players set their PvP wager ──────────────────────
+    if cmd == "#pvpbet":
+        if not game_state["active"]:
+            send_message(GAME_GROUP_ID, "No active game.", reply_to_id=msg_id)
+            return
 
-    # ── POINTS COMMANDS ──────────────────────────────────────────────────────
+        # Must be a current player
+        if sender_id not in game_state["players"] or "AI" in game_state["players"]:
+            send_message(
+                GAME_GROUP_ID,
+                "💡 #pvpbet is for PvP players only. Spectators use #bet to wager on a player.",
+                reply_to_id=msg_id,
+            )
+            return
 
-    # !points  — check own balance
-    if cmd == "!points":
+        if game_state["pvp_bet_locked"]:
+            send_message(GAME_GROUP_ID, "Betting is already locked — the game has started!", reply_to_id=msg_id)
+            return
+
+        if len(game_state["players"]) < 2:
+            send_message(GAME_GROUP_ID, "Wait for a second player to #join before betting.", reply_to_id=msg_id)
+            return
+
+        if len(parts) < 2:
+            send_message(GAME_GROUP_ID, "Usage: #pvpbet <amount>  (use 0 to skip betting)", reply_to_id=msg_id)
+            return
+
+        # Already bet?
+        if str(sender_id) in game_state["pvp_bets"]:
+            send_message(GAME_GROUP_ID, "You already set your bet for this game.", reply_to_id=msg_id)
+            return
+
+        try:
+            bet_amt = int(parts[1])
+            if bet_amt < 0:
+                raise ValueError
+        except ValueError:
+            send_message(GAME_GROUP_ID, "Bet must be a whole number (0 or more).", reply_to_id=msg_id)
+            return
+
         bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
-        send_message(GAME_GROUP_ID, f"💰 {sender_name} has {bal} points.", reply_to_id=msg_id)
+        allin = False
+        if bet_amt == 0:
+            game_state["pvp_bets"][str(sender_id)] = 0
+            conf_msg = f"✅ {sender_name} skipped betting."
+        else:
+            if bet_amt >= bal:
+                bet_amt = bal
+                allin = True
+            if bet_amt == 0:
+                send_message(GAME_GROUP_ID, f"💸 {sender_name}, you have 0 points — you can't bet anything.", reply_to_id=msg_id)
+                return
+            # Reserve points immediately
+            add_points(GAME_GROUP_ID, sender_id, sender_name, -bet_amt)
+            game_state["pvp_bets"][str(sender_id)] = bet_amt
+            conf_msg = (
+                f"{'🎰 ALL IN! ' if allin else '✅ '}{sender_name} bet {bet_amt} pts on themselves!"
+            )
+
+        send_message(GAME_GROUP_ID, conf_msg, reply_to_id=msg_id)
+
+        # Check if both players have now set their bet
+        player_ids = [pid for pid in game_state["turn_order"] if pid != "AI"]
+        if all(str(pid) in game_state["pvp_bets"] for pid in player_ids):
+            game_state["pvp_bet_locked"] = True
+            total_pot = sum(game_state["pvp_bets"].values())
+            pot_str = f"Total pot: {total_pot} pts. " if total_pot > 0 else ""
+            send_message(
+                GAME_GROUP_ID,
+                f"🔒 Both players have bet. {pot_str}Game begins! 🎮\n\n" +
+                cf_board_to_text(game_state["board"]),
+            )
+        else:
+            other_name = ""
+            for pid in player_ids:
+                if str(pid) not in game_state["pvp_bets"]:
+                    other_name = game_state["players"][pid]["name"]
+            send_message(GAME_GROUP_ID, f"⏳ Waiting for {other_name} to #pvpbet.")
         return
+
+    # ── #bet <amount> @mention  — spectators bet on a player ─────────────────
+    if cmd == "#bet":
+        if not game_state["active"]:
+            send_message(GAME_GROUP_ID, "No active game to bet on.", reply_to_id=msg_id)
+            return
+
+        # If sender is a player, give them a helpful tip
+        if sender_id in game_state["players"]:
+            send_message(
+                GAME_GROUP_ID,
+                "💡 As a player, use #pvpbet <amount> to bet on yourself, not #bet.",
+                reply_to_id=msg_id,
+            )
+            return
+
+        if len(game_state["players"]) < 2:
+            send_message(GAME_GROUP_ID, "Wait for both players to join before betting.", reply_to_id=msg_id)
+            return
+
+        if str(sender_id) in game_state["spectator_bets"]:
+            send_message(GAME_GROUP_ID, "You already have an active bet. Use #quit to cancel it.", reply_to_id=msg_id)
+            return
+
+        if len(parts) < 3:
+            send_message(GAME_GROUP_ID, "Usage: #bet <amount> @player\nExample: #bet 50 @PlayerName", reply_to_id=msg_id)
+            return
+
+        try:
+            bet_amt = int(parts[1])
+            if bet_amt <= 0:
+                raise ValueError
+        except ValueError:
+            send_message(GAME_GROUP_ID, "Bet must be a positive whole number.", reply_to_id=msg_id)
+            return
+
+        # Parse the mention — GroupMe sends mentions as attachments with user_ids,
+        # but also embeds @Name in text. We'll match against known player names.
+        mention_text = " ".join(parts[2:]).lstrip("@").strip().lower()
+        target_id = None
+        target_name = None
+        for pid, pdata in game_state["players"].items():
+            if pid == "AI":
+                continue
+            if pdata["name"].lower() == mention_text or mention_text in pdata["name"].lower():
+                target_id = pid
+                target_name = pdata["name"]
+                break
+        # Also try matching by user_id mention from attachments
+        if target_id is None:
+            for att in message.get("attachments", []):
+                if att.get("type") == "mentions":
+                    for uid in att.get("user_ids", []):
+                        if uid in game_state["players"] and uid != "AI":
+                            target_id = uid
+                            target_name = game_state["players"][uid]["name"]
+                            break
+
+        if target_id is None:
+            player_names = ", ".join(p["name"] for pid, p in game_state["players"].items() if pid != "AI")
+            send_message(GAME_GROUP_ID, f"Couldn't find that player. Current players: {player_names}", reply_to_id=msg_id)
+            return
+
+        bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
+        allin = False
+        if bet_amt >= bal:
+            bet_amt = bal
+            allin = True
+        if bet_amt == 0:
+            send_message(GAME_GROUP_ID, f"💸 {sender_name}, you have 0 points — you can't bet.", reply_to_id=msg_id)
+            return
+
+        add_points(GAME_GROUP_ID, sender_id, sender_name, -bet_amt)
+        game_state["spectator_bets"][str(sender_id)] = {
+            "amount": bet_amt,
+            "on": target_id,
+            "on_name": target_name,
+            "bettor_name": sender_name,
+        }
+        send_message(
+            GAME_GROUP_ID,
+            f"{'🎰 ALL IN! ' if allin else '🎲 '}{sender_name} bet {bet_amt} pts on {target_name}! Good luck!",
+            reply_to_id=msg_id,
+        )
+        return
+
+    # ── #stats  — show current game bets and status ───────────────────────────
+    if cmd == "#stats":
+        if not game_state["active"]:
+            send_message(GAME_GROUP_ID, "No active game.", reply_to_id=msg_id)
+            return
+
+        lines = ["📊 *Game Stats*"]
+
+        # Players and PvP bets
+        is_vs_ai = "AI" in game_state["players"]
+        if is_vs_ai:
+            diff = game_state["ai_difficulty"]
+            reward_map = {"easy": POINTS_C4_WIN_AI_EASY, "medium": POINTS_C4_WIN_AI_MED, "hard": POINTS_C4_WIN_AI_HARD}
+            reward = reward_map.get(diff, POINTS_C4_WIN_AI_MED)
+            p1_id = game_state["turn_order"][0]
+            p1_name = game_state["players"][p1_id]["name"]
+            lines.append(f"🔴 {p1_name} vs 🟢 AI ({diff.capitalize()})")
+            lines.append(f"Win reward: {reward} pts")
+        else:
+            for pid in game_state["turn_order"]:
+                pdata = game_state["players"][pid]
+                bet = game_state["pvp_bets"].get(str(pid))
+                sym = pdata["symbol"]
+                if bet is None:
+                    bet_str = "⏳ betting..."
+                elif bet == 0:
+                    bet_str = "no bet"
+                else:
+                    bet_str = f"{bet} pts wagered"
+                lines.append(f"{sym} {pdata['name']}: {bet_str}")
+
+        # Spectator bets
+        if game_state["spectator_bets"]:
+            lines.append("")
+            lines.append("👥 Spectator Bets:")
+            # Tally per player
+            tally = {}
+            for bdata in game_state["spectator_bets"].values():
+                on = bdata["on_name"]
+                tally[on] = tally.get(on, 0) + bdata["amount"]
+            for pname, total in tally.items():
+                lines.append(f"  {pname}: {total} pts wagered by spectators")
+        else:
+            lines.append("No spectator bets yet.")
+
+        send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
+        return
+
+    # ── POINTS LEADERBOARD (#leaderboard) ────────────────────────────────────
 
     # #leaderboard
     if cmd == "#leaderboard":
@@ -3254,102 +3755,6 @@ def handle_game_command(message):
         send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
         return
 
-    # !fih  — fish for points (win or lose!)
-    if cmd == "!fih":
-        allowed, remaining = check_ai_cooldown(sender_id, _fih_last_used, POINTS_FIH_CD)
-        if not allowed:
-            m, s = divmod(remaining, 60)
-            msg = FIH_COOLDOWN_MESSAGE.format(m=m, s=s)
-            send_message(GAME_GROUP_ID, f"🎣 {msg}", reply_to_id=msg_id)
-            return
-        set_ai_cooldown(sender_id, _fih_last_used)
-        amt  = random.randint(POINTS_FIH_MIN, POINTS_FIH_MAX)
-        lose = random.random() < POINTS_FIH_LOSE_CHANCE
-        new_bal = add_points(GAME_GROUP_ID, sender_id, sender_name, -amt if lose else amt)
-        pool   = FIH_LOSE_MESSAGES if lose else FIH_WIN_MESSAGES
-        prefix = "🦀 " if lose else "🎣 "
-        text   = random.choice(pool).format(name=sender_name, pts=amt, bal=new_bal)
-        send_message(GAME_GROUP_ID, prefix + text, reply_to_id=msg_id)
-        return
-
-    # !steal  — steal points from a random active user
-    if cmd == "!steal":
-        allowed, remaining = check_ai_cooldown(sender_id, _steal_last_used, POINTS_STEAL_CD)
-        if not allowed:
-            m, s = divmod(remaining, 60)
-            msg = STEAL_COOLDOWN_MESSAGE.format(m=m, s=s)
-            send_message(GAME_GROUP_ID, f"🦀 {msg}", reply_to_id=msg_id)
-            return
-        ledger = load_points(GAME_GROUP_ID)
-        victims = [
-            (uid, data) for uid, data in ledger.items()
-            if uid != str(sender_id) and data.get("points", 0) > 0
-        ]
-        if not victims:
-            send_message(GAME_GROUP_ID, f"🦀 {STEAL_EMPTY_MESSAGE}", reply_to_id=msg_id)
-            return
-        set_ai_cooldown(sender_id, _steal_last_used)
-        victim_id, victim_data = random.choice(victims)
-        amt = random.randint(POINTS_STEAL_MIN, POINTS_STEAL_MAX)
-        taken, v_new, s_new = transfer_points(
-            GAME_GROUP_ID, victim_id, victim_data["name"],
-            sender_id, sender_name, amt,
-        )
-        tmpl = random.choice(STEAL_SUCCESS_MESSAGES)
-        text = tmpl.format(
-            thief=sender_name, victim=victim_data["name"],
-            pts=taken, thief_bal=s_new, victim_bal=v_new,
-        )
-        send_message(GAME_GROUP_ID, f"🦀 {text}", reply_to_id=msg_id)
-        return
-
-    # !coin <h/t> <bet>  — coin flip gamble
-    if cmd == "!coin":
-        if len(parts) < 3:
-            send_message(GAME_GROUP_ID,
-                "Usage: !coin <h/t> <points>\nExample: !coin h 50",
-                reply_to_id=msg_id)
-            return
-        side_arg = parts[1].lower()
-        if side_arg not in ("h", "t", "heads", "tails"):
-            send_message(GAME_GROUP_ID, "Choose h (heads) or t (tails).", reply_to_id=msg_id)
-            return
-        try:
-            bet = int(parts[2])
-            if bet <= 0:
-                raise ValueError
-        except ValueError:
-            send_message(GAME_GROUP_ID, "Bet must be a positive whole number.", reply_to_id=msg_id)
-            return
-
-        bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
-        if bet > bal:
-            send_message(GAME_GROUP_ID,
-                f"💸 You only have {bal} points — you can\'t bet {bet}!",
-                reply_to_id=msg_id)
-            return
-
-        chosen_heads = side_arg in ("h", "heads")
-        send_message(GAME_GROUP_ID, "🪙 Flipping coin...", reply_to_id=msg_id)
-        time.sleep(1.2)
-
-        result_heads = random.random() < 0.5
-        result_word  = "Heads" if result_heads else "Tails"
-        won = (chosen_heads == result_heads)
-
-        if won:
-            new_bal = add_points(GAME_GROUP_ID, sender_id, sender_name, bet)
-            send_message(GAME_GROUP_ID,
-                f"🪙 {result_word}! {sender_name} wins {bet} points! ({new_bal} pts)",
-                reply_to_id=msg_id)
-        else:
-            new_bal = add_points(GAME_GROUP_ID, sender_id, sender_name, -bet)
-            send_message(GAME_GROUP_ID,
-                f"🪙 {result_word}! {sender_name} loses {bet} points. ({new_bal} pts)",
-                reply_to_id=msg_id)
-        return
-
-    # Unknown command
     send_message(GAME_GROUP_ID, "Unknown command. Use #help for a list of commands.", reply_to_id=msg_id)
 
 
@@ -3388,7 +3793,11 @@ def game_poll_loop():
         try:
             # NEW: timeout check even without messages
             if ensure_timeout():
-                send_message(GAME_GROUP_ID, "Game timed out due to inactivity.")
+                refund_lines = _refund_all_bets(GAME_GROUP_ID)
+                timeout_msg = "⏰ Game timed out due to inactivity."
+                if refund_lines:
+                    timeout_msg += "\n💰 Bets refunded:\n" + "\n".join(refund_lines)
+                send_message(GAME_GROUP_ID, timeout_msg)
                 continue
 
             msgs, last_game_since_id_new = fetch_new_messages(

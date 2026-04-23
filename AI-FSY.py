@@ -147,10 +147,10 @@ EIGHTBALL_ANSWERS = [
     "Very doubtful."
 ]
 
-CONFIG_FILE = "config.json"
-
 # Early SCRIPT_DIR needed before load_config is defined
 SCRIPT_DIR_EARLY = os.path.dirname(os.path.abspath(__file__))
+
+CONFIG_FILE = os.path.join(SCRIPT_DIR_EARLY, "config.json")
 
 # ---------------------------------------------------------
 # First-run setup wizard
@@ -415,7 +415,7 @@ def _load_or_run_setup():
     """
     global ACCESS_TOKEN, DEV_GROUP_ID, OLLAMA_BASE_MODEL
 
-    cfg_path = os.path.join(SCRIPT_DIR_EARLY, CONFIG_FILE)
+    cfg_path = CONFIG_FILE
 
     # Load whatever is already in config.json
     existing = {}
@@ -1892,7 +1892,7 @@ def _refund_all_bets(group_id):
     Returns a list of human-readable lines describing what was refunded.
     """
     lines = []
-    # Refund player PvP bets
+    # Refund player PvP bets (only those who wagered, i.e. bet > 0)
     for uid, amt in game_state["pvp_bets"].items():
         if amt > 0:
             pdata = game_state["players"].get(uid, {})
@@ -2735,9 +2735,11 @@ def handle_game_command(message):
                     "• After both join, use #pvpbet <amount> to wager on yourself\n"
                     "• Use #pvpbet 0 to skip betting\n"
                     "• Both players must bet (or skip) before play begins\n"
-                    "• Winner receives the loser's wagered points\n"
+                    "• Your wager is held during the game\n"
+                    "• Winner gets their own bet back + the loser's bet\n"
+                    "• Loser forfeits their wagered points to the winner\n"
                     "• Betting your full balance = All In!\n"
-                    "• If game ends early, bets are refunded\n"
+                    "• If game ends early, all bets are fully refunded\n"
                     "\n"
                     "👥 *Spectator Betting:*\n"
                     "• #bet <amount> @player — Bet on a player\n"
@@ -3407,18 +3409,23 @@ def handle_game_command(message):
                 opp_name = game_state["players"][opponent_id]["name"]
                 points_lines = [f"🏆 {sender_name} wins!"]
 
-                # Settle PvP bets between the two players
+                # Settle PvP bets between the two players.
+                # Both bets were deducted upfront when each player wagered.
+                # Winner gets back their own bet + the loser's bet (the full pot).
                 w_bet = game_state["pvp_bets"].get(str(sender_id), 0)
                 l_bet = game_state["pvp_bets"].get(str(opponent_id), 0)
                 pot = w_bet + l_bet
                 if pot > 0:
-                    # Transfer loser's share from their account to winner
-                    # (winner already paid their share; loser now pays theirs)
-                    actual = min(l_bet, get_points(GAME_GROUP_ID, opponent_id, opp_name))
-                    if actual > 0:
-                        add_points(GAME_GROUP_ID, opponent_id, opp_name, -actual)
-                    win_new = add_points(GAME_GROUP_ID, sender_id, sender_name, actual)
-                    points_lines.append(f"💰 PvP pot: {pot} pts → {sender_name} gets {actual} pts from {opp_name}. ({win_new} pts)")
+                    # Return winner's own stake + take loser's stake
+                    win_new = add_points(GAME_GROUP_ID, sender_id, sender_name, pot)
+                    if w_bet > 0 and l_bet > 0:
+                        points_lines.append(f"💰 Pot: {pot} pts → {sender_name} wins {l_bet} pts from {opp_name} and gets their {w_bet} pts back! ({win_new} pts)")
+                    elif w_bet > 0:
+                        # Only winner had a bet (loser skipped) — winner just gets their stake back
+                        points_lines.append(f"💰 {sender_name} gets their {w_bet} pts back (opponent didn't bet). ({win_new} pts)")
+                    else:
+                        # Only loser had a bet — winner takes it
+                        points_lines.append(f"💰 {sender_name} wins {l_bet} pts from {opp_name}! ({win_new} pts)")
 
                 # Settle spectator bets
                 spec_lines = _settle_spectator_bets(GAME_GROUP_ID, str(sender_id))
@@ -3579,11 +3586,11 @@ def handle_game_command(message):
             if bet_amt == 0:
                 send_message(GAME_GROUP_ID, f"💸 {sender_name}, you have 0 points — you can't bet anything.", reply_to_id=msg_id)
                 return
-            # Reserve points immediately
+            # Reserve points immediately (held until game ends)
             add_points(GAME_GROUP_ID, sender_id, sender_name, -bet_amt)
             game_state["pvp_bets"][str(sender_id)] = bet_amt
             conf_msg = (
-                f"{'🎰 ALL IN! ' if allin else '✅ '}{sender_name} bet {bet_amt} pts on themselves!"
+                f"{'🎰 ALL IN! ' if allin else '✅ '}{sender_name} wagered {bet_amt} pts — winner takes all!"
             )
 
         send_message(GAME_GROUP_ID, conf_msg, reply_to_id=msg_id)
@@ -3860,7 +3867,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "005ede0"
+BOT_COMMIT_SHA = "511b4e9"
 
 _control_panel_instance = None  # set when panel launches
 
@@ -4005,8 +4012,26 @@ class ControlPanel:
         import tkinter as tk
         from tkinter import ttk
 
-        tab = tk.Frame(nb, padx=16, pady=12)
-        nb.add(tab, text="  Status  ")
+        outer = tk.Frame(nb)
+        nb.add(outer, text="  Status  ")
+
+        # Scrollable canvas wrapper
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        vsb = tk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        tab = tk.Frame(canvas, padx=16, pady=12)
+        tab_window = canvas.create_window((0, 0), window=tab, anchor="nw")
+
+        def _on_tab_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        tab.bind("<Configure>", _on_tab_configure)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(tab_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
 
         tk.Label(tab, text="Feature Toggles",
                  font=("Helvetica", 12, "bold")).pack(anchor="w")
@@ -4088,8 +4113,26 @@ class ControlPanel:
         import tkinter as tk
         from tkinter import ttk, messagebox
 
-        tab = tk.Frame(nb, padx=16, pady=12)
-        nb.add(tab, text="  Groups  ")
+        outer = tk.Frame(nb)
+        nb.add(outer, text="  Groups  ")
+
+        # Scrollable canvas wrapper
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        vsb = tk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        tab = tk.Frame(canvas, padx=16, pady=12)
+        tab_window = canvas.create_window((0, 0), window=tab, anchor="nw")
+
+        def _on_tab_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        tab.bind("<Configure>", _on_tab_configure)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(tab_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
 
         # ─── Main groups (left) ────────────────────────────────────────────────
         tk.Label(tab, text="Group & Topic Selection",
@@ -4371,8 +4414,38 @@ class ControlPanel:
         import tkinter as tk
         from tkinter import ttk, messagebox
 
-        tab = tk.Frame(nb, padx=16, pady=12)
-        nb.add(tab, text="  Settings  ")
+        outer = tk.Frame(nb)
+        nb.add(outer, text="  Settings  ")
+
+        # Scrollable canvas wrapper
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        vsb = tk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        tab = tk.Frame(canvas, padx=16, pady=12)
+        tab_window = canvas.create_window((0, 0), window=tab, anchor="nw")
+
+        def _on_tab_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        tab.bind("<Configure>", _on_tab_configure)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(tab_window, width=event.width)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        # Mouse wheel scrolling
+        def _on_mousewheel(event):
+            if event.delta:
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            elif event.num == 4:
+                canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                canvas.yview_scroll(1, "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        canvas.bind_all("<Button-4>", _on_mousewheel)
+        canvas.bind_all("<Button-5>", _on_mousewheel)
 
         # ── Credentials ───────────────────────────────────────────────────────
         tk.Label(tab, text="Bot Credentials",

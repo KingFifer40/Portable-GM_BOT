@@ -1,17 +1,19 @@
 # AI-FSY — GroupMe Connect Four Bot with AI Chat
 
-A GroupMe bot that lets your group play **Connect Four**, look up **scriptures**, chat with a **local AI** (via Ollama), and more. Built in Python, runs on Windows, Mac, or Linux. (I made this for my FSY group, so I can play with them while I am away from my own PC but can leave it running)
+A GroupMe bot that lets your group play **Connect Four**, look up **scriptures**, chat with a **local AI** (via Ollama), earn and gamble **points**, and more. Built in Python, runs on Windows, Mac, or Linux. (Made for my FSY group so I can play with them while away from my own PC, but leave it running.)
 
 ---
 
 ## Features
 
-- 🎮 **Connect Four** — two-player or vs AI (minimax engine, depth 8)
-- 🤖 **AI Chat** — powered by a local Ollama model; remembers your last 10 exchanges per person
+- 🎮 **Connect Four** — two-player PvP or vs AI (minimax engine, depth 8, three difficulty levels)
+- 💰 **Points system** — earn points by fishing (`!fih`), stealing (`!steal`), and coin flipping (`!coin`); wager them on Connect Four games
+- 🤖 **AI Chat** — powered by a local Ollama model with a shared group memory (last 10 exchanges)
 - 🎱 **Magic 8-Ball** — `?` + any question
 - 📖 **Scripture lookup** — Bible (KJV) and Book of Mormon verse search (files included)
 - 🔒 **Safe by default** — hardened AI safety rules, English-only responses, spam cooldowns
 - 🛠️ **Admin controls** — enable/disable individual features from inside the group
+- 🖥️ **Control panel** — desktop GUI for managing groups, AI settings, points tuning, and auto-updates
 - 🧙 **First-run setup wizard** — GUI on desktop, terminal fallback on servers
 
 ---
@@ -81,15 +83,25 @@ Once the bot is running, go to your **dev group** and send:
 
 The bot joins the game group and announces itself.
 
-If you don't know your game group's ID, no worries! Just type `!listgroups` in the dev group and it will list all your groups with their IDs.
+If you don't know your game group's ID, type `!listgroups` in the dev group and it will list all your groups with their IDs. To find it manually: open the group at [web.groupme.com](https://web.groupme.com) and copy the number from the URL.
 
-To find it manually: open the group at [web.groupme.com](https://web.groupme.com) and copy the number from the URL.
+### Subgroup / Topic mode
+
+If your group uses GroupMe's Topics feature and you want the bot to operate inside a specific topic while still reading admin roles from the main group, use the comma syntax:
+
+```
+!add MAIN_GROUP_ID,TOPIC_GROUP_ID
+```
+
+You can also browse and set topics from the **Groups tab** of the control panel GUI.
 
 ---
 
 ## Commands
 
 ### Game group — everyone
+
+#### General
 
 | Command | Description |
 |---|---|
@@ -98,23 +110,82 @@ To find it manually: open the group at [web.groupme.com](https://web.groupme.com
 | `#help 8ball` | Magic 8-Ball info |
 | `#help scripture` | Scripture commands |
 | `#help ai` | AI chat commands |
+| `#help points` | Points & gambling commands |
+| `#help gamepoints` | Connect Four betting & AI rewards |
 | `#help admin` | Admin feature controls |
-| `#start` | Start a new Connect Four game |
-| `#join` | Join as Player 2 |
-| `#addai` | Add AI engine as Player 2 |
-| `#quit` | End the current game |
-| `#A` – `#G` | Drop a piece in that column |
-| `#timeout N` | Set inactivity timeout (seconds) |
-| `#randverse` | Random scripture verse |
+| `?<question>` | Magic 8-Ball |
+
+#### Connect Four
+
+| Command | Description |
+|---|---|
+| `#start [easy\|medium\|hard]` | Start a new game (default difficulty: medium) |
+| `#join` | Join as Player 2 (triggers PvP betting phase) |
+| `#addai [easy\|medium\|hard]` | Add AI engine as Player 2 |
+| `#A` – `#G` | Drop your piece in that column |
+| `#quit` | End the current game (bets are fully refunded) |
+| `#timeout N` | Set inactivity timeout in seconds |
+| `#stats` | Show current game bets and player info |
+
+#### PvP Betting
+
+After both players join, a betting phase starts before play begins:
+
+| Command | Description |
+|---|---|
+| `#pvpbet <amount>` | Wager points on yourself |
+| `#pvpbet 0` | Skip betting |
+
+Both players must bet (or skip) before moves are accepted. Wagered points are held during the game — the **winner gets their own stake back plus the loser's stake**. If the game ends early or draws, all bets are fully refunded.
+
+#### Spectator Betting
+
+Anyone who is not a player can bet on who they think will win:
+
+| Command | Description |
+|---|---|
+| `#bet <amount> @player` | Bet on a player to win |
+
+Winners receive **double their bet**. Losers forfeit their stake. Use `#quit` to cancel an active spectator bet and get it back.
+
+#### Points & Gambling
+
+| Command | Description |
+|---|---|
+| `!points` | Check your point balance |
+| `!fih` | Fish for points — win or lose! (5 min cooldown) |
+| `!steal` | Steal points from a random person (5 min cooldown) |
+| `!coin <h/t> <amount>` | Flip a coin to double or lose your bet |
+| `#leaderboard` | Show the top points rankings |
+
+#### AI Chat
+
+| Command | Description |
+|---|---|
+| `!ai <message>` | Chat with the AI (15 s cooldown) |
+| `!aiset <text>` | Set the AI personality (60 s cooldown; clears memory) |
+| `!aiforget` | Clear the group's shared AI conversation history (admins only) |
+
+#### Scripture
+
+| Command | Description |
+|---|---|
+| `#randverse` | Random verse (Bible or Book of Mormon) |
 | `#randverse bible` | Random Bible verse |
 | `#randverse bom` | Random Book of Mormon verse |
-| `#findverse ...` | Look up or search a verse |
-| `?<question>` | Magic 8-Ball |
-| `!ai <message>` | Chat with the AI (15s per-user cooldown) |
-| `!aiset <text>` | Set AI personality — anyone (60s cooldown) |
-| `!aiforget` | Clear your own AI conversation history |
+| `#findverse <Book> <Ch:V>` | Direct verse lookup — e.g. `#findverse Alma 32:21` |
+| `#findverse "keyword"` | Keyword search across both books |
+| `#findverse bible "keyword"` | Keyword search — Bible only |
+| `#findverse bom "keyword"` | Keyword search — Book of Mormon only |
+
+#### Feature status (anyone can view)
+
+| Command | Description |
+|---|---|
 | `#state` | Show current state of all features |
 | `#state <feature>` | Check one feature's state |
+
+---
 
 ### Game group — admins only
 
@@ -125,7 +196,11 @@ To find it manually: open the group at [web.groupme.com](https://web.groupme.com
 | `#state 8ball true/false` | Enable or disable Magic 8-Ball |
 | `#state scripture true/false` | Enable or disable scripture commands |
 | `#state connect4 true/false` | Enable or disable Connect Four |
-| `!aiforgetall` | Clear all users' AI conversation history |
+| `!aiswitch true/false` | Enable or disable AI (same as `#state ai`) |
+| `!aiforget` | Clear the shared AI conversation history |
+| `!aiforgetall` | Alias for `!aiforget` |
+
+---
 
 ### Dev group — developer only
 
@@ -133,16 +208,46 @@ To find it manually: open the group at [web.groupme.com](https://web.groupme.com
 |---|---|
 | `!help` | Show dev commands |
 | `!listgroups` | List all groups your token is in (with IDs) |
+| `!listgroups MAIN_GROUP_ID` | List topics/subgroups for a specific group |
 | `!add GROUPID` | Set the active game group |
+| `!add MAIN_ID,SUB_ID` | Set bot to a topic/subgroup (admin data from main group) |
 | `!reload` | Restart the bot script |
 | `!state true/false` | Enable or disable game responses |
-| `!aiswitch true/false` | Enable or disable AI |
+| `!aiswitch true/false` | Enable or disable AI responses |
+
+---
+
+## Points & Rewards
+
+### Earning points
+
+| Activity | Points |
+|---|---|
+| `!fih` (lucky cast) | +5 to +40 pts (random) |
+| `!fih` (unlucky) | −5 to −40 pts (25% chance) |
+| `!steal` | Steal 5–30 pts from a random user |
+| `!coin` win | +bet amount |
+| `!coin` loss | −bet amount |
+| Beat Easy AI | +50 pts |
+| Beat Medium AI | +125 pts |
+| Beat Hard AI | +200 pts |
+| Win PvP game (with bets) | +loser's wagered points |
+
+Losing to the AI costs no points. PvP games without bets award no points either.
+
+### PvP betting in detail
+
+1. Player 1 uses `#start`, Player 2 uses `#join`
+2. Both players use `#pvpbet <amount>` to wager (or `#pvpbet 0` to skip)
+3. Both bets are deducted and held immediately
+4. When a player wins: they receive **the full pot** (their own stake back + the loser's stake)
+5. If the game is abandoned with `#quit` or times out: both bets are fully refunded
 
 ---
 
 ## AI Personality
 
-Anyone in the game group can set the AI's personality with `!aiset`:
+Anyone can set the AI's personality with `!aiset`:
 
 ```
 !aiset You are a grumpy Scottish pirate who speaks in a thick Scottish accent
@@ -158,16 +263,55 @@ The AI has hardened safety rules that **cannot be overridden** by any personalit
 
 Setting a new personality wipes all conversation history so no old context carries over.
 
+The AI uses a **single shared group memory** — all `!ai` messages are in one conversation, so the AI sees the full group's context rather than isolated per-user threads.
+
+---
+
+## Control Panel (GUI)
+
+When run on a desktop, the bot opens a graphical control panel with five tabs:
+
+| Tab | What you can do |
+|---|---|
+| **Status** | Toggle all features on/off with checkboxes; see uptime and active groups |
+| **Groups** | Browse your groups and topics; set the active game group with one click |
+| **AI** | Set personality, clear memory, adjust cooldowns and memory length |
+| **Settings** | Edit credentials, tune all points values, and customise response messages |
+| **Update** | Check for new commits on GitHub and auto-update with one click |
+
+All tabs are scrollable if content exceeds the window height.
+
+On a headless server the control panel is skipped and the bot runs in the background — use dev group commands instead.
+
 ---
 
 ## Tuning
 
-Near the top of `AI-FSY.py`:
+All of these can be changed live from the **Settings tab** of the control panel, or by editing `config.json` directly:
 
 ```python
-AI_COOLDOWN_SECONDS    = 15   # seconds between !ai uses per user
-AISET_COOLDOWN_SECONDS = 60   # seconds between !aiset uses per user
-AI_MEMORY_MAX_TURNS    = 10   # exchanges the AI remembers per user
+# AI
+AI_COOLDOWN_SECONDS    = 15    # seconds between !ai uses per user
+AISET_COOLDOWN_SECONDS = 60    # seconds between !aiset uses
+AI_MEMORY_MAX_TURNS    = 10    # shared group exchanges remembered
+
+# Fishing (!fih)
+POINTS_FIH_MIN         = 5     # minimum points gained/lost
+POINTS_FIH_MAX         = 40    # maximum points gained/lost
+POINTS_FIH_CD          = 300   # cooldown in seconds (5 min)
+POINTS_FIH_LOSE_CHANCE = 0.25  # probability of losing instead of gaining
+
+# Stealing (!steal)
+POINTS_STEAL_MIN       = 5     # minimum stolen
+POINTS_STEAL_MAX       = 30    # maximum stolen
+POINTS_STEAL_CD        = 300   # cooldown in seconds
+
+# Connect Four rewards
+POINTS_C4_WIN_AI_EASY  = 50    # beat Easy AI
+POINTS_C4_WIN_AI_MED   = 125   # beat Medium AI
+POINTS_C4_WIN_AI_HARD  = 200   # beat Hard AI
+
+LEADERBOARD_SIZE       = 10    # entries shown in #leaderboard
 ```
 
 ---
@@ -190,9 +334,12 @@ OLLAMA_BASE_MODEL
 
 | File / Folder | Description |
 |---|---|
-| `config.json` | Your saved settings — token, group IDs, model choice |
+| `config.json` | Saved credentials, group IDs, model choice, and all tuning values |
 | `AI-BOT/Modelfile` | Auto-generated Ollama Modelfile (safe to delete to reset) |
 | `AI-BOT/resources/` | Scripture text files — included in the repo |
+| `groups/<id>.json` | Per-group feature toggle state |
+| `groups/<id>/users/<uid>.json` | Per-user points records |
+| `.bot.lock` | Single-instance lock file — deleted automatically on exit |
 
 ---
 

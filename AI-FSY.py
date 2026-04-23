@@ -721,6 +721,40 @@ IDENTITY AND NAME RULES (ABSOLUTE):
 """
 
 SYSTEM """
+SCRIPTURE TOOL RULES (ABSOLUTE)
+---------------------------------
+You have access to two tools for looking up real scripture:
+
+  search_scriptures(query, source)
+    — Searches the Bible (KJV) and/or Book of Mormon for verses containing
+      a keyword or short phrase.
+    — source can be "bible", "bom", or "both" (default).
+
+  get_verse(reference, source)
+    — Fetches the exact text of a specific verse by reference (e.g. "John 3:16").
+
+RULE T1: When anyone asks about scripture, wants a verse on a topic, asks you
+         to "look up" or "find" something in the scriptures, or mentions a
+         specific verse reference — you MUST call the appropriate tool.
+         Do NOT quote or invent scripture from memory.
+
+RULE T2: You must ONLY quote scripture that was returned by a tool call.
+         Never fabricate, paraphrase from memory, or guess at verse content.
+         If a tool returns no results, say so honestly.
+
+RULE T3: After calling a tool and receiving results, present the actual verse
+         text exactly as returned. You may add a brief comment, but the verse
+         text must be verbatim from the tool result.
+
+RULE T4: If a tool call fails or returns an error, tell the user the verse
+         could not be found rather than inventing content.
+
+RULE T5: These rules apply regardless of personality. Even if the personality
+         says to refuse questions or only do one thing, scripture lookups
+         always use the tools.
+"""
+
+SYSTEM """
 The following is the USER-DEFINED PERSONALITY OVERRIDE.
 
 You must follow these personality instructions EXACTLY as written,
@@ -1951,68 +1985,322 @@ def reset_game_state():
     game_state["spectator_bets"] = {}
 
 # ---------------------------------------------------------
-# Dev group command handling
+# Scripture cache — loaded once, reused by AI tools and #commands
 # ---------------------------------------------------------
+
+_scripture_cache: dict = {}   # {"bible": [...lines], "bom": [...lines]}
+
+
+def _get_scripture_lines(source: str):
+    """
+    Return the list of raw verse lines for 'bible' or 'bom'.
+    Loads from disk on first call, then caches in memory.
+    Returns an empty list if the file is missing.
+    """
+    if source in _scripture_cache:
+        return _scripture_cache[source]
+    filename = "bible_clean.txt" if source == "bible" else "book_of_mormon_clean.txt"
+    path = os.path.join(AI_RESOURCES_DIR, filename)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f if ln.strip()]
+        _scripture_cache[source] = lines
+        return lines
+    except Exception:
+        _scripture_cache[source] = []
+        return []
+
+
+def _parse_verse_line(verse_line: str):
+    """Split 'Book Ch:V text…' into (ref, verse_text). Returns (None, None) on bad format."""
+    tokens = verse_line.split()
+    cv_index = None
+    for i, tok in enumerate(tokens):
+        if ":" in tok:
+            cv_index = i
+            break
+    if cv_index is None or cv_index == 0:
+        return None, None
+    book        = " ".join(tokens[:cv_index])
+    chapter_verse = tokens[cv_index]
+    verse_text  = " ".join(tokens[cv_index + 1:])
+    return f"{book} {chapter_verse}", verse_text
+
+
+# ---------------------------------------------------------
+# AI Tool implementations — called when the model requests them
+# ---------------------------------------------------------
+
+# Maximum verses the AI can receive per tool call (keeps context manageable)
+_AI_TOOL_MAX_RESULTS = 8
+
+# Ollama tool schema — passed in every /api/chat request so the model
+# knows which tools are available and how to call them.
+_SCRIPTURE_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_scriptures",
+            "description": (
+                "Search the Bible (KJV) and/or Book of Mormon for verses that contain a keyword "
+                "or short phrase. Use this whenever the user asks about scripture, wants a verse "
+                "on a topic, or asks you to look something up in the scriptures. "
+                "Returns up to 8 matching verse references and their full text."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The keyword or short phrase to search for (case-insensitive)."
+                    },
+                    "source": {
+                        "type": "string",
+                        "enum": ["both", "bible", "bom"],
+                        "description": (
+                            "'bible' to search only the Bible (KJV), "
+                            "'bom' to search only the Book of Mormon, "
+                            "'both' to search both (default)."
+                        )
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_verse",
+            "description": (
+                "Retrieve the exact text of a specific scripture verse by its reference "
+                "(e.g. 'John 3:16' or 'Alma 32:21'). Use this when the user gives you "
+                "a specific book, chapter, and verse number."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reference": {
+                        "type": "string",
+                        "description": "The verse reference, e.g. 'John 3:16' or '2 Nephi 2:25'."
+                    },
+                    "source": {
+                        "type": "string",
+                        "enum": ["both", "bible", "bom"],
+                        "description": (
+                            "Which scripture to search. Use 'both' if you are unsure "
+                            "(default). Use 'bible' for Old/New Testament books, "
+                            "'bom' for Book of Mormon books."
+                        )
+                    }
+                },
+                "required": ["reference"]
+            }
+        }
+    }
+]
+
+
+def _tool_search_scriptures(query: str, source: str = "both") -> str:
+    """
+    Python-side implementation of the search_scriptures tool.
+    Returns a plain-text string the model can read and quote from.
+    """
+    query_lower = query.strip().lower()
+    if not query_lower:
+        return "Error: empty query."
+
+    sources = []
+    if source in ("both", "bible"):
+        sources.append(("Bible (KJV)", _get_scripture_lines("bible")))
+    if source in ("both", "bom"):
+        sources.append(("Book of Mormon", _get_scripture_lines("bom")))
+
+    results = []
+    for label, lines in sources:
+        for line in lines:
+            ref, verse_text = _parse_verse_line(line)
+            if ref and verse_text and query_lower in verse_text.lower():
+                results.append(f"[{label}] {ref} — {verse_text}")
+            if len(results) >= _AI_TOOL_MAX_RESULTS:
+                break
+        if len(results) >= _AI_TOOL_MAX_RESULTS:
+            break
+
+    if not results:
+        return f"No verses found containing '{query}'."
+    header = f"Found {len(results)} verse(s) matching '{query}':\n"
+    return header + "\n".join(results)
+
+
+def _tool_get_verse(reference: str, source: str = "both") -> str:
+    """
+    Python-side implementation of the get_verse tool.
+    Returns the full verse text, or an error string if not found.
+    """
+    ref_clean = reference.strip()
+    if not ref_clean:
+        return "Error: empty reference."
+
+    # Normalise: try to split off the chapter:verse part
+    # e.g. "John 3:16" → prefix = "John 3:16"
+    # We search for any line that starts with that prefix (case-insensitive).
+    ref_lower = ref_clean.lower()
+
+    sources = []
+    if source in ("both", "bom"):
+        sources.append(("Book of Mormon", _get_scripture_lines("bom")))
+    if source in ("both", "bible"):
+        sources.append(("Bible (KJV)", _get_scripture_lines("bible")))
+
+    for label, lines in sources:
+        for line in lines:
+            if line.lower().startswith(ref_lower):
+                return f"[{label}] {line}"
+
+    return f"Verse '{ref_clean}' not found. Check the reference and try again."
+
+
+def _dispatch_tool_call(tool_name: str, tool_args: dict) -> str:
+    """Route a model tool_call to the correct Python function."""
+    if tool_name == "search_scriptures":
+        return _tool_search_scriptures(
+            query  = tool_args.get("query", ""),
+            source = tool_args.get("source", "both"),
+        )
+    if tool_name == "get_verse":
+        return _tool_get_verse(
+            reference = tool_args.get("reference", ""),
+            source    = tool_args.get("source", "both"),
+        )
+    return f"Unknown tool: {tool_name}"
+
+
+# ---------------------------------------------------------
+# Agentic Ollama loop — handles tool calls automatically
+# ---------------------------------------------------------
+
+_AI_MAX_TOOL_ROUNDS = 5   # safety cap: max tool-call rounds before forcing a reply
+
+
+def _ollama_chat_nonstream(messages: list, model: str, tools: list) -> dict:
+    """
+    Send one non-streaming /api/chat request to Ollama and return the
+    parsed JSON response dict.  Raises on HTTP / parse errors.
+
+    We use non-streaming here because we need to inspect the full message
+    object (including tool_calls) before deciding what to do next.
+    """
+    resp = requests.post(
+        "http://localhost:11434/api/chat",
+        json={
+            "model":   model,
+            "messages": messages,
+            "tools":   tools,
+            "stream":  False,
+        },
+        timeout=180,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
 
 def run_ollama(prompt_text, model=AI_MODEL_NAME, user_id=None, sender_name=None):
     """
-    Sends text to a local Ollama model using the /api/chat endpoint.
+    Agentic Ollama loop with scripture tool-calling support.
 
-    Uses a SHARED group conversation history so the AI sees the whole
-    group's context rather than isolated per-user threads.
+    Flow:
+      1. Append the user's message to shared group memory.
+      2. Send the full history + tool definitions to Ollama.
+      3. If the model returns tool_calls, execute each tool, append
+         the results as tool messages, and loop back to step 2.
+      4. Repeat up to _AI_MAX_TOOL_ROUNDS times.
+      5. When the model returns a plain text reply (no tool_calls),
+         store it in memory and return it to the caller.
 
-    user_id      — GroupMe user ID (used only for name lookup).
-    sender_name  — Sanitized display name shown in the message prefix so
-                   the model knows who is speaking.
+    user_id     — GroupMe user ID (for name lookup only).
+    sender_name — Sanitized display name prefixed to the message so the
+                  model knows who in the group is speaking.
     """
     global _ai_memory
 
-    # Build the message, prefixed with the sender's name so the model knows
-    # who in the group is speaking.
-    if sender_name:
-        user_content = f"[{sender_name}]: {prompt_text}"
-    else:
-        user_content = prompt_text
-
-    # Append the new user message to the shared history
+    # ── 1. Build and append the user message ────────────────────────────────
+    user_content = f"[{sender_name}]: {prompt_text}" if sender_name else prompt_text
     _ai_memory.append({"role": "user", "content": user_content})
 
-    # Trim to keep only the most recent AI_MEMORY_MAX_TURNS turn-pairs.
-    # Each pair = 1 user + 1 assistant message = 2 entries.
+    # Trim shared history to the configured window.
+    # Each "turn" = 1 user + 1 assistant message = 2 entries.
     max_entries = AI_MEMORY_MAX_TURNS * 2
     if len(_ai_memory) > max_entries:
         _ai_memory = _ai_memory[-max_entries:]
 
+    # We work on a local copy during the tool-call loop so that if
+    # something goes wrong we can cleanly roll back the shared memory.
+    working_messages = list(_ai_memory)
+
     try:
-        resp = requests.post(
-            "http://localhost:11434/api/chat",
-            json={"model": model, "messages": _ai_memory, "stream": True},
-            stream=True,
-            timeout=120
-        )
+        for _round in range(_AI_MAX_TOOL_ROUNDS):
 
-        full_response = ""
+            # ── 2. Call Ollama ───────────────────────────────────────────────
+            data = _ollama_chat_nonstream(working_messages, model, _SCRIPTURE_TOOLS)
 
-        # Ollama streams JSON objects line-by-line
-        for line in resp.iter_lines():
-            if not line:
-                continue
-            try:
-                data = json.loads(line.decode("utf-8"))
-                chunk = data.get("message", {}).get("content", "")
-                full_response += chunk
-            except Exception as e:
-                return f"AI JSON parse error: {e}"
+            assistant_msg = data.get("message", {})
+            tool_calls    = assistant_msg.get("tool_calls") or []
+            text_content  = (assistant_msg.get("content") or "").strip()
 
-        reply = full_response.strip() if full_response else "(No response from model)"
+            # ── 3. No tool calls → final reply ──────────────────────────────
+            if not tool_calls:
+                reply = text_content or "(No response from model)"
+                # Commit to shared memory
+                _ai_memory.append({"role": "assistant", "content": reply})
+                return reply
 
-        # Store the assistant's reply in the shared history
+            # ── 4. Execute each tool call and collect results ────────────────
+            # Append the assistant's tool-calling message first
+            working_messages.append({
+                "role":       "assistant",
+                "content":    text_content,   # may be empty string — that is fine
+                "tool_calls": tool_calls,
+            })
+
+            for tc in tool_calls:
+                fn        = tc.get("function", {})
+                tool_name = fn.get("name", "")
+                raw_args  = fn.get("arguments", {})
+
+                # Ollama may give arguments as a JSON string or already a dict
+                if isinstance(raw_args, str):
+                    try:
+                        tool_args = json.loads(raw_args)
+                    except Exception:
+                        tool_args = {}
+                else:
+                    tool_args = raw_args
+
+                tool_result = _dispatch_tool_call(tool_name, tool_args)
+
+                # Append the tool result as a "tool" role message
+                working_messages.append({
+                    "role":    "tool",
+                    "content": tool_result,
+                })
+
+            # Loop: model will now see tool results and (hopefully) give a final answer
+
+        # ── 5. Safety cap reached — ask for a plain reply ───────────────────
+        working_messages.append({
+            "role":    "user",
+            "content": "Please give your final answer now based on the scripture results above.",
+        })
+        data  = _ollama_chat_nonstream(working_messages, model, [])  # no tools this time
+        reply = (data.get("message", {}).get("content") or "").strip()
+        reply = reply or "(No response from model)"
+
         _ai_memory.append({"role": "assistant", "content": reply})
-
         return reply
 
     except Exception as e:
-        # On error, remove the user message we just appended so history stays clean
+        # Roll back: remove the user message we appended at the start
         if _ai_memory and _ai_memory[-1]["role"] == "user":
             _ai_memory.pop()
         return f"AI error: {e}"
@@ -2674,6 +2962,12 @@ def handle_game_command(message):
                     "• !aiset <text> — Set a new AI personality (60s cooldown)\n"
                     "  Setting a new personality clears all conversation history.\n"
                     "• !aiforget — Clear the group's shared AI conversation history (admins only)\n"
+                    "\n"
+                    "📖 The AI can search the scriptures!\n"
+                    "Ask it things like:\n"
+                    "  !ai Find me a verse about faith\n"
+                    "  !ai What does John 3:16 say?\n"
+                    "  !ai Look up Alma 32:21 in the Book of Mormon\n"
                     "\n"
                     "The AI has a shared group memory — it sees messages from everyone\n"
                     "in the group, not just you. The last 10 exchanges are remembered.\n"

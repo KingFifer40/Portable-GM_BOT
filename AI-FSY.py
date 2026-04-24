@@ -1091,7 +1091,14 @@ def _load_user_record(group_id, user_id):
         return {"points": 0, "name": ""}
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            record = json.load(f)
+        # Sanitize: ensure points is always a non-negative integer
+        raw_pts = record.get("points", 0)
+        try:
+            record["points"] = max(0, int(raw_pts))
+        except (TypeError, ValueError):
+            record["points"] = 0
+        return record
     except Exception:
         return {"points": 0, "name": ""}
 
@@ -1139,6 +1146,12 @@ def get_points(group_id, user_id, name=None):
     if not record.get("name"):
         record["name"] = name or uid
         changed = True
+    # Clamp and auto-repair any negative values that may have been written by
+    # a previous bug or manual edit.
+    stored = record.get("points", 0)
+    if stored < 0:
+        record["points"] = 0
+        changed = True
     if changed:
         _save_user_record(group_id, uid, record)
     return record.get("points", 0)
@@ -1149,7 +1162,8 @@ def add_points(group_id, user_id, name, delta):
     uid    = str(user_id)
     record = _load_user_record(group_id, uid)
     record["name"]   = name or record.get("name") or uid
-    record["points"] = max(0, record.get("points", 0) + delta)
+    current = max(0, record.get("points", 0))  # clamp stored negatives defensively
+    record["points"] = max(0, current + delta)
     _save_user_record(group_id, uid, record)
     return record["points"]
 
@@ -1160,9 +1174,11 @@ def transfer_points(group_id, from_id, from_name, to_id, to_name, amount):
     to = _load_user_record(group_id, str(to_id))
     fr["name"] = from_name or fr.get("name") or str(from_id)
     to["name"] = to_name   or to.get("name")  or str(to_id)
-    taken = min(amount, fr.get("points", 0))
-    fr["points"] = fr.get("points", 0) - taken
-    to["points"] = to.get("points", 0) + taken
+    fr_current = max(0, fr.get("points", 0))  # clamp defensively
+    to_current = max(0, to.get("points", 0))
+    taken = min(amount, fr_current)
+    fr["points"] = fr_current - taken
+    to["points"] = to_current + taken
     _save_user_record(group_id, str(from_id), fr)
     _save_user_record(group_id, str(to_id),   to)
     return taken, fr["points"], to["points"]
@@ -2944,10 +2960,22 @@ def handle_game_command(message):
         set_ai_cooldown(sender_id, _fih_last_used)
         amt  = random.randint(POINTS_FIH_MIN, POINTS_FIH_MAX)
         lose = random.random() < POINTS_FIH_LOSE_CHANCE
-        new_bal = add_points(GAME_GROUP_ID, sender_id, sender_name, -amt if lose else amt)
-        pool   = FIH_LOSE_MESSAGES if lose else FIH_WIN_MESSAGES
-        prefix = "🦀 " if lose else "🎣 "
-        text   = random.choice(pool).format(name=sender_name, pts=amt, bal=new_bal)
+        cur_bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
+        # If the player has 0 points, they can't lose anything — force a win
+        if lose and cur_bal == 0:
+            lose = False
+        if lose:
+            # Cap the loss to actual balance so the message is accurate
+            actual_loss = min(amt, cur_bal)
+            new_bal = add_points(GAME_GROUP_ID, sender_id, sender_name, -actual_loss)
+            pool   = FIH_LOSE_MESSAGES
+            prefix = "🦀 "
+            text   = random.choice(pool).format(name=sender_name, pts=actual_loss, bal=new_bal)
+        else:
+            new_bal = add_points(GAME_GROUP_ID, sender_id, sender_name, amt)
+            pool   = FIH_WIN_MESSAGES
+            prefix = "🎣 "
+            text   = random.choice(pool).format(name=sender_name, pts=amt, bal=new_bal)
         send_message(GAME_GROUP_ID, prefix + text, reply_to_id=msg_id)
         return
 
@@ -2969,11 +2997,18 @@ def handle_game_command(message):
             return
         set_ai_cooldown(sender_id, _steal_last_used)
         victim_id, victim_data = random.choice(victims)
+        # The random steal amount may exceed what the victim actually has;
+        # transfer_points caps it automatically and returns the real amount taken.
         amt = random.randint(POINTS_STEAL_MIN, POINTS_STEAL_MAX)
         taken, v_new, s_new = transfer_points(
             GAME_GROUP_ID, victim_id, victim_data["name"],
             sender_id, sender_name, amt,
         )
+        # Edge case: victim's balance hit 0 between the filter check and the
+        # transfer (e.g. another command ran concurrently).
+        if taken == 0:
+            send_message(GAME_GROUP_ID, f"🦀 {STEAL_EMPTY_MESSAGE}", reply_to_id=msg_id)
+            return
         tmpl = random.choice(STEAL_SUCCESS_MESSAGES)
         text = tmpl.format(
             thief=sender_name, victim=victim_data["name"],
@@ -4340,7 +4375,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "511b4e9"
+BOT_COMMIT_SHA = "e2e3ab9"
 
 _control_panel_instance = None  # set when panel launches
 

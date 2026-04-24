@@ -658,6 +658,10 @@ RULE S7: You must NEVER provide detailed explanations of human biology, anatomy,
          physiology, medicine, drugs, chemicals, or bodily functions.
          If asked, respond only with: "I am not able to discuss that topic here."
 RULE S8: You must NEVER send links, URLs, or web addresses of any kind.
+         This includes http://, https://, www., domain names like example.com,
+         shortened URLs, and any text that looks like a web address.
+         If a web search result contains a URL, summarize the information
+         WITHOUT including the URL. Never output any URL for any reason.
 RULE S9: You must be respectful to everyone.
 RULE S10: You must NEVER make jokes about, roleplay involving, or discuss feet,
           toes, or foot-related content in any context — including memes,
@@ -1995,29 +1999,70 @@ def _refund_all_bets(group_id):
 
 def _settle_spectator_bets(group_id, winner_id):
     """
-    Pay out spectator bets. Those who bet on the winner get double their stake.
-    Those who bet on the loser lose their stake (already deducted).
+    Pay out spectator bets using proportional pool betting (pari-mutuel style),
+    which matches how real-life betting pools work:
+      - All bets form a single pool.
+      - Those who bet on the winner share the ENTIRE pool proportionally to
+        their stake. (Bigger bet = bigger share of losers' money.)
+      - Those who bet on the loser forfeit their stake.
+      - If nobody bet on the loser, winners just get their stake refunded
+        (no profit to pay out — can't win if no one bet against you).
     Returns a list of human-readable result lines.
     """
     lines = []
-    winners = []
-    losers = []
+    if not game_state["spectator_bets"]:
+        return lines
+
+    winning_bets = {}   # {uid: bdata}
+    losing_bets  = {}   # {uid: bdata}
     for uid, bdata in game_state["spectator_bets"].items():
         if str(bdata["on"]) == str(winner_id):
-            winners.append((uid, bdata))
+            winning_bets[uid] = bdata
         else:
-            losers.append((uid, bdata))
+            losing_bets[uid] = bdata
 
-    if not winners and not losers:
+    if not winning_bets and not losing_bets:
         return lines
 
     lines.append("👥 Spectator Results:")
-    for uid, bdata in winners:
-        payout = bdata["amount"] * 2
+
+    total_winning_stake = sum(b["amount"] for b in winning_bets.values())
+    total_losing_stake  = sum(b["amount"] for b in losing_bets.values())
+    total_pool = total_winning_stake + total_losing_stake
+
+    if not winning_bets:
+        # Nobody bet on the winner — refund all losers (no opposing pool)
+        for uid, bdata in losing_bets.items():
+            payout = bdata["amount"]
+            new_bal = add_points(group_id, uid, bdata["bettor_name"], payout)
+            lines.append(f"  🔄 {bdata['bettor_name']} bet on {bdata['on_name']} (lost), but no one bet on the winner — refunded {payout} pts. ({new_bal} pts)")
+        return lines
+
+    if not losing_bets:
+        # Nobody bet on the loser — winners just get their stake back, no profit
+        for uid, bdata in winning_bets.items():
+            payout = bdata["amount"]
+            new_bal = add_points(group_id, uid, bdata["bettor_name"], payout)
+            lines.append(f"  🔄 {bdata['bettor_name']} bet on the winner, but no one bet against them — refunded {payout} pts. ({new_bal} pts)")
+        return lines
+
+    # Both sides had bettors — distribute the full pool to winners proportionally
+    # Each winner gets: their_stake + (their_stake / total_winning_stake) * total_losing_stake
+    for uid, bdata in winning_bets.items():
+        stake = bdata["amount"]
+        # Proportional share of the loser pool
+        losers_share = round(stake / total_winning_stake * total_losing_stake)
+        payout = stake + losers_share
         new_bal = add_points(group_id, uid, bdata["bettor_name"], payout)
-        lines.append(f"  🎉 {bdata['bettor_name']} bet on {bdata['on_name']} and wins {payout} pts! ({new_bal} pts)")
-    for uid, bdata in losers:
-        lines.append(f"  😔 {bdata['bettor_name']} bet on {bdata['on_name']} and loses {bdata['amount']} pts.")
+        profit = payout - stake
+        lines.append(
+            f"  🎉 {bdata['bettor_name']} bet {stake} pts on {bdata['on_name']} and wins {profit} pts profit! "
+            f"(Total payout: {payout} pts, balance: {new_bal} pts)"
+        )
+
+    for uid, bdata in losing_bets.items():
+        lines.append(f"  😔 {bdata['bettor_name']} bet {bdata['amount']} pts on {bdata['on_name']} and loses their bet.")
+
     return lines
 
 
@@ -2866,6 +2911,15 @@ def handle_game_command(message):
             )
             return
 
+        # --- Python-side URL scrubber (strip any URLs the model might sneak in) ---
+        import re as _re
+        ai_response = _re.sub(
+            r'https?://\S+|www\.\S+|\b\S+\.(com|org|net|io|gov|edu|co|uk|info|ai)\S*',
+            '[link removed]',
+            ai_response,
+            flags=_re.IGNORECASE,
+        )
+
         send_message_as_bot(GAME_GROUP_ID, ai_response, reply_to_id=msg_id)
         return
 
@@ -3076,6 +3130,93 @@ def handle_game_command(message):
                 reply_to_id=msg_id)
         return
 
+    # !give @mentioned_user amount  — give points to another user
+    if cmd == "!give":
+        if len(parts) < 3:
+            send_message(GAME_GROUP_ID,
+                "Usage: !give @username <points>\nExample: !give @PlayerName 50",
+                reply_to_id=msg_id)
+            return
+
+        # Parse amount (last token)
+        raw_amt = parts[-1]
+        if "." in raw_amt:
+            send_message(GAME_GROUP_ID, "❌ Amount must be a whole number, no decimals.", reply_to_id=msg_id)
+            return
+        try:
+            give_amt = int(raw_amt)
+            if give_amt <= 0:
+                raise ValueError
+        except ValueError:
+            send_message(GAME_GROUP_ID, "Amount must be a positive whole number.", reply_to_id=msg_id)
+            return
+
+        # Resolve target — try attachment mentions first, then name matching
+        mention_text = " ".join(parts[1:-1]).lstrip("@").strip().lower()
+        target_id = None
+        target_name = None
+
+        # Try GroupMe attachment mentions
+        for att in message.get("attachments", []):
+            if att.get("type") == "mentions":
+                for uid in att.get("user_ids", []):
+                    if str(uid) != str(sender_id):
+                        target_id = uid
+                        target_name = _known_names.get(str(uid))
+                        break
+            if target_id:
+                break
+
+        # Fall back to name matching in the known names registry
+        if target_id is None:
+            for uid, name_val in _known_names.items():
+                if uid == str(sender_id):
+                    continue
+                if name_val.lower() == mention_text or mention_text in name_val.lower():
+                    target_id = uid
+                    target_name = name_val
+                    break
+
+        if target_id is None or str(target_id) == str(sender_id):
+            send_message(GAME_GROUP_ID,
+                "❌ Couldn't find that user. Make sure you @mention them or spell their name correctly.",
+                reply_to_id=msg_id)
+            return
+
+        if target_name is None:
+            target_name = str(target_id)
+
+        # Check sender balance
+        sender_bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
+        if sender_bal == 0:
+            send_message(GAME_GROUP_ID,
+                f"💸 {sender_name}, you have 0 points — nothing to give!",
+                reply_to_id=msg_id)
+            return
+
+        # Cap at available balance (all-in)
+        allin = False
+        if give_amt >= sender_bal:
+            give_amt = sender_bal
+            allin = True
+
+        # Transfer
+        taken, s_new, t_new = transfer_points(
+            GAME_GROUP_ID, sender_id, sender_name, target_id, target_name, give_amt
+        )
+
+        if taken == 0:
+            send_message(GAME_GROUP_ID,
+                f"💸 {sender_name}, you don't have enough points to give.",
+                reply_to_id=msg_id)
+            return
+
+        send_message(GAME_GROUP_ID,
+            f"{'🎰 ALL IN! ' if allin else '🎁 '}{sender_name} gave {taken} pts to {target_name}! "
+            f"({sender_name}: {s_new} pts | {target_name}: {t_new} pts)",
+            reply_to_id=msg_id)
+        return
+
     # Catch common typo: player types =A through =G instead of #A through #G during a game
     if game_state["active"] and len(game_state["players"]) >= 2 and len(text) >= 2 and text[0] == "=":
         possible_col = text[1:].strip()
@@ -3218,6 +3359,8 @@ def handle_game_command(message):
                     "• !points — Check your point balance\n"
                     "• !fih — Fish for points — win or lose! (5 min cooldown)\n"
                     "• !steal — Steal points from a random person (5 min cooldown)\n"
+                    "• !give @username <amount> — Give points to another player\n"
+                    "  Example: !give @PlayerName 50\n"
                     "• !coin <h/t> <bet> — Flip a coin to gamble points\n"
                     "  Example: !coin h 50\n"
                     "  Betting your full balance or more = All In!\n"
@@ -3249,10 +3392,13 @@ def handle_game_command(message):
                     "• Betting your full balance = All In!\n"
                     "• If game ends early, all bets are fully refunded\n"
                     "\n"
-                    "👥 *Spectator Betting:*\n"
+                    "👥 *Spectator Betting (pool/pari-mutuel):*\n"
                     "• #bet <amount> @player — Bet on a player\n"
-                    "• Win: receive double your bet\n"
-                    "• Lose: lose your bet\n"
+                    "• All bets form a shared pool\n"
+                    "• Winners share the ENTIRE pool proportionally to their stake\n"
+                    "  (bigger bet = bigger share of the losers' money)\n"
+                    "• Lose: forfeit your bet to the winners\n"
+                    "• If no one bet against you, you get refunded\n"
                     "• #quit to cancel your spectator bet and get it back\n"
                     "• #stats — Show current game bets and info"
                 )
@@ -3677,11 +3823,16 @@ def handle_game_command(message):
             return
 
         if feature == "all":
-            GAME_ENABLED = val
+            GAME_ENABLED      = val
+            AI_ENABLED        = val
+            EIGHTBALL_ENABLED = val
+            SCRIPTURE_ENABLED = val
+            CONNECT4_ENABLED  = val
+            snapshot_group_config(GAME_GROUP_ID)
             if not val:
-                send_message(GAME_GROUP_ID, "🔴 Bot disabled. Only #state commands will work.", reply_to_id=msg_id)
+                send_message(GAME_GROUP_ID, "🔴 All features disabled. Only #state commands will work.", reply_to_id=msg_id)
             else:
-                send_message(GAME_GROUP_ID, "🟢 Bot enabled.", reply_to_id=msg_id)
+                send_message(GAME_GROUP_ID, "🟢 All features enabled.", reply_to_id=msg_id)
 
         elif feature == "ai":
             AI_ENABLED = val
@@ -4375,7 +4526,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "e2e3ab9"
+BOT_COMMIT_SHA = "3aea4ef"
 
 _control_panel_instance = None  # set when panel launches
 
@@ -5278,6 +5429,14 @@ class ControlPanel:
         val = var.get()
         if key == "master":
             GAME_ENABLED = val
+            # When toggling the master switch from the UI, also set all sub-features
+            AI_ENABLED        = val
+            EIGHTBALL_ENABLED = val
+            SCRIPTURE_ENABLED = val
+            CONNECT4_ENABLED  = val
+            # Update all checkbox vars to reflect the new unified state
+            for k, v in self._feature_vars.items():
+                v.set(val)
         elif key == "ai":
             AI_ENABLED = val
         elif key == "8ball":
@@ -5287,7 +5446,25 @@ class ControlPanel:
         elif key == "connect4":
             CONNECT4_ENABLED = val
 
+        snapshot_group_config(GAME_GROUP_ID)
+
+        label_map = {
+            "master":    "All features (master)",
+            "ai":        "AI Chat",
+            "8ball":     "Magic 8-Ball",
+            "scripture": "Scripture",
+            "connect4":  "Connect Four",
+        }
+        feature_label = label_map.get(key, key)
+        state_word = "enabled ✅" if val else "disabled ❌"
+        status_msg = f"[Control Panel] {feature_label} {state_word}."
         self._set_status(f"{'Enabled' if val else 'Disabled'}: {key}")
+
+        # Send chat notification if game group is set
+        if GAME_GROUP_ID:
+            def do_send():
+                send_message(GAME_GROUP_ID, status_msg)
+            threading.Thread(target=do_send, daemon=True).start()
 
     # ── Group tab callbacks ───────────────────────────────────────────────────
 

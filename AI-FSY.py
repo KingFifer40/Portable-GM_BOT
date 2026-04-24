@@ -658,10 +658,6 @@ RULE S7: You must NEVER provide detailed explanations of human biology, anatomy,
          physiology, medicine, drugs, chemicals, or bodily functions.
          If asked, respond only with: "I am not able to discuss that topic here."
 RULE S8: You must NEVER send links, URLs, or web addresses of any kind.
-         This includes http://, https://, www., domain names like example.com,
-         shortened URLs, and any text that looks like a web address.
-         If a web search result contains a URL, summarize the information
-         WITHOUT including the URL. Never output any URL for any reason.
 RULE S9: You must be respectful to everyone.
 RULE S10: You must NEVER make jokes about, roleplay involving, or discuss feet,
           toes, or foot-related content in any context — including memes,
@@ -1999,70 +1995,29 @@ def _refund_all_bets(group_id):
 
 def _settle_spectator_bets(group_id, winner_id):
     """
-    Pay out spectator bets using proportional pool betting (pari-mutuel style),
-    which matches how real-life betting pools work:
-      - All bets form a single pool.
-      - Those who bet on the winner share the ENTIRE pool proportionally to
-        their stake. (Bigger bet = bigger share of losers' money.)
-      - Those who bet on the loser forfeit their stake.
-      - If nobody bet on the loser, winners just get their stake refunded
-        (no profit to pay out — can't win if no one bet against you).
+    Pay out spectator bets. Those who bet on the winner get double their stake.
+    Those who bet on the loser lose their stake (already deducted).
     Returns a list of human-readable result lines.
     """
     lines = []
-    if not game_state["spectator_bets"]:
-        return lines
-
-    winning_bets = {}   # {uid: bdata}
-    losing_bets  = {}   # {uid: bdata}
+    winners = []
+    losers = []
     for uid, bdata in game_state["spectator_bets"].items():
         if str(bdata["on"]) == str(winner_id):
-            winning_bets[uid] = bdata
+            winners.append((uid, bdata))
         else:
-            losing_bets[uid] = bdata
+            losers.append((uid, bdata))
 
-    if not winning_bets and not losing_bets:
+    if not winners and not losers:
         return lines
 
     lines.append("👥 Spectator Results:")
-
-    total_winning_stake = sum(b["amount"] for b in winning_bets.values())
-    total_losing_stake  = sum(b["amount"] for b in losing_bets.values())
-    total_pool = total_winning_stake + total_losing_stake
-
-    if not winning_bets:
-        # Nobody bet on the winner — refund all losers (no opposing pool)
-        for uid, bdata in losing_bets.items():
-            payout = bdata["amount"]
-            new_bal = add_points(group_id, uid, bdata["bettor_name"], payout)
-            lines.append(f"  🔄 {bdata['bettor_name']} bet on {bdata['on_name']} (lost), but no one bet on the winner — refunded {payout} pts. ({new_bal} pts)")
-        return lines
-
-    if not losing_bets:
-        # Nobody bet on the loser — winners just get their stake back, no profit
-        for uid, bdata in winning_bets.items():
-            payout = bdata["amount"]
-            new_bal = add_points(group_id, uid, bdata["bettor_name"], payout)
-            lines.append(f"  🔄 {bdata['bettor_name']} bet on the winner, but no one bet against them — refunded {payout} pts. ({new_bal} pts)")
-        return lines
-
-    # Both sides had bettors — distribute the full pool to winners proportionally
-    # Each winner gets: their_stake + (their_stake / total_winning_stake) * total_losing_stake
-    for uid, bdata in winning_bets.items():
-        stake = bdata["amount"]
-        # Proportional share of the loser pool
-        losers_share = round(stake / total_winning_stake * total_losing_stake)
-        payout = stake + losers_share
+    for uid, bdata in winners:
+        payout = bdata["amount"] * 2
         new_bal = add_points(group_id, uid, bdata["bettor_name"], payout)
-        profit = payout - stake
-        lines.append(
-            f"  🎉 {bdata['bettor_name']} bet {stake} pts on {bdata['on_name']} and wins {profit} pts profit! "
-            f"(Total payout: {payout} pts, balance: {new_bal} pts)"
-        )
-
-    for uid, bdata in losing_bets.items():
-        lines.append(f"  😔 {bdata['bettor_name']} bet {bdata['amount']} pts on {bdata['on_name']} and loses their bet.")
-
+        lines.append(f"  🎉 {bdata['bettor_name']} bet on {bdata['on_name']} and wins {payout} pts! ({new_bal} pts)")
+    for uid, bdata in losers:
+        lines.append(f"  😔 {bdata['bettor_name']} bet on {bdata['on_name']} and loses {bdata['amount']} pts.")
     return lines
 
 
@@ -2538,7 +2493,12 @@ def run_ollama(prompt_text, model=AI_MODEL_NAME, user_id=None, sender_name=None)
         return f"AI error: {e}"
 
 def handle_dev_command(message):
-    global GAME_GROUP_ID, GAME_ENABLED, AI_ENABLED, last_game_since_id, ADMIN_GROUP_ID, USE_SUBGROUP
+    global GAME_GROUP_ID, GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED, SCRIPTURE_ENABLED
+    global CONNECT4_ENABLED, GAME_TIMEOUT_SECONDS, last_game_since_id, ADMIN_GROUP_ID, USE_SUBGROUP
+    global AI_COOLDOWN_SECONDS, AISET_COOLDOWN_SECONDS, AI_MEMORY_MAX_TURNS
+    global POINTS_FIH_MIN, POINTS_FIH_MAX, POINTS_FIH_CD, POINTS_FIH_LOSE_CHANCE
+    global POINTS_STEAL_MIN, POINTS_STEAL_MAX, POINTS_STEAL_CD
+    global POINTS_C4_WIN, POINTS_C4_WIN_AI, LEADERBOARD_SIZE
 
     text = (message.get("text") or "").strip()
     raw_name = message.get("name", "Unknown")
@@ -2553,52 +2513,159 @@ def handle_dev_command(message):
         return
     cmd = parts[0].lower()
 
-    # !help
+    # -------------------------------------------------------------------------
+    # Helper: parse true/false values
+    # -------------------------------------------------------------------------
+    def _bool_val(s):
+        if s in ("true", "on", "1", "yes"):  return True
+        if s in ("false", "off", "0", "no"): return False
+        return None
+
+    # =========================================================================
+    # !help  [section]
+    # =========================================================================
     if cmd == "!help":
-        help_text = (
-            "Developer Commands:\n"
-            "!help — Show this help menu\n"
-            "!listgroups — List all groups your token is in\n"
-            "!listgroups MAIN_GROUP_ID — Show topics/subgroups for a main group\n"
-            "!add GROUPID — Set the active game group (main group)\n"
-            "!add MAIN_GROUP_ID,SUB_GROUP_ID — Set bot to subgroup with admin from main\n"
-            "!reload — Restart the bot script\n"
-            "!state true/false — Enable or disable game responses\n"
-            "!aiswitch true/false — Enable or disable AI responses\n"
+        topic = parts[1].lower() if len(parts) >= 2 else None
+
+        if topic == "groups":
+            send_message(DEV_GROUP_ID, (
+                "📡 Group Management:\n"
+                "!listgroups — List all groups your token is in\n"
+                "!listgroups <GROUP_ID> — Show topics/subgroups for a group\n"
+                "!add <GROUP_ID> — Set active game group (standard mode)\n"
+                "!add <MAIN_ID>,<SUB_ID> — Set bot to topic with admin from main group\n"
+                "!status — Show current bot status and all feature states"
+            ), reply_to_id=msg_id)
+            return
+
+        if topic == "features":
+            send_message(DEV_GROUP_ID, (
+                "🔧 Feature Toggles:\n"
+                "!state — Show all feature states\n"
+                "!state all <true/false> — Master on/off (affects all features)\n"
+                "!state ai <true/false> — AI Chat on/off\n"
+                "!state 8ball <true/false> — Magic 8-Ball on/off\n"
+                "!state scripture <true/false> — Scripture on/off\n"
+                "!state connect4 <true/false> — Connect Four on/off\n"
+                "!timeout <seconds> — Set game inactivity timeout"
+            ), reply_to_id=msg_id)
+            return
+
+        if topic == "ai":
+            send_message(DEV_GROUP_ID, (
+                "🤖 AI Controls:\n"
+                "!aipersonality <text> — Set a new AI personality (rebuilds model)\n"
+                "!aiforget — Clear the shared group AI conversation memory\n"
+                "!aicooldown <seconds> — Set !ai command cooldown\n"
+                "!aisetcooldown <seconds> — Set !aiset command cooldown\n"
+                "!aimemory <turns> — Set max conversation memory turns\n"
+                "!aiswitch <true/false> — Enable or disable AI (alias for !state ai)"
+            ), reply_to_id=msg_id)
+            return
+
+        if topic == "points":
+            send_message(DEV_GROUP_ID, (
+                "💰 Points System:\n"
+                "!leaderboard — Show points leaderboard\n"
+                "!pointsset fih_min <n> — Min points from !fih\n"
+                "!pointsset fih_max <n> — Max points from !fih\n"
+                "!pointsset fih_cd <seconds> — !fih cooldown\n"
+                "!pointsset fih_lose <0.0-1.0> — !fih lose chance\n"
+                "!pointsset steal_min <n> — Min points from !steal\n"
+                "!pointsset steal_max <n> — Max points from !steal\n"
+                "!pointsset steal_cd <seconds> — !steal cooldown\n"
+                "!pointsset c4_win <n> — PvP Connect Four win points\n"
+                "!pointsset c4_win_ai <n> — vs-AI Connect Four win points (medium)\n"
+                "!pointsset lb_size <n> — Leaderboard entry count"
+            ), reply_to_id=msg_id)
+            return
+
+        if topic == "bot":
+            send_message(DEV_GROUP_ID, (
+                "⚙️ Bot Control:\n"
+                "!status — Full bot status overview\n"
+                "!reload — Restart the bot process\n"
+                "!stop — Shut down the bot"
+            ), reply_to_id=msg_id)
+            return
+
+        # Top-level help menu
+        send_message(DEV_GROUP_ID, (
+            "📚 Dev Help — type !help <section> for details:\n"
             "\n"
-            "Notes:\n"
-            "- Only one game group is active at a time.\n"
-            "- When switching groups, the bot notifies both old and new groups.\n"
-            "- The bot polls this dev group every 10 seconds."
-        )
-        send_message(DEV_GROUP_ID, help_text, reply_to_id=msg_id)
+            "!help groups   — Group selection & management\n"
+            "!help features — Feature toggles (bot, AI, 8ball, scripture, C4)\n"
+            "!help ai       — AI personality, memory & cooldowns\n"
+            "!help points   — Points system tuning\n"
+            "!help bot      — Restart, stop, status\n"
+            "\n"
+            "Quick commands:\n"
+            "!status        — Show full bot status\n"
+            "!state         — Show all feature states\n"
+            "!reload        — Restart the bot"
+        ), reply_to_id=msg_id)
         return
 
+    # =========================================================================
+    # !status  — full bot status overview (mirrors the panel Status tab)
+    # =========================================================================
+    if cmd == "!status":
+        on  = "✅"
+        off = "❌"
+        mode = "subgroup" if USE_SUBGROUP else "standard"
+        admin_info = f"\n  Admin group:  {ADMIN_GROUP_ID}" if USE_SUBGROUP and ADMIN_GROUP_ID else ""
+        turns = len(_ai_memory) // 2
+        status_text = (
+            "🤖 Bot Status\n"
+            f"  Game group:   {GAME_GROUP_ID or '(not set)'}{admin_info}\n"
+            f"  Mode:         {mode}\n"
+            f"  Model:        {OLLAMA_BASE_MODEL}\n"
+            "\n"
+            "🔧 Features:\n"
+            f"  Bot (master) {on if GAME_ENABLED else off}\n"
+            f"  Connect Four {on if CONNECT4_ENABLED else off}\n"
+            f"  Magic 8-Ball {on if EIGHTBALL_ENABLED else off}\n"
+            f"  Scripture    {on if SCRIPTURE_ENABLED else off}\n"
+            f"  AI Chat      {on if AI_ENABLED else off}\n"
+            "\n"
+            "🤖 AI:\n"
+            f"  Memory:       {turns} turn(s) stored\n"
+            f"  !ai cooldown: {AI_COOLDOWN_SECONDS}s\n"
+            f"  !aiset cd:    {AISET_COOLDOWN_SECONDS}s\n"
+            f"  Memory turns: {AI_MEMORY_MAX_TURNS}\n"
+            "\n"
+            "💰 Points:\n"
+            f"  !fih:   {POINTS_FIH_MIN}–{POINTS_FIH_MAX} pts, {POINTS_FIH_CD}s cd, {int(POINTS_FIH_LOSE_CHANCE*100)}% lose\n"
+            f"  !steal: {POINTS_STEAL_MIN}–{POINTS_STEAL_MAX} pts, {POINTS_STEAL_CD}s cd\n"
+            f"  C4 PvP win: {POINTS_C4_WIN} pts\n"
+            f"  C4 vs AI:   Easy {POINTS_C4_WIN_AI_EASY} / Med {POINTS_C4_WIN_AI_MED} / Hard {POINTS_C4_WIN_AI_HARD} pts\n"
+            f"  Leaderboard: top {LEADERBOARD_SIZE}\n"
+            f"  Game timeout: {GAME_TIMEOUT_SECONDS}s"
+        )
+        send_message(DEV_GROUP_ID, status_text, reply_to_id=msg_id)
+        return
+
+    # =========================================================================
     # !listgroups [MAIN_GROUP_ID]
+    # =========================================================================
     if cmd == "!listgroups":
         if len(parts) < 2:
-            # No arg: list all main groups
             groups = list_groups()
             if not groups:
                 send_message(DEV_GROUP_ID, "No groups found.", reply_to_id=msg_id)
                 return
-
             lines = ["Groups you are in:"]
             for g in groups:
-                gid = g.get("id")
-                name = g.get("name", "(no name)")
-                lines.append(f"  {name} — {gid}")
+                lines.append(f"  {g.get('name','(no name)')} — {g.get('id')}")
             send_message(DEV_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
             return
 
-        # Has arg: show topics for that main group
         main_gid = parts[1].strip()
         try:
             topics = _fetch_group_topics(main_gid)
             if not topics:
                 send_message(DEV_GROUP_ID, f"No topics found for group {main_gid}.", reply_to_id=msg_id)
                 return
-
             lines = [f"Topics/Subgroups in {main_gid}:"]
             for topic_name, topic_id in topics:
                 lines.append(f"  {topic_name} — {topic_id}")
@@ -2607,7 +2674,9 @@ def handle_dev_command(message):
             send_message(DEV_GROUP_ID, f"Error fetching topics: {e}", reply_to_id=msg_id)
         return
 
+    # =========================================================================
     # !add GROUPID  OR  !add MAIN_GROUP_ID,SUB_GROUP_ID
+    # =========================================================================
     if cmd == "!add":
         if len(parts) < 2:
             send_message(DEV_GROUP_ID, "Usage: !add GROUPID  or  !add MAIN_GROUP_ID,SUB_GROUP_ID", reply_to_id=msg_id)
@@ -2616,26 +2685,24 @@ def handle_dev_command(message):
         arg = parts[1].strip()
         old_gid = GAME_GROUP_ID
 
-        # Check if comma-separated (subgroup mode)
         if "," in arg:
             ids = arg.split(",")
             if len(ids) != 2:
                 send_message(DEV_GROUP_ID, "Usage: !add MAIN_GROUP_ID,SUB_GROUP_ID", reply_to_id=msg_id)
                 return
             admin_gid = ids[0].strip()
-            game_gid = ids[1].strip()
-            USE_SUBGROUP = True
+            game_gid  = ids[1].strip()
+            USE_SUBGROUP   = True
             ADMIN_GROUP_ID = admin_gid
         else:
-            # Standard mode
-            game_gid = arg
-            USE_SUBGROUP = False
+            game_gid       = arg
+            USE_SUBGROUP   = False
             ADMIN_GROUP_ID = None
 
         GAME_GROUP_ID = game_gid
 
         cfg = load_config()
-        cfg["game_group_id"] = GAME_GROUP_ID
+        cfg["game_group_id"]    = GAME_GROUP_ID
         cfg["use_subgroup_mode"] = USE_SUBGROUP
         if USE_SUBGROUP:
             cfg["admin_group_id"] = ADMIN_GROUP_ID
@@ -2645,65 +2712,303 @@ def handle_dev_command(message):
             send_message(old_gid, "Connect Four bot has been removed from this group.")
 
         send_message(game_gid, "Connect Four bot has been added to this group.")
-        send_message(game_gid, "Admins: enable/disable the bot with #state true or #state false.")
+        send_message(game_gid, "Admins: enable/disable the bot with #state all true/false.")
 
         last_game_since_id = get_latest_message_id(game_gid)
         if last_game_since_id is None:
             last_game_since_id = "0"
 
         apply_group_config(game_gid)
-        
+
         if USE_SUBGROUP:
             send_message(DEV_GROUP_ID, f"Game group set to {game_gid} (subgroup mode, admin group: {admin_gid})", reply_to_id=msg_id)
         else:
             send_message(DEV_GROUP_ID, f"Game group set to {game_gid}", reply_to_id=msg_id)
         return
 
-    # !reload
+    # =========================================================================
+    # !reload  /  !stop
+    # =========================================================================
     if cmd == "!reload":
         send_message(DEV_GROUP_ID, "Reloading script...", reply_to_id=msg_id)
-        python = sys.executable
-        os.execv(python, [python] + sys.argv)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
         return
 
-    # !state true/false
+    if cmd == "!stop":
+        send_message(DEV_GROUP_ID, "Shutting down bot...", reply_to_id=msg_id)
+        handle_shutdown(None, None)
+        return
+
+    # =========================================================================
+    # !state  [feature] [true/false]
+    # Mirrors the game group #state command so the dev can toggle anything
+    # remotely without needing to be in the game group.
+    # =========================================================================
     if cmd == "!state":
-        if len(parts) < 2:
-            send_message(DEV_GROUP_ID, f"Current state: {GAME_ENABLED}", reply_to_id=msg_id)
+        on  = "✅"
+        off = "❌"
+
+        def _feature_status():
+            lines = [
+                f"{'Bot (master)':<16} {on if GAME_ENABLED else off}",
+                f"{'Connect Four':<16} {on if CONNECT4_ENABLED else off}",
+                f"{'Magic 8-Ball':<16} {on if EIGHTBALL_ENABLED else off}",
+                f"{'Scripture':<16} {on if SCRIPTURE_ENABLED else off}",
+                f"{'AI Chat':<16} {on if AI_ENABLED else off}",
+            ]
+            return "🔧 Feature states:\n" + "\n".join(lines)
+
+        if len(parts) == 1:
+            send_message(DEV_GROUP_ID, _feature_status(), reply_to_id=msg_id)
             return
 
-        val = parts[1].lower()
-        if val in ("true", "on", "1", "yes"):
-            GAME_ENABLED = True
-        elif val in ("false", "off", "0", "no"):
-            GAME_ENABLED = False
+        feature = parts[1].lower()
+
+        # One-arg form: just show that feature's state
+        feature_getters = {
+            "all":       lambda: f"master={GAME_ENABLED} connect4={CONNECT4_ENABLED} 8ball={EIGHTBALL_ENABLED} scripture={SCRIPTURE_ENABLED} ai={AI_ENABLED}",
+            "ai":        lambda: f"AI Chat: {on if AI_ENABLED else off}",
+            "8ball":     lambda: f"Magic 8-Ball: {on if EIGHTBALL_ENABLED else off}",
+            "scripture": lambda: f"Scripture: {on if SCRIPTURE_ENABLED else off}",
+            "connect4":  lambda: f"Connect Four: {on if CONNECT4_ENABLED else off}",
+            "master":    lambda: f"Bot (master): {on if GAME_ENABLED else off}",
+        }
+        if feature in feature_getters and len(parts) == 2:
+            send_message(DEV_GROUP_ID, feature_getters[feature](), reply_to_id=msg_id)
+            return
+
+        if len(parts) < 3:
+            send_message(DEV_GROUP_ID,
+                "Usage: !state [feature] [true/false]\n"
+                "Features: all, ai, 8ball, scripture, connect4, master",
+                reply_to_id=msg_id)
+            return
+
+        val = _bool_val(parts[2].lower())
+        if val is None:
+            send_message(DEV_GROUP_ID, "Value must be true or false.", reply_to_id=msg_id)
+            return
+
+        if feature == "all":
+            GAME_ENABLED = CONNECT4_ENABLED = EIGHTBALL_ENABLED = SCRIPTURE_ENABLED = AI_ENABLED = val
+            snapshot_group_config(GAME_GROUP_ID)
+            send_message(DEV_GROUP_ID,
+                f"All features {'enabled ✅' if val else 'disabled ❌'}.",
+                reply_to_id=msg_id)
+        elif feature in ("master", "bot"):
+            GAME_ENABLED = val
+            snapshot_group_config(GAME_GROUP_ID)
+            send_message(DEV_GROUP_ID, f"Bot (master) {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
+        elif feature == "ai":
+            AI_ENABLED = val
+            snapshot_group_config(GAME_GROUP_ID)
+            send_message(DEV_GROUP_ID, f"AI Chat {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
+        elif feature == "8ball":
+            EIGHTBALL_ENABLED = val
+            snapshot_group_config(GAME_GROUP_ID)
+            send_message(DEV_GROUP_ID, f"Magic 8-Ball {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
+        elif feature == "scripture":
+            SCRIPTURE_ENABLED = val
+            snapshot_group_config(GAME_GROUP_ID)
+            send_message(DEV_GROUP_ID, f"Scripture {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
+        elif feature == "connect4":
+            CONNECT4_ENABLED = val
+            snapshot_group_config(GAME_GROUP_ID)
+            send_message(DEV_GROUP_ID, f"Connect Four {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
         else:
-            send_message(DEV_GROUP_ID, "Usage: !state true/false", reply_to_id=msg_id)
-            return
-
-        send_message(DEV_GROUP_ID, f"Game responding state set to {GAME_ENABLED}", reply_to_id=msg_id)
+            send_message(DEV_GROUP_ID,
+                f"Unknown feature '{feature}'.\nKnown: all, master, ai, 8ball, scripture, connect4",
+                reply_to_id=msg_id)
         return
 
-    # !aiswitch
+    # =========================================================================
+    # !timeout <seconds>
+    # =========================================================================
+    if cmd == "!timeout":
+        if len(parts) < 2:
+            send_message(DEV_GROUP_ID, f"Current game timeout: {GAME_TIMEOUT_SECONDS}s", reply_to_id=msg_id)
+            return
+        try:
+            val = int(parts[1])
+            if val <= 0:
+                raise ValueError
+        except ValueError:
+            send_message(DEV_GROUP_ID, "Usage: !timeout <positive integer seconds>", reply_to_id=msg_id)
+            return
+        GAME_TIMEOUT_SECONDS = val
+        game_state["timeout_seconds"] = val
+        snapshot_group_config(GAME_GROUP_ID)
+        send_message(DEV_GROUP_ID, f"Game timeout set to {val}s.", reply_to_id=msg_id)
+        return
+
+    # =========================================================================
+    # !aiswitch <true/false>  (kept as alias for !state ai)
+    # =========================================================================
     if cmd == "!aiswitch":
         if len(parts) < 2:
-            send_message(DEV_GROUP_ID, f"AI is currently: {AI_ENABLED}", reply_to_id=msg_id)
+            on = "✅" if AI_ENABLED else "❌"
+            send_message(DEV_GROUP_ID, f"AI Chat is currently: {on}", reply_to_id=msg_id)
             return
-
-        val = parts[1].lower()
-        if val in ("true", "on", "1", "yes"):
-            AI_ENABLED = True
-        elif val in ("false", "off", "0", "no"):
-            AI_ENABLED = False
-        else:
+        val = _bool_val(parts[1].lower())
+        if val is None:
             send_message(DEV_GROUP_ID, "Usage: !aiswitch true/false", reply_to_id=msg_id)
             return
-
-        send_message(DEV_GROUP_ID, f"AI responding set to {AI_ENABLED}", reply_to_id=msg_id)
+        AI_ENABLED = val
+        snapshot_group_config(GAME_GROUP_ID)
+        send_message(DEV_GROUP_ID, f"AI Chat {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
         return
 
-    # Unknown dev command
-    send_message(DEV_GROUP_ID, f"Unknown command: {cmd}", reply_to_id=msg_id)
+    # =========================================================================
+    # !aipersonality <text>  — rebuild the AI model with a new personality
+    # =========================================================================
+    if cmd == "!aipersonality":
+        if len(parts) < 2:
+            send_message(DEV_GROUP_ID, "Usage: !aipersonality <personality text>", reply_to_id=msg_id)
+            return
+        personality_text = text[len("!aipersonality"):].strip()
+        send_message(DEV_GROUP_ID, "Updating AI personality — this may take a moment...", reply_to_id=msg_id)
+
+        def do_update():
+            update_personality(personality_text)
+            send_message(DEV_GROUP_ID, "AI personality updated and model rebuilt. Memory cleared.", reply_to_id=msg_id)
+
+        threading.Thread(target=do_update, daemon=True).start()
+        return
+
+    # =========================================================================
+    # !aiforget  — clear the shared group AI memory
+    # =========================================================================
+    if cmd == "!aiforget":
+        _ai_memory.clear()
+        send_message(DEV_GROUP_ID, "🧹 Shared AI conversation memory cleared.", reply_to_id=msg_id)
+        return
+
+    # =========================================================================
+    # !aicooldown <seconds>
+    # !aisetcooldown <seconds>
+    # !aimemory <turns>
+    # =========================================================================
+    if cmd == "!aicooldown":
+        if len(parts) < 2:
+            send_message(DEV_GROUP_ID, f"Current !ai cooldown: {AI_COOLDOWN_SECONDS}s", reply_to_id=msg_id)
+            return
+        try:
+            val = int(parts[1])
+            if val < 0: raise ValueError
+        except ValueError:
+            send_message(DEV_GROUP_ID, "Usage: !aicooldown <seconds>", reply_to_id=msg_id)
+            return
+        AI_COOLDOWN_SECONDS = val
+        cfg = load_config(); cfg["ai_cooldown_seconds"] = val; save_config(cfg)
+        send_message(DEV_GROUP_ID, f"!ai cooldown set to {val}s.", reply_to_id=msg_id)
+        return
+
+    if cmd == "!aisetcooldown":
+        if len(parts) < 2:
+            send_message(DEV_GROUP_ID, f"Current !aiset cooldown: {AISET_COOLDOWN_SECONDS}s", reply_to_id=msg_id)
+            return
+        try:
+            val = int(parts[1])
+            if val < 0: raise ValueError
+        except ValueError:
+            send_message(DEV_GROUP_ID, "Usage: !aisetcooldown <seconds>", reply_to_id=msg_id)
+            return
+        AISET_COOLDOWN_SECONDS = val
+        cfg = load_config(); cfg["aiset_cooldown_seconds"] = val; save_config(cfg)
+        send_message(DEV_GROUP_ID, f"!aiset cooldown set to {val}s.", reply_to_id=msg_id)
+        return
+
+    if cmd == "!aimemory":
+        if len(parts) < 2:
+            send_message(DEV_GROUP_ID, f"Current memory turns: {AI_MEMORY_MAX_TURNS}", reply_to_id=msg_id)
+            return
+        try:
+            val = int(parts[1])
+            if val < 1: raise ValueError
+        except ValueError:
+            send_message(DEV_GROUP_ID, "Usage: !aimemory <turns> (min 1)", reply_to_id=msg_id)
+            return
+        AI_MEMORY_MAX_TURNS = val
+        cfg = load_config(); cfg["ai_memory_max_turns"] = val; save_config(cfg)
+        send_message(DEV_GROUP_ID, f"AI memory set to {val} turns.", reply_to_id=msg_id)
+        return
+
+    # =========================================================================
+    # !pointsset <key> <value>  — tune points constants, mirrors Settings tab
+    # =========================================================================
+    if cmd == "!pointsset":
+        if len(parts) < 3:
+            send_message(DEV_GROUP_ID,
+                "Usage: !pointsset <key> <value>\n"
+                "Keys: fih_min fih_max fih_cd fih_lose steal_min steal_max steal_cd c4_win c4_win_ai lb_size",
+                reply_to_id=msg_id)
+            return
+
+        key = parts[1].lower()
+        raw = parts[2]
+
+        int_keys   = {"fih_min","fih_max","fih_cd","steal_min","steal_max","steal_cd","c4_win","c4_win_ai","lb_size"}
+        float_keys = {"fih_lose"}
+
+        if key not in int_keys and key not in float_keys:
+            send_message(DEV_GROUP_ID,
+                f"Unknown key '{key}'.\n"
+                "Keys: fih_min fih_max fih_cd fih_lose steal_min steal_max steal_cd c4_win c4_win_ai lb_size",
+                reply_to_id=msg_id)
+            return
+
+        try:
+            val = float(raw) if key in float_keys else int(raw)
+            if val < 0: raise ValueError
+        except ValueError:
+            send_message(DEV_GROUP_ID,
+                f"Invalid value '{raw}'. fih_lose must be 0.0–1.0; others must be whole numbers ≥ 0.",
+                reply_to_id=msg_id)
+            return
+
+        # Apply to global and persist
+        cfg = load_config()
+        cfg[key] = val
+
+        if key == "fih_min":          POINTS_FIH_MIN         = int(val)
+        elif key == "fih_max":        POINTS_FIH_MAX         = int(val)
+        elif key == "fih_cd":         POINTS_FIH_CD          = int(val)
+        elif key == "fih_lose":       POINTS_FIH_LOSE_CHANCE = float(val)
+        elif key == "steal_min":      POINTS_STEAL_MIN       = int(val)
+        elif key == "steal_max":      POINTS_STEAL_MAX       = int(val)
+        elif key == "steal_cd":       POINTS_STEAL_CD        = int(val)
+        elif key == "c4_win":         POINTS_C4_WIN          = int(val)
+        elif key == "c4_win_ai":      POINTS_C4_WIN_AI       = int(val)
+        elif key == "lb_size":        LEADERBOARD_SIZE       = int(val)
+
+        save_config(cfg)
+        send_message(DEV_GROUP_ID, f"Points setting '{key}' set to {val}.", reply_to_id=msg_id)
+        return
+
+    # =========================================================================
+    # !leaderboard  — view points leaderboard from the dev group
+    # =========================================================================
+    if cmd == "!leaderboard":
+        if not GAME_GROUP_ID:
+            send_message(DEV_GROUP_ID, "No game group set. Use !add to set one.", reply_to_id=msg_id)
+            return
+        board_entries = points_leaderboard(GAME_GROUP_ID)
+        if not board_entries:
+            send_message(DEV_GROUP_ID, "No points earned yet in the game group.", reply_to_id=msg_id)
+            return
+        medals = ["🥇","🥈","🥉"] + ["   "] * 7
+        lines = ["🏆 Points Leaderboard:"]
+        for i, entry in enumerate(board_entries):
+            lines.append(f"{medals[i]} {entry['name']}: {entry['points']} pts")
+        send_message(DEV_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
+        return
+
+    # =========================================================================
+    # Unknown command
+    # =========================================================================
+    send_message(DEV_GROUP_ID,
+        f"Unknown command: {cmd}\nType !help for a list of commands.",
+        reply_to_id=msg_id)
 
 # ---------------------------------------------------------
 # Game group command handling
@@ -2910,15 +3215,6 @@ def handle_game_command(message):
                 reply_to_id=msg_id,
             )
             return
-
-        # --- Python-side URL scrubber (strip any URLs the model might sneak in) ---
-        import re as _re
-        ai_response = _re.sub(
-            r'https?://\S+|www\.\S+|\b\S+\.(com|org|net|io|gov|edu|co|uk|info|ai)\S*',
-            '[link removed]',
-            ai_response,
-            flags=_re.IGNORECASE,
-        )
 
         send_message_as_bot(GAME_GROUP_ID, ai_response, reply_to_id=msg_id)
         return
@@ -3130,93 +3426,6 @@ def handle_game_command(message):
                 reply_to_id=msg_id)
         return
 
-    # !give @mentioned_user amount  — give points to another user
-    if cmd == "!give":
-        if len(parts) < 3:
-            send_message(GAME_GROUP_ID,
-                "Usage: !give @username <points>\nExample: !give @PlayerName 50",
-                reply_to_id=msg_id)
-            return
-
-        # Parse amount (last token)
-        raw_amt = parts[-1]
-        if "." in raw_amt:
-            send_message(GAME_GROUP_ID, "❌ Amount must be a whole number, no decimals.", reply_to_id=msg_id)
-            return
-        try:
-            give_amt = int(raw_amt)
-            if give_amt <= 0:
-                raise ValueError
-        except ValueError:
-            send_message(GAME_GROUP_ID, "Amount must be a positive whole number.", reply_to_id=msg_id)
-            return
-
-        # Resolve target — try attachment mentions first, then name matching
-        mention_text = " ".join(parts[1:-1]).lstrip("@").strip().lower()
-        target_id = None
-        target_name = None
-
-        # Try GroupMe attachment mentions
-        for att in message.get("attachments", []):
-            if att.get("type") == "mentions":
-                for uid in att.get("user_ids", []):
-                    if str(uid) != str(sender_id):
-                        target_id = uid
-                        target_name = _known_names.get(str(uid))
-                        break
-            if target_id:
-                break
-
-        # Fall back to name matching in the known names registry
-        if target_id is None:
-            for uid, name_val in _known_names.items():
-                if uid == str(sender_id):
-                    continue
-                if name_val.lower() == mention_text or mention_text in name_val.lower():
-                    target_id = uid
-                    target_name = name_val
-                    break
-
-        if target_id is None or str(target_id) == str(sender_id):
-            send_message(GAME_GROUP_ID,
-                "❌ Couldn't find that user. Make sure you @mention them or spell their name correctly.",
-                reply_to_id=msg_id)
-            return
-
-        if target_name is None:
-            target_name = str(target_id)
-
-        # Check sender balance
-        sender_bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
-        if sender_bal == 0:
-            send_message(GAME_GROUP_ID,
-                f"💸 {sender_name}, you have 0 points — nothing to give!",
-                reply_to_id=msg_id)
-            return
-
-        # Cap at available balance (all-in)
-        allin = False
-        if give_amt >= sender_bal:
-            give_amt = sender_bal
-            allin = True
-
-        # Transfer
-        taken, s_new, t_new = transfer_points(
-            GAME_GROUP_ID, sender_id, sender_name, target_id, target_name, give_amt
-        )
-
-        if taken == 0:
-            send_message(GAME_GROUP_ID,
-                f"💸 {sender_name}, you don't have enough points to give.",
-                reply_to_id=msg_id)
-            return
-
-        send_message(GAME_GROUP_ID,
-            f"{'🎰 ALL IN! ' if allin else '🎁 '}{sender_name} gave {taken} pts to {target_name}! "
-            f"({sender_name}: {s_new} pts | {target_name}: {t_new} pts)",
-            reply_to_id=msg_id)
-        return
-
     # Catch common typo: player types =A through =G instead of #A through #G during a game
     if game_state["active"] and len(game_state["players"]) >= 2 and len(text) >= 2 and text[0] == "=":
         possible_col = text[1:].strip()
@@ -3359,8 +3568,6 @@ def handle_game_command(message):
                     "• !points — Check your point balance\n"
                     "• !fih — Fish for points — win or lose! (5 min cooldown)\n"
                     "• !steal — Steal points from a random person (5 min cooldown)\n"
-                    "• !give @username <amount> — Give points to another player\n"
-                    "  Example: !give @PlayerName 50\n"
                     "• !coin <h/t> <bet> — Flip a coin to gamble points\n"
                     "  Example: !coin h 50\n"
                     "  Betting your full balance or more = All In!\n"
@@ -3392,13 +3599,10 @@ def handle_game_command(message):
                     "• Betting your full balance = All In!\n"
                     "• If game ends early, all bets are fully refunded\n"
                     "\n"
-                    "👥 *Spectator Betting (pool/pari-mutuel):*\n"
+                    "👥 *Spectator Betting:*\n"
                     "• #bet <amount> @player — Bet on a player\n"
-                    "• All bets form a shared pool\n"
-                    "• Winners share the ENTIRE pool proportionally to their stake\n"
-                    "  (bigger bet = bigger share of the losers' money)\n"
-                    "• Lose: forfeit your bet to the winners\n"
-                    "• If no one bet against you, you get refunded\n"
+                    "• Win: receive double your bet\n"
+                    "• Lose: lose your bet\n"
                     "• #quit to cancel your spectator bet and get it back\n"
                     "• #stats — Show current game bets and info"
                 )
@@ -3823,16 +4027,11 @@ def handle_game_command(message):
             return
 
         if feature == "all":
-            GAME_ENABLED      = val
-            AI_ENABLED        = val
-            EIGHTBALL_ENABLED = val
-            SCRIPTURE_ENABLED = val
-            CONNECT4_ENABLED  = val
-            snapshot_group_config(GAME_GROUP_ID)
+            GAME_ENABLED = val
             if not val:
-                send_message(GAME_GROUP_ID, "🔴 All features disabled. Only #state commands will work.", reply_to_id=msg_id)
+                send_message(GAME_GROUP_ID, "🔴 Bot disabled. Only #state commands will work.", reply_to_id=msg_id)
             else:
-                send_message(GAME_GROUP_ID, "🟢 All features enabled.", reply_to_id=msg_id)
+                send_message(GAME_GROUP_ID, "🟢 Bot enabled.", reply_to_id=msg_id)
 
         elif feature == "ai":
             AI_ENABLED = val
@@ -5429,14 +5628,6 @@ class ControlPanel:
         val = var.get()
         if key == "master":
             GAME_ENABLED = val
-            # When toggling the master switch from the UI, also set all sub-features
-            AI_ENABLED        = val
-            EIGHTBALL_ENABLED = val
-            SCRIPTURE_ENABLED = val
-            CONNECT4_ENABLED  = val
-            # Update all checkbox vars to reflect the new unified state
-            for k, v in self._feature_vars.items():
-                v.set(val)
         elif key == "ai":
             AI_ENABLED = val
         elif key == "8ball":
@@ -5446,25 +5637,7 @@ class ControlPanel:
         elif key == "connect4":
             CONNECT4_ENABLED = val
 
-        snapshot_group_config(GAME_GROUP_ID)
-
-        label_map = {
-            "master":    "All features (master)",
-            "ai":        "AI Chat",
-            "8ball":     "Magic 8-Ball",
-            "scripture": "Scripture",
-            "connect4":  "Connect Four",
-        }
-        feature_label = label_map.get(key, key)
-        state_word = "enabled ✅" if val else "disabled ❌"
-        status_msg = f"[Control Panel] {feature_label} {state_word}."
         self._set_status(f"{'Enabled' if val else 'Disabled'}: {key}")
-
-        # Send chat notification if game group is set
-        if GAME_GROUP_ID:
-            def do_send():
-                send_message(GAME_GROUP_ID, status_msg)
-            threading.Thread(target=do_send, daemon=True).start()
 
     # ── Group tab callbacks ───────────────────────────────────────────────────
 

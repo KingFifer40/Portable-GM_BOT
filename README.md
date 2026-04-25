@@ -6,11 +6,13 @@ A GroupMe bot that lets your group play **Connect Four**, look up **scriptures**
 
 ## Features
 
-- 🎮 **Connect Four** — two-player PvP or vs AI (minimax engine, depth 8, three difficulty levels)
-- 💰 **Points system** — earn points by fishing (`!fih`), stealing (`!steal`), and coin flipping (`!coin`); wager them on Connect Four games
+- 🎮 **Connect Four** — two-player PvP or vs AI (minimax engine, easy/medium/hard with depths 2/5/8)
+- 💰 **Points system** — earn points by fishing (`!fih`), stealing (`!steal`), and coin flipping (`!coin`); give points to others (`!give`); wager them on Connect Four games
 - 🤖 **AI Chat** — powered by a local Ollama model with a shared group memory (last 10 exchanges)
+- 🌐 **Web search** — the AI automatically searches the web via DuckDuckGo when asked about current events, recent news, live scores, or anything beyond its training data
 - 🎱 **Magic 8-Ball** — `?` + any question
 - 📖 **Scripture lookup** — Bible (KJV) and Book of Mormon verse search (files included)
+- 🖼️ **Profile picture swap** — the bot brightens its GroupMe avatar and stamps "BOT" on it while the game is active, then reverts it automatically
 - 🔒 **Safe by default** — hardened AI safety rules, English-only responses, spam cooldowns
 - 🛠️ **Admin controls** — enable/disable individual features from inside the group
 - 🖥️ **Control panel** — desktop GUI for managing groups, AI settings, points tuning, and auto-updates
@@ -26,7 +28,7 @@ A GroupMe bot that lets your group play **Connect Four**, look up **scriptures**
 | Ollama | [ollama.com](https://ollama.com) — install it, the bot handles the rest |
 | GroupMe account + access token | Free — see setup below |
 
-The only Python dependency (`requests`) is installed automatically on first run.
+The Python dependencies (`requests`, `ddgs`, `Pillow`) are installed automatically on first run.
 
 ---
 
@@ -140,13 +142,13 @@ Both players must bet (or skip) before moves are accepted. Wagered points are he
 
 #### Spectator Betting
 
-Anyone who is not a player can bet on who they think will win:
+Anyone who is not a player can bet on who they think will win using a **pari-mutuel (pool) system**:
 
 | Command | Description |
 |---|---|
 | `#bet <amount> @player` | Bet on a player to win |
 
-Winners receive **double their bet**. Losers forfeit their stake. Use `#quit` to cancel an active spectator bet and get it back.
+All bets form a single shared pool. Winners receive their stake back **plus a proportional share of the losers' pot** — a bigger bet earns a bigger share. Losers forfeit their stake. If nobody bet on the losing side, winners are simply refunded (no profit with no opposition). Use `#quit` to cancel an active spectator bet and get it back.
 
 #### Points & Gambling
 
@@ -155,7 +157,8 @@ Winners receive **double their bet**. Losers forfeit their stake. Use `#quit` to
 | `!points` | Check your point balance |
 | `!fih` | Fish for points — win or lose! (5 min cooldown) |
 | `!steal` | Steal points from a random person (5 min cooldown) |
-| `!coin <h/t> <amount>` | Flip a coin to double or lose your bet |
+| `!coin <h/t> <amount>` | Flip a coin to double or lose your bet (1 min cooldown) |
+| `!give @username <amount>` | Give points to another player |
 | `#leaderboard` | Show the top points rankings |
 
 #### AI Chat
@@ -165,6 +168,8 @@ Winners receive **double their bet**. Losers forfeit their stake. Use `#quit` to
 | `!ai <message>` | Chat with the AI (15 s cooldown) |
 | `!aiset <text>` | Set the AI personality (60 s cooldown; clears memory) |
 | `!aiforget` | Clear the group's shared AI conversation history (admins only) |
+
+The AI can **search the web automatically** — just ask it about current events, recent news, live scores, or anything that may have changed since its training cutoff and it will run a DuckDuckGo search before responding. It can also look up scriptures using the same tool the `#findverse` command uses.
 
 #### Scripture
 
@@ -225,6 +230,7 @@ Winners receive **double their bet**. Losers forfeit their stake. Use `#quit` to
 |---|---|
 | `!fih` (lucky cast) | +5 to +40 pts (random) |
 | `!fih` (unlucky) | −5 to −40 pts (25% chance) |
+| `!fih` (Golden Fih! — 1-in-1000 jackpot) | +2000 pts |
 | `!steal` | Steal 5–30 pts from a random user |
 | `!coin` win | +bet amount |
 | `!coin` loss | −bet amount |
@@ -233,7 +239,7 @@ Winners receive **double their bet**. Losers forfeit their stake. Use `#quit` to
 | Beat Hard AI | +200 pts |
 | Win PvP game (with bets) | +loser's wagered points |
 
-Losing to the AI costs no points. PvP games without bets award no points either.
+Losing to the AI costs no points. PvP games without bets award no points either. Betting your full balance on `!coin` or `#pvpbet` counts as **All In**.
 
 ### PvP betting in detail
 
@@ -243,9 +249,43 @@ Losing to the AI costs no points. PvP games without bets award no points either.
 4. When a player wins: they receive **the full pot** (their own stake back + the loser's stake)
 5. If the game is abandoned with `#quit` or times out: both bets are fully refunded
 
+### Spectator betting in detail
+
+Spectator bets use a **pari-mutuel (pool) system** — the same model used in real-life horse racing:
+
+1. All spectator bets go into a single shared pool
+2. Those who bet on the **winner** share the entire pool proportionally to their stake — a bigger bet earns a bigger cut of the losers' money
+3. Those who bet on the **loser** forfeit their stake
+4. If nobody bet on the losing side, winners are simply refunded their stake (no profit when there's no opposition)
+
 ---
 
-## AI Personality
+## AI Chat Details
+
+### Web search
+
+The AI is connected to DuckDuckGo search and will automatically search the web when you ask about:
+- Current events or breaking news
+- Scores, prices, or any rapidly-changing information
+- Anything that may have changed since the AI's training cutoff (early 2023 for most models)
+
+Examples:
+```
+!ai What's the latest SpaceX launch?
+!ai Who won the game last night?
+!ai What movies are out this week?
+```
+
+### Scripture tool
+
+The AI can also search the scripture files directly:
+```
+!ai Find me a verse about faith
+!ai What does John 3:16 say?
+!ai Look up Alma 32:21
+```
+
+### AI Personality
 
 Anyone can set the AI's personality with `!aiset`:
 
@@ -264,6 +304,17 @@ The AI has hardened safety rules that **cannot be overridden** by any personalit
 Setting a new personality wipes all conversation history so no old context carries over.
 
 The AI uses a **single shared group memory** — all `!ai` messages are in one conversation, so the AI sees the full group's context rather than isolated per-user threads.
+
+---
+
+## Profile Picture Swap
+
+When the bot sends an AI response, it automatically:
+1. Uploads a brightened version of your GroupMe avatar with a **"BOT"** banner stamped across it
+2. Switches its GroupMe profile picture to that image before sending the message
+3. Reverts to your original avatar immediately after
+
+The two avatar files (`pfp_original.jpg` and `pfp_bot.jpg`) are saved in the `AI-BOT/` folder on first run. This feature is skipped gracefully if the avatar can't be downloaded.
 
 ---
 
@@ -306,6 +357,9 @@ POINTS_STEAL_MIN       = 5     # minimum stolen
 POINTS_STEAL_MAX       = 30    # maximum stolen
 POINTS_STEAL_CD        = 300   # cooldown in seconds
 
+# Coin flip (!coin)
+POINTS_COIN_CD         = 60    # cooldown in seconds (1 min)
+
 # Connect Four rewards
 POINTS_C4_WIN_AI_EASY  = 50    # beat Easy AI
 POINTS_C4_WIN_AI_MED   = 125   # beat Medium AI
@@ -336,6 +390,8 @@ OLLAMA_BASE_MODEL
 |---|---|
 | `config.json` | Saved credentials, group IDs, model choice, and all tuning values |
 | `AI-BOT/Modelfile` | Auto-generated Ollama Modelfile (safe to delete to reset) |
+| `AI-BOT/pfp_original.jpg` | Your original GroupMe avatar (downloaded on first run) |
+| `AI-BOT/pfp_bot.jpg` | Brightened "BOT" avatar used while the bot is active |
 | `AI-BOT/resources/` | Scripture text files — included in the repo |
 | `groups/<id>.json` | Per-group feature toggle state |
 | `groups/<id>/users/<uid>.json` | Per-user points records |

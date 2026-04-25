@@ -3012,6 +3012,18 @@ def handle_game_command(message):
             send_message(GAME_GROUP_ID, f"🎣 {msg}", reply_to_id=msg_id)
             return
         set_ai_cooldown(sender_id, _fih_last_used)
+        # 1-in-1000 chance of a GOLDEN FIH!
+        if random.randint(1, 1000) == 1:
+            golden_pts = 2000
+            new_bal = add_points(GAME_GROUP_ID, sender_id, sender_name, golden_pts)
+            send_message(
+                GAME_GROUP_ID,
+                f"✨🐟✨ GOLDEN FIH!! ✨🐟✨\n"
+                f"{sender_name} reeled in the legendary GOLDEN FIH and earned {golden_pts} points! "
+                f"({new_bal} pts)",
+                reply_to_id=msg_id,
+            )
+            return
         amt  = random.randint(POINTS_FIH_MIN, POINTS_FIH_MAX)
         lose = random.random() < POINTS_FIH_LOSE_CHANCE
         cur_bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
@@ -4526,7 +4538,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "3aea4ef"
+BOT_COMMIT_SHA = "f5016a6"
 
 _control_panel_instance = None  # set when panel launches
 

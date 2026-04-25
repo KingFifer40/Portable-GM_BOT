@@ -1037,6 +1037,7 @@ POINTS_FIH_LOSE_CHANCE = 0.25   # probability of losing points instead of gainin
 POINTS_STEAL_MIN       = 5      # minimum points stolen by !steal
 POINTS_STEAL_MAX       = 30     # maximum points stolen by !steal
 POINTS_STEAL_CD        = 300    # !steal cooldown in seconds
+POINTS_COIN_CD         = 60     # !coin cooldown in seconds (1 min)
 POINTS_C4_WIN          = 50     # base points won in PvP (from pvp_bets pool)
 POINTS_C4_WIN_AI_EASY  = 50     # points gained for beating Easy AI
 POINTS_C4_WIN_AI_MED   = 125    # points gained for beating Medium AI
@@ -1045,6 +1046,7 @@ POINTS_C4_WIN_AI       = 125    # fallback (medium) — kept for config compat
 
 _fih_last_used   = {}    # {user_id: timestamp}
 _steal_last_used = {}    # {user_id: timestamp}
+_coin_last_used  = {}    # {user_id: timestamp}
 
 # Customisable response message pools (edit live in the Settings tab)
 FIH_WIN_MESSAGES = [
@@ -3085,6 +3087,12 @@ def handle_game_command(message):
 
     # !coin <h/t> <bet>  — coin flip gamble
     if cmd == "!coin":
+        allowed, remaining = check_ai_cooldown(sender_id, _coin_last_used, POINTS_COIN_CD)
+        if not allowed:
+            m, s = divmod(remaining, 60)
+            cd_msg = f"You're flipping too fast! Try again in {int(m)}m {int(s)}s." if m else f"You're flipping too fast! Try again in {int(s)}s."
+            send_message(GAME_GROUP_ID, f"🪙 {cd_msg}", reply_to_id=msg_id)
+            return
         if len(parts) < 3:
             send_message(GAME_GROUP_ID,
                 "Usage: !coin <h/t> <points>\nExample: !coin h 50",
@@ -3120,6 +3128,7 @@ def handle_game_command(message):
             bet = bal
             allin = True
 
+        set_ai_cooldown(sender_id, _coin_last_used)
         chosen_heads = side_arg in ("h", "heads")
         send_message(GAME_GROUP_ID,
             f"{'🎰 ALL IN! ' if allin else '🪙 '}{sender_name} bets {bet} pts on {'Heads' if chosen_heads else 'Tails'}... Flipping!",

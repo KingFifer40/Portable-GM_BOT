@@ -1615,6 +1615,53 @@ def safe_name(name: str) -> str:
 
     return cleaned if cleaned else "Unknown"
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Quote normalization helper
+# Converts ALL common "smart" / curly / Unicode quotation mark variants to a
+# plain ASCII double-quote (") so that every command which parses quoted
+# arguments works regardless of what keyboard or autocorrect the user has.
+#
+# Covers:
+#   " "  — Unicode LEFT / RIGHT double quotation marks  (U+201C / U+201D)
+#   „    — German-style low-9 quotation mark            (U+201E)
+#   ‟    — Double high-reversed-9 quotation mark        (U+201F)
+#   « »  — French guillemets (double angle)             (U+00AB / U+00BB)
+#   ‹ ›  — Single angle quotes (treated as single-quote proxy, also mapped)
+#   ' '  — Unicode LEFT / RIGHT single quotation marks  (U+2018 / U+2019)
+#   ‚ ‛  — Single low-9 / high-reversed-9 marks        (U+201A / U+201B)
+#   `    — Backtick (often mistyped as a quote)
+# ─────────────────────────────────────────────────────────────────────────────
+def normalize_quotes(text: str) -> str:
+    """Return *text* with all curly/smart/fancy quote characters replaced by
+    plain ASCII double-quotes (") so that downstream regex and split logic
+    works correctly regardless of the user's keyboard or autocorrect."""
+    # All variants that should become a plain double-quote:
+    DOUBLE_QUOTE_CHARS = (
+        "\u201C",  # LEFT DOUBLE QUOTATION MARK  "
+        "\u201D",  # RIGHT DOUBLE QUOTATION MARK "
+        "\u201E",  # DOUBLE LOW-9 QUOTATION MARK „
+        "\u201F",  # DOUBLE HIGH-REVERSED-9 QUOTATION MARK ‟
+        "\u00AB",  # LEFT-POINTING DOUBLE ANGLE QUOTATION MARK «
+        "\u00BB",  # RIGHT-POINTING DOUBLE ANGLE QUOTATION MARK »
+        "\u2039",  # SINGLE LEFT-POINTING ANGLE QUOTATION MARK ‹ (treat as ")
+        "\u203A",  # SINGLE RIGHT-POINTING ANGLE QUOTATION MARK › (treat as ")
+    )
+    # Single-quote variants → plain single-quote (avoids breaking split logic)
+    SINGLE_QUOTE_CHARS = (
+        "\u2018",  # LEFT SINGLE QUOTATION MARK  '
+        "\u2019",  # RIGHT SINGLE QUOTATION MARK '
+        "\u201A",  # SINGLE LOW-9 QUOTATION MARK ‚
+        "\u201B",  # SINGLE HIGH-REVERSED-9 QUOTATION MARK ‛
+        "\u0060",  # GRAVE ACCENT (backtick) `
+    )
+    for ch in DOUBLE_QUOTE_CHARS:
+        text = text.replace(ch, '"')
+    for ch in SINGLE_QUOTE_CHARS:
+        text = text.replace(ch, "'")
+    return text
+
+
 def gm_get(path, params=None):
     if params is None:
         params = {}
@@ -3924,7 +3971,7 @@ def handle_game_command(message):
     # ── CREATIONS: !create "<name>" <worth>  (any order) ─────────────────────
     if cmd == "!create":
         import re as _re2
-        arg_text = text[len("!create"):].strip()
+        arg_text = normalize_quotes(text[len("!create"):].strip())
         quote_match = _re2.search(r'"([^"]+)"', arg_text)
         if not quote_match:
             send_message(
@@ -4641,6 +4688,10 @@ def handle_game_command(message):
         if not SCRIPTURE_ENABLED:
             send_message(GAME_GROUP_ID, "📖 Scripture commands are currently disabled.", reply_to_id=msg_id)
             return
+
+        # Normalize fancy/smart quotes so all quote styles work
+        text = normalize_quotes(text)
+        parts = text.split()
 
         # Determine if this is keyword/phrase search (quotes) or direct lookup
         is_keyword = "\"" in text
@@ -5664,7 +5715,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "3e64a34"
+BOT_COMMIT_SHA = "65e9d7c"
 
 _control_panel_instance = None  # set when panel launches
 
@@ -5755,14 +5806,20 @@ class ControlPanel:
         self.root = root
         root.title(f"AI-FSY Control Panel  [{BOT_COMMIT_SHA}]")
         root.resizable(True, True)
-        root.minsize(520, 480)
+        root.minsize(480, 360)
 
-        # Clamp the initial height to 85 % of the screen so the window is
-        # never taller than the display, regardless of content or DPI.
+        # Clamp the initial size to a safe fraction of the screen so the window
+        # never exceeds the available display area on any system or DPI scale.
+        # We call update_idletasks() first so winfo_screen* returns real values.
         root.update_idletasks()
+        screen_w = root.winfo_screenwidth()
         screen_h = root.winfo_screenheight()
-        win_h    = min(700, int(screen_h * 0.85))
-        root.geometry(f"560x{win_h}")
+        win_w = min(560, int(screen_w * 0.75))
+        win_h = min(580, int(screen_h * 0.80))
+        # Center the window on screen
+        x_off = max(0, (screen_w - win_w) // 2)
+        y_off = max(0, (screen_h - win_h) // 2)
+        root.geometry(f"{win_w}x{win_h}+{x_off}+{y_off}")
 
         self._build_ui()
         self._schedule_refresh()

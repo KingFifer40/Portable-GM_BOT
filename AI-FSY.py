@@ -120,7 +120,6 @@ _acquire_instance_lock()
 # Standard library + now-guaranteed third-party imports
 sys.stdout.reconfigure(encoding='utf-8')
 import time
-import queue
 import threading
 import traceback
 import requests
@@ -1667,47 +1666,6 @@ def gm_post(path, data=None):
 
 
 # ---------------------------------------------------------
-# Rate-limited outbox
-# GroupMe enforces ~1 POST /messages per second per token.
-# All sends go through _MSG_QUEUE so a single background thread
-# can pace them — no more 429s, no dropped messages.
-# ---------------------------------------------------------
-import queue as _queue_mod
-
-_MSG_QUEUE: _queue_mod.Queue = _queue_mod.Queue()
-_MIN_SEND_INTERVAL = 1.1   # seconds between sends (comfortably under 1/s limit)
-
-
-def _message_sender_loop():
-    """Drain _MSG_QUEUE one message at a time, enforcing the rate limit."""
-    _last_sent = [0.0]
-    while True:
-        item = _MSG_QUEUE.get()          # block until something arrives
-        elapsed = time.time() - _last_sent[0]
-        if elapsed < _MIN_SEND_INTERVAL:
-            time.sleep(_MIN_SEND_INTERVAL - elapsed)
-        for attempt in range(5):
-            try:
-                gm_post(f"/groups/{item['group_id']}/messages", item['data'])
-                _last_sent[0] = time.time()
-                break
-            except Exception as exc:
-                status = getattr(getattr(exc, 'response', None), 'status_code', None)
-                if status == 429:
-                    wait = 2 ** (attempt + 1)
-                    print(f"[sender] 429 rate-limit — backing off {wait}s (attempt {attempt + 1}/5)")
-                    time.sleep(wait)
-                    _last_sent[0] = time.time()
-                elif attempt < 4:
-                    print(f"[sender] send error attempt {attempt + 1}/5: {exc}")
-                    time.sleep(1.0)
-                else:
-                    print("[sender] gave up after 5 attempts:")
-                    traceback.print_exc()
-        _MSG_QUEUE.task_done()
-
-
-# ---------------------------------------------------------
 # Profile-picture swap helpers
 # ---------------------------------------------------------
 # Paths where the two avatar images are cached next to the script.
@@ -1907,38 +1865,13 @@ def send_message_as_bot(group_id: str, text: str, reply_to_id=None):
         _set_my_avatar(orig_url)
 
 
-
-def _sanitize_outgoing(text):
-    """Remove control chars, directional/bidi formatting from outgoing text."""
-    bad = (
-        list(range(0x00, 0x09)) +        # C0 controls (keep \\t=0x09)
-        list(range(0x0B, 0x0A + 1)) +    # 0x0B-0x0B (VT), skip \\n=0x0A
-        [0x0B, 0x0C] +                   # VT, FF
-        list(range(0x0E, 0x20)) +         # SO..US
-        list(range(0x7F, 0xA0)) +         # DEL + C1 controls
-        [0x00AD] +                        # soft hyphen
-        list(range(0x200B, 0x200A + 1)) + # zero-width space..right-to-left mark
-        [0x200B, 0x200C, 0x200D,
-         0x200E, 0x200F] +               # ZW-space, ZW-non-joiner, ZW-joiner, LRM, RLM
-        list(range(0x202A, 0x2030)) +    # directional formatting chars
-        [0x2060, 0x2061, 0x2062,
-         0x2063, 0x2064] +              # word joiner, invisible operators
-        list(range(0x2066, 0x2070)) +   # bidirectional isolate chars
-        [0xFEFF] +                      # BOM / zero-width no-break space
-        [0xFFFC] +                      # object replacement char
-        list(range(0xFFF9, 0xFFFF + 1)) # interlinear annotation + specials
-    )
-    table = str.maketrans({chr(c): "" for c in bad if 0 <= c <= 0x10FFFF})
-    return text.translate(table)
-
 def send_message(group_id, text, reply_to_id=None):
-    # Sanitise text (strip control/directional chars), then add bot signature
-    text = _sanitize_outgoing(text)
+    # Add clanker signature
     text = f"{text}\n-bot"
 
     data = {
         "message": {
-            "source_guid": f"cf-bot-{time.time()}-{id(text)}",
+            "source_guid": f"cf-bot-{time.time()}",
             "text": text,
         }
     }
@@ -1952,8 +1885,12 @@ def send_message(group_id, text, reply_to_id=None):
             }
         ]
 
-    # Enqueue — never call gm_post directly to avoid rate-limit storms
-    _MSG_QUEUE.put({"group_id": group_id, "data": data})
+    try:
+        gm_post(f"/groups/{group_id}/messages", data)
+    except Exception:
+        print("Error sending message:")
+        traceback.print_exc()
+
 
 def list_groups():
     groups = []
@@ -2813,6 +2750,11 @@ def run_ollama(prompt_text, model=AI_MODEL_NAME, user_id=None, sender_name=None)
 
 def handle_dev_command(message):
     global GAME_GROUP_ID, GAME_ENABLED, AI_ENABLED, last_game_since_id, ADMIN_GROUP_ID, USE_SUBGROUP
+    global POINTS_FIH_MIN, POINTS_FIH_MAX, POINTS_FIH_CD, POINTS_FIH_LOSE_CHANCE
+    global POINTS_STEAL_MIN, POINTS_STEAL_MAX, POINTS_STEAL_CD
+    global POINTS_COIN_CD, POINTS_MAX_CAP, LEADERBOARD_SIZE
+    global AI_COOLDOWN_SECONDS, AISET_COOLDOWN_SECONDS, AI_MEMORY_MAX_TURNS
+    global EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED
 
     text = (message.get("text") or "").strip()
     raw_name = message.get("name", "Unknown")
@@ -2831,19 +2773,39 @@ def handle_dev_command(message):
     if cmd == "!help":
         help_text = (
             "Developer Commands:\n"
-            "!help — Show this help menu\n"
-            "!listgroups — List all groups your token is in\n"
-            "!listgroups MAIN_GROUP_ID — Show topics/subgroups for a main group\n"
-            "!add GROUPID — Set the active game group (main group)\n"
-            "!add MAIN_GROUP_ID,SUB_GROUP_ID — Set bot to subgroup with admin from main\n"
-            "!reload — Restart the bot script\n"
-            "!state true/false — Enable or disable game responses\n"
-            "!aiswitch true/false — Enable or disable AI responses\n"
             "\n"
-            "Notes:\n"
-            "- Only one game group is active at a time.\n"
-            "- When switching groups, the bot notifies both old and new groups.\n"
-            "- The bot polls this dev group every 10 seconds."
+            "── Bot Control ──\n"
+            "!help — Show this help menu\n"
+            "!listgroups — List all groups\n"
+            "!listgroups MAIN_GROUP_ID — Show topics/subgroups\n"
+            "!add GROUPID — Set active game group\n"
+            "!add MAIN_GROUP_ID,SUB_GROUP_ID — Subgroup mode\n"
+            "!reload — Restart the bot\n"
+            "!state true/false — Master on/off switch\n"
+            "!toggle ai/8ball/scripture/connect4 true/false — Toggle feature\n"
+            "!aiswitch true/false — Enable/disable AI\n"
+            "\n"
+            "── Points Management ──\n"
+            "!setpoints @user <amount> — Set a user's points exactly\n"
+            "!addpoints @user <amount> — Add points to a user\n"
+            "!removepoints @user <amount> — Remove points from a user\n"
+            "!resetpoints @user — Zero out a user's points\n"
+            "!resetallpoints — Zero ALL users' points (destructive!)\n"
+            "!pointscap <amount> — Set the max points cap (0 = unlimited)\n"
+            "!leaderboard [n] — Show top n users (default 10)\n"
+            "!checkpoints @user — Check a specific user's balance\n"
+            "\n"
+            "── Points Config ──\n"
+            "!setfih min <n> max <n> cd <s> — Configure fishing\n"
+            "!setsteal min <n> max <n> cd <s> — Configure steal\n"
+            "!setcoin cd <s> — Configure coin flip cooldown\n"
+            "\n"
+            "── AI Config ──\n"
+            "!setpersonality <text> — Update AI personality\n"
+            "!setcooldown ai <s> — Set !ai cooldown (seconds)\n"
+            "!setcooldown aiset <s> — Set !aiset cooldown\n"
+            "!setmemory <turns> — Set AI memory depth\n"
+            "!clearai — Clear all AI memory\n"
         )
         send_message(DEV_GROUP_ID, help_text, reply_to_id=msg_id)
         return
@@ -2851,12 +2813,10 @@ def handle_dev_command(message):
     # !listgroups [MAIN_GROUP_ID]
     if cmd == "!listgroups":
         if len(parts) < 2:
-            # No arg: list all main groups
             groups = list_groups()
             if not groups:
                 send_message(DEV_GROUP_ID, "No groups found.", reply_to_id=msg_id)
                 return
-
             lines = ["Groups you are in:"]
             for g in groups:
                 gid = g.get("id")
@@ -2865,14 +2825,12 @@ def handle_dev_command(message):
             send_message(DEV_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
             return
 
-        # Has arg: show topics for that main group
         main_gid = parts[1].strip()
         try:
             topics = _fetch_group_topics(main_gid)
             if not topics:
                 send_message(DEV_GROUP_ID, f"No topics found for group {main_gid}.", reply_to_id=msg_id)
                 return
-
             lines = [f"Topics/Subgroups in {main_gid}:"]
             for topic_name, topic_id in topics:
                 lines.append(f"  {topic_name} — {topic_id}")
@@ -2890,7 +2848,6 @@ def handle_dev_command(message):
         arg = parts[1].strip()
         old_gid = GAME_GROUP_ID
 
-        # Check if comma-separated (subgroup mode)
         if "," in arg:
             ids = arg.split(",")
             if len(ids) != 2:
@@ -2901,7 +2858,6 @@ def handle_dev_command(message):
             USE_SUBGROUP = True
             ADMIN_GROUP_ID = admin_gid
         else:
-            # Standard mode
             game_gid = arg
             USE_SUBGROUP = False
             ADMIN_GROUP_ID = None
@@ -2926,7 +2882,7 @@ def handle_dev_command(message):
             last_game_since_id = "0"
 
         apply_group_config(game_gid)
-        
+
         if USE_SUBGROUP:
             send_message(DEV_GROUP_ID, f"Game group set to {game_gid} (subgroup mode, admin group: {admin_gid})", reply_to_id=msg_id)
         else:
@@ -2945,7 +2901,6 @@ def handle_dev_command(message):
         if len(parts) < 2:
             send_message(DEV_GROUP_ID, f"Current state: {GAME_ENABLED}", reply_to_id=msg_id)
             return
-
         val = parts[1].lower()
         if val in ("true", "on", "1", "yes"):
             GAME_ENABLED = True
@@ -2954,8 +2909,36 @@ def handle_dev_command(message):
         else:
             send_message(DEV_GROUP_ID, "Usage: !state true/false", reply_to_id=msg_id)
             return
-
         send_message(DEV_GROUP_ID, f"Game responding state set to {GAME_ENABLED}", reply_to_id=msg_id)
+        return
+
+    # !toggle <feature> true/false
+    if cmd == "!toggle":
+        if len(parts) < 3:
+            send_message(DEV_GROUP_ID, "Usage: !toggle ai/8ball/scripture/connect4 true/false", reply_to_id=msg_id)
+            return
+        feature = parts[1].lower()
+        val_str = parts[2].lower()
+        if val_str in ("true", "on", "1", "yes"):
+            val = True
+        elif val_str in ("false", "off", "0", "no"):
+            val = False
+        else:
+            send_message(DEV_GROUP_ID, "Value must be true or false.", reply_to_id=msg_id)
+            return
+        if feature == "ai":
+            AI_ENABLED = val
+        elif feature in ("8ball", "eightball"):
+            EIGHTBALL_ENABLED = val
+        elif feature == "scripture":
+            SCRIPTURE_ENABLED = val
+        elif feature == "connect4":
+            CONNECT4_ENABLED = val
+        else:
+            send_message(DEV_GROUP_ID, "Unknown feature. Use: ai, 8ball, scripture, connect4", reply_to_id=msg_id)
+            return
+        snapshot_group_config(GAME_GROUP_ID)
+        send_message(DEV_GROUP_ID, f"{'✅' if val else '❌'} {feature} set to {val}", reply_to_id=msg_id)
         return
 
     # !aiswitch
@@ -2963,7 +2946,6 @@ def handle_dev_command(message):
         if len(parts) < 2:
             send_message(DEV_GROUP_ID, f"AI is currently: {AI_ENABLED}", reply_to_id=msg_id)
             return
-
         val = parts[1].lower()
         if val in ("true", "on", "1", "yes"):
             AI_ENABLED = True
@@ -2972,12 +2954,385 @@ def handle_dev_command(message):
         else:
             send_message(DEV_GROUP_ID, "Usage: !aiswitch true/false", reply_to_id=msg_id)
             return
-
         send_message(DEV_GROUP_ID, f"AI responding set to {AI_ENABLED}", reply_to_id=msg_id)
         return
 
+    # ── POINTS MANAGEMENT ─────────────────────────────────────────────────────
+
+    def _dev_resolve_user(parts, start_idx=1):
+        """
+        Try to resolve a user from dev-group command parts.
+        Checks _known_names by name substring match.
+        Returns (user_id, display_name) or (None, None).
+        """
+        if len(parts) <= start_idx:
+            return None, None
+        name_query = " ".join(parts[start_idx:]).lstrip("@").strip().lower()
+        for uid, uname in _known_names.items():
+            if uname.lower() == name_query or name_query in uname.lower():
+                return uid, uname
+        return None, None
+
+    # !setpoints @user <amount>
+    if cmd == "!setpoints":
+        if len(parts) < 3:
+            send_message(DEV_GROUP_ID, "Usage: !setpoints @user <amount>", reply_to_id=msg_id)
+            return
+        try:
+            amount = int(parts[-1])
+            if amount < 0:
+                raise ValueError
+        except ValueError:
+            send_message(DEV_GROUP_ID, "Amount must be a non-negative integer.", reply_to_id=msg_id)
+            return
+        if not GAME_GROUP_ID:
+            send_message(DEV_GROUP_ID, "No game group set.", reply_to_id=msg_id)
+            return
+        uid, uname = _dev_resolve_user(parts, 1) if len(parts) > 2 else (None, None)
+        # Rebuild name query excluding the last arg (amount)
+        name_query = " ".join(parts[1:-1]).lstrip("@").strip().lower()
+        for u, n in _known_names.items():
+            if n.lower() == name_query or name_query in n.lower():
+                uid, uname = u, n
+                break
+        if uid is None:
+            send_message(DEV_GROUP_ID, "❌ User not found. They must have sent a message in the game group.", reply_to_id=msg_id)
+            return
+        record = _load_user_record(GAME_GROUP_ID, uid)
+        record["points"] = amount
+        record["name"] = uname
+        _save_user_record(GAME_GROUP_ID, uid, record)
+        send_message(DEV_GROUP_ID, f"✅ Set {uname}'s points to {amount:,}.", reply_to_id=msg_id)
+        return
+
+    # !addpoints @user <amount>
+    if cmd == "!addpoints":
+        if len(parts) < 3:
+            send_message(DEV_GROUP_ID, "Usage: !addpoints @user <amount>", reply_to_id=msg_id)
+            return
+        try:
+            amount = int(parts[-1])
+        except ValueError:
+            send_message(DEV_GROUP_ID, "Amount must be an integer.", reply_to_id=msg_id)
+            return
+        if not GAME_GROUP_ID:
+            send_message(DEV_GROUP_ID, "No game group set.", reply_to_id=msg_id)
+            return
+        name_query = " ".join(parts[1:-1]).lstrip("@").strip().lower()
+        uid, uname = None, None
+        for u, n in _known_names.items():
+            if n.lower() == name_query or name_query in n.lower():
+                uid, uname = u, n
+                break
+        if uid is None:
+            send_message(DEV_GROUP_ID, "❌ User not found.", reply_to_id=msg_id)
+            return
+        new_bal, capped = add_points(GAME_GROUP_ID, uid, uname, amount)
+        cap_note = f" (hit cap of {POINTS_MAX_CAP:,})" if capped else ""
+        verb = "Added" if amount >= 0 else "Removed"
+        send_message(DEV_GROUP_ID, f"✅ {verb} {abs(amount):,} pts {'to' if amount >= 0 else 'from'} {uname}. New balance: {new_bal:,}{cap_note}.", reply_to_id=msg_id)
+        return
+
+    # !removepoints @user <amount>
+    if cmd == "!removepoints":
+        if len(parts) < 3:
+            send_message(DEV_GROUP_ID, "Usage: !removepoints @user <amount>", reply_to_id=msg_id)
+            return
+        try:
+            amount = int(parts[-1])
+            if amount < 0:
+                raise ValueError
+        except ValueError:
+            send_message(DEV_GROUP_ID, "Amount must be a positive integer.", reply_to_id=msg_id)
+            return
+        if not GAME_GROUP_ID:
+            send_message(DEV_GROUP_ID, "No game group set.", reply_to_id=msg_id)
+            return
+        name_query = " ".join(parts[1:-1]).lstrip("@").strip().lower()
+        uid, uname = None, None
+        for u, n in _known_names.items():
+            if n.lower() == name_query or name_query in n.lower():
+                uid, uname = u, n
+                break
+        if uid is None:
+            send_message(DEV_GROUP_ID, "❌ User not found.", reply_to_id=msg_id)
+            return
+        new_bal, _ = add_points(GAME_GROUP_ID, uid, uname, -amount)
+        send_message(DEV_GROUP_ID, f"✅ Removed {amount:,} pts from {uname}. New balance: {new_bal:,}.", reply_to_id=msg_id)
+        return
+
+    # !resetpoints @user
+    if cmd == "!resetpoints":
+        if len(parts) < 2:
+            send_message(DEV_GROUP_ID, "Usage: !resetpoints @user", reply_to_id=msg_id)
+            return
+        if not GAME_GROUP_ID:
+            send_message(DEV_GROUP_ID, "No game group set.", reply_to_id=msg_id)
+            return
+        name_query = " ".join(parts[1:]).lstrip("@").strip().lower()
+        uid, uname = None, None
+        for u, n in _known_names.items():
+            if n.lower() == name_query or name_query in n.lower():
+                uid, uname = u, n
+                break
+        if uid is None:
+            send_message(DEV_GROUP_ID, "❌ User not found.", reply_to_id=msg_id)
+            return
+        record = _load_user_record(GAME_GROUP_ID, uid)
+        record["points"] = 0
+        record["name"] = uname
+        _save_user_record(GAME_GROUP_ID, uid, record)
+        send_message(DEV_GROUP_ID, f"✅ Reset {uname}'s points to 0.", reply_to_id=msg_id)
+        return
+
+    # !resetallpoints
+    if cmd == "!resetallpoints":
+        if not GAME_GROUP_ID:
+            send_message(DEV_GROUP_ID, "No game group set.", reply_to_id=msg_id)
+            return
+        ledger = load_points(GAME_GROUP_ID)
+        for uid, record in ledger.items():
+            record["points"] = 0
+            _save_user_record(GAME_GROUP_ID, uid, record)
+        send_message(DEV_GROUP_ID, f"✅ Reset points for all {len(ledger)} user(s) to 0.", reply_to_id=msg_id)
+        return
+
+    # !pointscap <amount>
+    if cmd == "!pointscap":
+        if len(parts) < 2:
+            send_message(DEV_GROUP_ID, f"Current point cap: {POINTS_MAX_CAP} (0 = unlimited)", reply_to_id=msg_id)
+            return
+        try:
+            cap = int(parts[1])
+            if cap < 0:
+                raise ValueError
+        except ValueError:
+            send_message(DEV_GROUP_ID, "Cap must be a non-negative integer (0 = unlimited).", reply_to_id=msg_id)
+            return
+        POINTS_MAX_CAP = cap
+        cfg = load_config()
+        cfg["points_max_cap"] = cap
+        save_config(cfg)
+        desc = f"{cap:,}" if cap > 0 else "unlimited"
+        send_message(DEV_GROUP_ID, f"✅ Point cap set to {desc}.", reply_to_id=msg_id)
+        return
+
+    # !leaderboard [n]
+    if cmd == "!leaderboard":
+        if not GAME_GROUP_ID:
+            send_message(DEV_GROUP_ID, "No game group set.", reply_to_id=msg_id)
+            return
+        top_n = 10
+        if len(parts) >= 2:
+            try:
+                top_n = int(parts[1])
+            except ValueError:
+                pass
+        ranked = points_leaderboard(GAME_GROUP_ID, top_n)
+        if not ranked:
+            send_message(DEV_GROUP_ID, "No points data yet.", reply_to_id=msg_id)
+            return
+        lines = [f"🏆 Top {top_n} Leaderboard:"]
+        medals = ["🥇", "🥈", "🥉"]
+        for i, entry in enumerate(ranked):
+            prefix = medals[i] if i < 3 else f"  {i+1}."
+            lines.append(f"{prefix} {entry.get('name', '?')} — {entry.get('points', 0):,} pts")
+        send_message(DEV_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
+        return
+
+    # !checkpoints @user
+    if cmd == "!checkpoints":
+        if len(parts) < 2:
+            send_message(DEV_GROUP_ID, "Usage: !checkpoints @user", reply_to_id=msg_id)
+            return
+        if not GAME_GROUP_ID:
+            send_message(DEV_GROUP_ID, "No game group set.", reply_to_id=msg_id)
+            return
+        name_query = " ".join(parts[1:]).lstrip("@").strip().lower()
+        uid, uname = None, None
+        for u, n in _known_names.items():
+            if n.lower() == name_query or name_query in n.lower():
+                uid, uname = u, n
+                break
+        if uid is None:
+            send_message(DEV_GROUP_ID, "❌ User not found.", reply_to_id=msg_id)
+            return
+        bal = get_points(GAME_GROUP_ID, uid, uname)
+        inv = _load_inventory(GAME_GROUP_ID, uid)
+        clickers = _get_clicker_count(GAME_GROUP_ID, uid)
+        creations = len(inv.get("creations", []))
+        send_message(DEV_GROUP_ID,
+            f"📊 {uname}:\n  Points: {bal:,}\n  Clickers: {clickers}\n  Creations: {creations}",
+            reply_to_id=msg_id)
+        return
+
+    # ── POINTS CONFIG ──────────────────────────────────────────────────────────
+
+    # !setfih min <n> max <n> cd <s>
+    if cmd == "!setfih":
+        # Parse key=value pairs from the rest of the command
+        kwargs = {}
+        i = 1
+        while i < len(parts) - 1:
+            key = parts[i].lower()
+            try:
+                val_f = float(parts[i+1])
+                kwargs[key] = val_f
+                i += 2
+            except (ValueError, IndexError):
+                i += 1
+        changed = []
+        if "min" in kwargs:
+            POINTS_FIH_MIN = int(kwargs["min"])
+            changed.append(f"min={POINTS_FIH_MIN}")
+        if "max" in kwargs:
+            POINTS_FIH_MAX = int(kwargs["max"])
+            changed.append(f"max={POINTS_FIH_MAX}")
+        if "cd" in kwargs:
+            POINTS_FIH_CD = int(kwargs["cd"])
+            changed.append(f"cd={POINTS_FIH_CD}s")
+        if "lose" in kwargs:
+            POINTS_FIH_LOSE_CHANCE = float(kwargs["lose"])
+            changed.append(f"lose_chance={POINTS_FIH_LOSE_CHANCE:.2f}")
+        if not changed:
+            send_message(DEV_GROUP_ID,
+                f"Current fih: min={POINTS_FIH_MIN} max={POINTS_FIH_MAX} cd={POINTS_FIH_CD}s lose={POINTS_FIH_LOSE_CHANCE:.2f}\n"
+                "Usage: !setfih min <n> max <n> cd <s> [lose <0.0-1.0>]",
+                reply_to_id=msg_id)
+            return
+        cfg = load_config()
+        cfg["fih_min"] = POINTS_FIH_MIN
+        cfg["fih_max"] = POINTS_FIH_MAX
+        cfg["fih_cd"] = POINTS_FIH_CD
+        cfg["fih_lose"] = POINTS_FIH_LOSE_CHANCE
+        save_config(cfg)
+        send_message(DEV_GROUP_ID, f"✅ Fih updated: {', '.join(changed)}", reply_to_id=msg_id)
+        return
+
+    # !setsteal min <n> max <n> cd <s>
+    if cmd == "!setsteal":
+        kwargs = {}
+        i = 1
+        while i < len(parts) - 1:
+            key = parts[i].lower()
+            try:
+                val_f = float(parts[i+1])
+                kwargs[key] = val_f
+                i += 2
+            except (ValueError, IndexError):
+                i += 1
+        changed = []
+        if "min" in kwargs:
+            POINTS_STEAL_MIN = int(kwargs["min"])
+            changed.append(f"min={POINTS_STEAL_MIN}")
+        if "max" in kwargs:
+            POINTS_STEAL_MAX = int(kwargs["max"])
+            changed.append(f"max={POINTS_STEAL_MAX}")
+        if "cd" in kwargs:
+            POINTS_STEAL_CD = int(kwargs["cd"])
+            changed.append(f"cd={POINTS_STEAL_CD}s")
+        if not changed:
+            send_message(DEV_GROUP_ID,
+                f"Current steal: min={POINTS_STEAL_MIN} max={POINTS_STEAL_MAX} cd={POINTS_STEAL_CD}s\n"
+                "Usage: !setsteal min <n> max <n> cd <s>",
+                reply_to_id=msg_id)
+            return
+        cfg = load_config()
+        cfg["steal_min"] = POINTS_STEAL_MIN
+        cfg["steal_max"] = POINTS_STEAL_MAX
+        cfg["steal_cd"] = POINTS_STEAL_CD
+        save_config(cfg)
+        send_message(DEV_GROUP_ID, f"✅ Steal updated: {', '.join(changed)}", reply_to_id=msg_id)
+        return
+
+    # !setcoin cd <s>
+    if cmd == "!setcoin":
+        if len(parts) >= 3 and parts[1].lower() == "cd":
+            try:
+                POINTS_COIN_CD = int(parts[2])
+                cfg = load_config()
+                cfg["coin_cd"] = POINTS_COIN_CD
+                save_config(cfg)
+                send_message(DEV_GROUP_ID, f"✅ Coin cooldown set to {POINTS_COIN_CD}s.", reply_to_id=msg_id)
+            except ValueError:
+                send_message(DEV_GROUP_ID, "Usage: !setcoin cd <seconds>", reply_to_id=msg_id)
+        else:
+            send_message(DEV_GROUP_ID, f"Current coin cd: {POINTS_COIN_CD}s\nUsage: !setcoin cd <seconds>", reply_to_id=msg_id)
+        return
+
+    # ── AI CONFIG ──────────────────────────────────────────────────────────────
+
+    # !setpersonality <text>
+    if cmd == "!setpersonality":
+        if len(parts) < 2:
+            send_message(DEV_GROUP_ID, "Usage: !setpersonality <personality text>", reply_to_id=msg_id)
+            return
+        personality_text = text[len("!setpersonality"):].strip()
+        send_message(DEV_GROUP_ID, "Updating AI personality...", reply_to_id=msg_id)
+        def _do_personality():
+            update_personality(personality_text)
+            send_message(DEV_GROUP_ID, "✅ AI personality updated and memory cleared.", reply_to_id=msg_id)
+        threading.Thread(target=_do_personality, daemon=True).start()
+        return
+
+    # !setcooldown ai/aiset <seconds>
+    if cmd == "!setcooldown":
+        if len(parts) < 3:
+            send_message(DEV_GROUP_ID,
+                f"Current cooldowns — !ai: {AI_COOLDOWN_SECONDS}s  !aiset: {AISET_COOLDOWN_SECONDS}s\n"
+                "Usage: !setcooldown ai <s>  or  !setcooldown aiset <s>",
+                reply_to_id=msg_id)
+            return
+        target = parts[1].lower()
+        try:
+            secs = int(parts[2])
+            if secs < 0:
+                raise ValueError
+        except ValueError:
+            send_message(DEV_GROUP_ID, "Seconds must be a non-negative integer.", reply_to_id=msg_id)
+            return
+        cfg = load_config()
+        if target == "ai":
+            AI_COOLDOWN_SECONDS = secs
+            cfg["ai_cooldown_seconds"] = secs
+            save_config(cfg)
+            send_message(DEV_GROUP_ID, f"✅ !ai cooldown set to {secs}s.", reply_to_id=msg_id)
+        elif target == "aiset":
+            AISET_COOLDOWN_SECONDS = secs
+            cfg["aiset_cooldown_seconds"] = secs
+            save_config(cfg)
+            send_message(DEV_GROUP_ID, f"✅ !aiset cooldown set to {secs}s.", reply_to_id=msg_id)
+        else:
+            send_message(DEV_GROUP_ID, "Target must be 'ai' or 'aiset'.", reply_to_id=msg_id)
+        return
+
+    # !setmemory <turns>
+    if cmd == "!setmemory":
+        if len(parts) < 2:
+            send_message(DEV_GROUP_ID, f"Current memory depth: {AI_MEMORY_MAX_TURNS} turns\nUsage: !setmemory <turns>", reply_to_id=msg_id)
+            return
+        try:
+            turns = int(parts[1])
+            if turns < 1:
+                raise ValueError
+        except ValueError:
+            send_message(DEV_GROUP_ID, "Turns must be a positive integer.", reply_to_id=msg_id)
+            return
+        AI_MEMORY_MAX_TURNS = turns
+        cfg = load_config()
+        cfg["ai_memory_max_turns"] = turns
+        save_config(cfg)
+        send_message(DEV_GROUP_ID, f"✅ AI memory set to {turns} turns.", reply_to_id=msg_id)
+        return
+
+    # !clearai
+    if cmd == "!clearai":
+        _ai_memory.clear()
+        send_message(DEV_GROUP_ID, "🧹 AI memory cleared.", reply_to_id=msg_id)
+        return
+
     # Unknown dev command
-    send_message(DEV_GROUP_ID, f"Unknown command: {cmd}", reply_to_id=msg_id)
+    send_message(DEV_GROUP_ID, f"Unknown command: {cmd}  —  type !help for a list.", reply_to_id=msg_id)
 
 # ---------------------------------------------------------
 # Game group command handling
@@ -4203,7 +4558,10 @@ def handle_game_command(message):
             "\u2022 #help 8ball       \u2014 Magic 8-Ball\n"
             "\u2022 #help scripture   \u2014 Bible & Book of Mormon\n"
             "\u2022 #help ai          \u2014 AI chat & personality\n"
-            "\u2022 #help points      \u2014 Points, shop & trading\n"
+            "\u2022 #help points      \u2014 Points sections index\n"
+            "\u2022 #help points 1    \u2014 Earning & spending\n"
+            "\u2022 #help points 2    \u2014 Shop & inventory\n"
+            "\u2022 #help points 3    \u2014 Trading & requests\n"
             "\u2022 #help gamepoints  \u2014 Game betting & AI rewards\n"
             "\u2022 #help admin       \u2014 Admin feature controls\n"
             "\n"
@@ -5306,7 +5664,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "319b81f"
+BOT_COMMIT_SHA = "3e64a34"
 
 _control_panel_instance = None  # set when panel launches
 
@@ -5441,6 +5799,7 @@ class ControlPanel:
 
         self._build_tab_status(nb)
         self._build_tab_groups(nb)
+        self._build_tab_points(nb)
         self._build_tab_ai(nb)
         self._build_tab_settings(nb)
         self._build_tab_update(nb)
@@ -5770,6 +6129,357 @@ class ControlPanel:
         else:
             self._set_status(f"✅ Game group set to: {name}")
     
+    # ── Tab: Points Dashboard ─────────────────────────────────────────────────
+
+    def _build_tab_points(self, nb):
+        import tkinter as tk
+        from tkinter import ttk, messagebox
+
+        outer = tk.Frame(nb)
+        nb.add(outer, text="  Points  ")
+
+        # ── Top toolbar ───────────────────────────────────────────────────────
+        toolbar = tk.Frame(outer, padx=8, pady=6)
+        toolbar.pack(fill="x")
+
+        tk.Label(toolbar, text="Points Dashboard",
+                 font=("Helvetica", 12, "bold")).pack(side="left")
+
+        self._pts_live_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(toolbar, text="Live (1s)", variable=self._pts_live_var).pack(side="right", padx=(0, 4))
+
+        tk.Button(toolbar, text="🔄 Refresh", font=("Helvetica", 9),
+                  command=self._pts_refresh, relief="flat",
+                  padx=8, pady=3).pack(side="right", padx=(0, 4))
+
+        # Last-updated label
+        self._pts_updated_var = tk.StringVar(value="")
+        tk.Label(toolbar, textvariable=self._pts_updated_var,
+                 font=("Helvetica", 8), fg="#888888").pack(side="right", padx=(0, 8))
+
+        # ── Summary bar ───────────────────────────────────────────────────────
+        summary_frame = tk.Frame(outer, bg="#f0f0f5", pady=5, padx=10)
+        summary_frame.pack(fill="x")
+
+        self._pts_summary_labels = {}
+        for i, (key, label) in enumerate([
+            ("users",      "Users"),
+            ("total_pts",  "Total Points"),
+            ("top_user",   "Leader"),
+            ("top_pts",    "Leader Pts"),
+            ("clickers",   "Total Clickers"),
+            ("creations",  "Total Creations"),
+        ]):
+            col = tk.Frame(summary_frame, bg="#f0f0f5")
+            col.pack(side="left", padx=10)
+            tk.Label(col, text=label, font=("Helvetica", 8), fg="#666666", bg="#f0f0f5").pack()
+            val = tk.Label(col, text="—", font=("Helvetica", 11, "bold"), bg="#f0f0f5", fg="#1c1c1e")
+            val.pack()
+            self._pts_summary_labels[key] = val
+
+        # ── Main paned area (table left, detail right) ────────────────────────
+        pane = tk.PanedWindow(outer, orient="horizontal", sashwidth=5, sashrelief="flat")
+        pane.pack(fill="both", expand=True, padx=4, pady=4)
+
+        # LEFT: Leaderboard table
+        left = tk.Frame(pane)
+        pane.add(left, minsize=260)
+
+        tk.Label(left, text="Leaderboard", font=("Helvetica", 10, "bold")).pack(anchor="w", padx=6, pady=(4, 0))
+
+        # Sort controls
+        sort_row = tk.Frame(left)
+        sort_row.pack(fill="x", padx=6, pady=(2, 0))
+        tk.Label(sort_row, text="Sort:", font=("Helvetica", 9)).pack(side="left")
+        self._pts_sort_var = tk.StringVar(value="points")
+        for val, lbl in [("points", "Points"), ("name", "Name"), ("clickers", "Clickers"), ("creations", "Items")]:
+            ttk.Radiobutton(sort_row, text=lbl, variable=self._pts_sort_var, value=val,
+                            command=self._pts_refresh_table).pack(side="left", padx=2)
+
+        # Treeview
+        cols = ("rank", "name", "points", "clickers", "creations")
+        tree_frame = tk.Frame(left)
+        tree_frame.pack(fill="both", expand=True, padx=6, pady=4)
+
+        vsb = tk.Scrollbar(tree_frame, orient="vertical")
+        self._pts_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
+                                       selectmode="browse", yscrollcommand=vsb.set)
+        vsb.config(command=self._pts_tree.yview)
+        vsb.pack(side="right", fill="y")
+        self._pts_tree.pack(fill="both", expand=True)
+
+        self._pts_tree.heading("rank",      text="#")
+        self._pts_tree.heading("name",      text="Name")
+        self._pts_tree.heading("points",    text="Points")
+        self._pts_tree.heading("clickers",  text="Clickers")
+        self._pts_tree.heading("creations", text="Items")
+
+        self._pts_tree.column("rank",      width=30,  anchor="center", stretch=False)
+        self._pts_tree.column("name",      width=130, anchor="w")
+        self._pts_tree.column("points",    width=70,  anchor="e")
+        self._pts_tree.column("clickers",  width=60,  anchor="center")
+        self._pts_tree.column("creations", width=40,  anchor="center")
+
+        # Row colors: gold / silver / bronze for top 3
+        self._pts_tree.tag_configure("gold",   background="#fff8dc")
+        self._pts_tree.tag_configure("silver", background="#f5f5f5")
+        self._pts_tree.tag_configure("bronze", background="#fdf0e0")
+        self._pts_tree.tag_configure("even",   background="#ffffff")
+        self._pts_tree.tag_configure("odd",    background="#f9f9f9")
+
+        self._pts_tree.bind("<<TreeviewSelect>>", self._pts_on_select)
+
+        # RIGHT: Detail panel
+        right = tk.Frame(pane, padx=8, pady=6)
+        pane.add(right, minsize=200)
+
+        tk.Label(right, text="User Detail", font=("Helvetica", 10, "bold")).pack(anchor="w")
+
+        self._pts_detail_name = tk.Label(right, text="Select a user →",
+                                          font=("Helvetica", 11, "bold"), fg="#1c1c1e")
+        self._pts_detail_name.pack(anchor="w", pady=(4, 0))
+
+        self._pts_detail_pts = tk.Label(right, text="", font=("Helvetica", 10), fg="#0055aa")
+        self._pts_detail_pts.pack(anchor="w")
+
+        self._pts_detail_clickers = tk.Label(right, text="", font=("Helvetica", 9), fg="#555555")
+        self._pts_detail_clickers.pack(anchor="w")
+
+        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=8)
+
+        tk.Label(right, text="Inventory:", font=("Helvetica", 9, "bold")).pack(anchor="w")
+        inv_frame = tk.Frame(right)
+        inv_frame.pack(fill="both", expand=True)
+        inv_vsb = tk.Scrollbar(inv_frame, orient="vertical")
+        self._pts_inv_list = tk.Listbox(inv_frame, font=("Courier", 9),
+                                         yscrollcommand=inv_vsb.set, height=8,
+                                         selectmode="browse", relief="flat", bd=1)
+        inv_vsb.config(command=self._pts_inv_list.yview)
+        inv_vsb.pack(side="right", fill="y")
+        self._pts_inv_list.pack(fill="both", expand=True)
+
+        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=8)
+
+        # ── Quick point adjustment ─────────────────────────────────────────
+        tk.Label(right, text="Quick Adjust:", font=("Helvetica", 9, "bold")).pack(anchor="w")
+
+        adj_row = tk.Frame(right)
+        adj_row.pack(fill="x", pady=(4, 0))
+
+        self._pts_adj_var = tk.StringVar()
+        adj_entry = tk.Entry(adj_row, textvariable=self._pts_adj_var, width=9,
+                             font=("Helvetica", 10))
+        adj_entry.pack(side="left", padx=(0, 4))
+        tk.Label(adj_row, text="pts", font=("Helvetica", 9)).pack(side="left")
+
+        btn_row2 = tk.Frame(right)
+        btn_row2.pack(fill="x", pady=(4, 0))
+
+        tk.Button(btn_row2, text="➕ Add", font=("Helvetica", 9),
+                  command=lambda: self._pts_adjust("add"),
+                  bg="#34c759", fg="white", relief="flat",
+                  padx=8, pady=3).pack(side="left", padx=(0, 4))
+
+        tk.Button(btn_row2, text="➖ Remove", font=("Helvetica", 9),
+                  command=lambda: self._pts_adjust("remove"),
+                  bg="#ff9500", fg="white", relief="flat",
+                  padx=8, pady=3).pack(side="left", padx=(0, 4))
+
+        tk.Button(btn_row2, text="📌 Set", font=("Helvetica", 9),
+                  command=lambda: self._pts_adjust("set"),
+                  bg="#0055aa", fg="white", relief="flat",
+                  padx=8, pady=3).pack(side="left", padx=(0, 4))
+
+        tk.Button(btn_row2, text="🗑 Reset", font=("Helvetica", 9),
+                  command=lambda: self._pts_adjust("reset"),
+                  bg="#ff3b30", fg="white", relief="flat",
+                  padx=8, pady=3).pack(side="left")
+
+        self._pts_adj_status = tk.Label(right, text="", font=("Helvetica", 9), fg="#34c759")
+        self._pts_adj_status.pack(anchor="w", pady=(4, 0))
+
+        # Internal state
+        self._pts_data = []          # list of dicts: uid, name, points, clickers, creations, inv
+        self._pts_selected_uid = None
+        self._pts_selected_name = None
+
+        # Kick off the live-update loop (separate from the main 2s refresh)
+        self._pts_live_loop()
+
+    # ── Points tab helpers ────────────────────────────────────────────────────
+
+    def _pts_live_loop(self):
+        """1-second live refresh loop for the Points tab."""
+        if self._pts_live_var.get():
+            self._pts_refresh()
+        self.root.after(1000, self._pts_live_loop)
+
+    def _pts_load_data(self):
+        """Load all user records + inventories for the current game group. Returns list of dicts."""
+        gid = GAME_GROUP_ID
+        if not gid:
+            return []
+        ledger = load_points(gid)
+        rows = []
+        for uid, record in ledger.items():
+            inv = _load_inventory(gid, uid)
+            clickers = _get_clicker_count(gid, uid)
+            creations = len(inv.get("creations", []))
+            rows.append({
+                "uid":        uid,
+                "name":       record.get("name", uid),
+                "points":     record.get("points", 0),
+                "clickers":   clickers,
+                "creations":  creations,
+                "inv":        inv,
+            })
+        return rows
+
+    def _pts_refresh(self):
+        """Reload data and repopulate the table + summary."""
+        self._pts_data = self._pts_load_data()
+        self._pts_refresh_table()
+        self._pts_update_summary()
+        import time as _t
+        self._pts_updated_var.set(f"Updated {_t.strftime('%H:%M:%S')}")
+
+    def _pts_refresh_table(self):
+        """Re-sort and repopulate the treeview from cached _pts_data."""
+        sort = self._pts_sort_var.get()
+        reverse = sort in ("points", "clickers", "creations")
+        key_fn = {
+            "points":    lambda r: r["points"],
+            "name":      lambda r: r["name"].lower(),
+            "clickers":  lambda r: r["clickers"],
+            "creations": lambda r: r["creations"],
+        }.get(sort, lambda r: r["points"])
+
+        sorted_data = sorted(self._pts_data, key=key_fn, reverse=reverse)
+
+        tree = self._pts_tree
+        tree.delete(*tree.get_children())
+
+        medals = {0: "🥇", 1: "🥈", 2: "🥉"}
+        tag_map = {0: "gold", 1: "silver", 2: "bronze"}
+
+        for i, row in enumerate(sorted_data):
+            rank_str = medals.get(i, str(i + 1)) if sort == "points" else str(i + 1)
+            tag = tag_map.get(i, "even" if i % 2 == 0 else "odd")
+            iid = tree.insert("", "end",
+                              values=(rank_str, row["name"], f"{row['points']:,}",
+                                      row["clickers"], row["creations"]),
+                              tags=(tag,))
+            # Restore selection if this was the selected user
+            if row["uid"] == self._pts_selected_uid:
+                tree.selection_set(iid)
+                tree.see(iid)
+
+    def _pts_update_summary(self):
+        rows = self._pts_data
+        if not rows:
+            for lbl in self._pts_summary_labels.values():
+                lbl.config(text="—")
+            return
+
+        total_pts = sum(r["points"] for r in rows)
+        total_clickers = sum(r["clickers"] for r in rows)
+        total_creations = sum(r["creations"] for r in rows)
+        top = max(rows, key=lambda r: r["points"])
+
+        self._pts_summary_labels["users"].config(text=str(len(rows)))
+        self._pts_summary_labels["total_pts"].config(text=f"{total_pts:,}")
+        self._pts_summary_labels["top_user"].config(text=top["name"])
+        self._pts_summary_labels["top_pts"].config(text=f"{top['points']:,}")
+        self._pts_summary_labels["clickers"].config(text=str(total_clickers))
+        self._pts_summary_labels["creations"].config(text=str(total_creations))
+
+    def _pts_on_select(self, event):
+        tree = self._pts_tree
+        sel = tree.selection()
+        if not sel:
+            return
+        values = tree.item(sel[0], "values")
+        if not values:
+            return
+        # Find the row in _pts_data by name (tree shows display name)
+        display_name = values[1]
+        matched = next((r for r in self._pts_data if r["name"] == display_name), None)
+        if not matched:
+            return
+
+        self._pts_selected_uid = matched["uid"]
+        self._pts_selected_name = matched["name"]
+        self._pts_detail_name.config(text=matched["name"])
+        self._pts_detail_pts.config(text=f"Points: {matched['points']:,}")
+        rate = matched["clickers"] * SHOP_CLICKER_RATE
+        self._pts_detail_clickers.config(
+            text=f"Clickers: {matched['clickers']}  (+{rate} pt/s passive)")
+
+        # Populate inventory listbox
+        lb = self._pts_inv_list
+        lb.delete(0, "end")
+        inv = matched["inv"]
+
+        slot = 1
+        for item in inv.get("point_items", []):
+            if item.get("type") == "clicker":
+                count = item.get("count", 1)
+                lb.insert("end", f"  i{slot}  🖱 Clicker ×{count}")
+                slot += 1
+
+        for creation in inv.get("creations", []):
+            name_c = creation.get("name", "?")
+            worth = creation.get("worth", 0)
+            lb.insert("end", f"  i{slot}  🛠 {name_c}  ({worth} pts)")
+            slot += 1
+
+        if slot == 1:
+            lb.insert("end", "  (empty)")
+
+    def _pts_adjust(self, action):
+        """Quick adjust points for the selected user."""
+        import tkinter.messagebox as mb
+        if not self._pts_selected_uid or not GAME_GROUP_ID:
+            self._pts_adj_status.config(text="No user selected.", fg="#ff3b30")
+            return
+
+        uid   = self._pts_selected_uid
+        uname = self._pts_selected_name
+
+        if action == "reset":
+            if not mb.askyesno("Confirm Reset", f"Reset {uname}'s points to 0?"):
+                return
+            record = _load_user_record(GAME_GROUP_ID, uid)
+            record["points"] = 0
+            _save_user_record(GAME_GROUP_ID, uid, record)
+            self._pts_adj_status.config(text=f"✅ Reset {uname} to 0.", fg="#34c759")
+            self._pts_refresh()
+            return
+
+        raw = self._pts_adj_var.get().strip()
+        try:
+            amount = int(raw)
+            if amount < 0:
+                raise ValueError
+        except ValueError:
+            self._pts_adj_status.config(text="Enter a valid positive number.", fg="#ff3b30")
+            return
+
+        if action == "add":
+            new_bal, capped = add_points(GAME_GROUP_ID, uid, uname, amount)
+            note = " (capped)" if capped else ""
+            self._pts_adj_status.config(text=f"✅ +{amount:,} → {new_bal:,}{note}", fg="#34c759")
+        elif action == "remove":
+            new_bal, _ = add_points(GAME_GROUP_ID, uid, uname, -amount)
+            self._pts_adj_status.config(text=f"✅ −{amount:,} → {new_bal:,}", fg="#34c759")
+        elif action == "set":
+            record = _load_user_record(GAME_GROUP_ID, uid)
+            record["points"] = amount
+            _save_user_record(GAME_GROUP_ID, uid, record)
+            self._pts_adj_status.config(text=f"✅ Set to {amount:,}", fg="#34c759")
+
+        self._pts_refresh()
+
     # ── Tab: AI Controls ──────────────────────────────────────────────────────
 
     def _build_tab_ai(self, nb):
@@ -6508,12 +7218,10 @@ def main():
         last_game_since_id = None
 
     # Start bot threads (daemon=True so they die if the process exits)
-    sender_thread  = threading.Thread(target=_message_sender_loop, daemon=True)
-    dev_thread     = threading.Thread(target=dev_poll_loop, daemon=True)
-    game_thread    = threading.Thread(target=game_poll_loop, daemon=True)
+    dev_thread = threading.Thread(target=dev_poll_loop, daemon=True)
+    game_thread = threading.Thread(target=game_poll_loop, daemon=True)
     clicker_thread = threading.Thread(target=clicker_loop, args=(lambda: GAME_GROUP_ID,), daemon=True)
 
-    sender_thread.start()   # start first — everything else calls send_message
     dev_thread.start()
     game_thread.start()
     clicker_thread.start()

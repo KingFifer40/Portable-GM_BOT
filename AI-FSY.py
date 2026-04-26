@@ -6309,16 +6309,59 @@ class ControlPanel:
         inv_frame.pack(fill="both", expand=True)
         inv_vsb = tk.Scrollbar(inv_frame, orient="vertical")
         self._pts_inv_list = tk.Listbox(inv_frame, font=("Courier", 9),
-                                         yscrollcommand=inv_vsb.set, height=8,
+                                         yscrollcommand=inv_vsb.set, height=5,
                                          selectmode="browse", relief="flat", bd=1)
         inv_vsb.config(command=self._pts_inv_list.yview)
         inv_vsb.pack(side="right", fill="y")
         self._pts_inv_list.pack(fill="both", expand=True)
 
-        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=8)
+        # ── Inventory action buttons ───────────────────────────────────────
+        inv_btn_row = tk.Frame(right)
+        inv_btn_row.pack(fill="x", pady=(4, 0))
+
+        tk.Button(inv_btn_row, text="🗑 Remove Selected", font=("Helvetica", 9),
+                  command=self._pts_inv_remove,
+                  bg="#ff3b30", fg="white", relief="flat",
+                  padx=6, pady=3).pack(side="left", padx=(0, 4))
+
+        tk.Button(inv_btn_row, text="🖱 +Clicker", font=("Helvetica", 9),
+                  command=self._pts_inv_add_clicker,
+                  bg="#5856d6", fg="white", relief="flat",
+                  padx=6, pady=3).pack(side="left")
+
+        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
+
+        # ── Inject custom item (prank / admin gift) ────────────────────────
+        tk.Label(right, text="Inject Item:", font=("Helvetica", 9, "bold")).pack(anchor="w")
+        tk.Label(right, text="Add any item directly to inventory. Worth can be\nnegative for prank items.",
+                 font=("Helvetica", 8), fg="#888888", justify="left").pack(anchor="w")
+
+        inject_grid = tk.Frame(right)
+        inject_grid.pack(fill="x", pady=(4, 0))
+
+        tk.Label(inject_grid, text="Name:", font=("Helvetica", 9), width=6, anchor="w").grid(
+            row=0, column=0, sticky="w")
+        self._pts_inject_name_var = tk.StringVar()
+        tk.Entry(inject_grid, textvariable=self._pts_inject_name_var,
+                 font=("Helvetica", 9), width=16).grid(row=0, column=1, sticky="ew", padx=(2, 0))
+
+        tk.Label(inject_grid, text="Worth:", font=("Helvetica", 9), width=6, anchor="w").grid(
+            row=1, column=0, sticky="w", pady=(4, 0))
+        self._pts_inject_worth_var = tk.StringVar(value="0")
+        tk.Entry(inject_grid, textvariable=self._pts_inject_worth_var,
+                 font=("Helvetica", 9), width=8).grid(row=1, column=1, sticky="w", padx=(2, 0), pady=(4, 0))
+
+        inject_grid.columnconfigure(1, weight=1)
+
+        tk.Button(right, text="💉 Inject Item", font=("Helvetica", 9),
+                  command=self._pts_inv_inject,
+                  bg="#ff9500", fg="white", relief="flat",
+                  padx=8, pady=3).pack(anchor="w", pady=(6, 0))
+
+        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
 
         # ── Quick point adjustment ─────────────────────────────────────────
-        tk.Label(right, text="Quick Adjust:", font=("Helvetica", 9, "bold")).pack(anchor="w")
+        tk.Label(right, text="Quick Points:", font=("Helvetica", 9, "bold")).pack(anchor="w")
 
         adj_row = tk.Frame(right)
         adj_row.pack(fill="x", pady=(4, 0))
@@ -6535,6 +6578,106 @@ class ControlPanel:
             _save_user_record(GAME_GROUP_ID, uid, record)
             self._pts_adj_status.config(text=f"✅ Set to {amount:,}", fg="#34c759")
 
+        self._pts_refresh()
+
+    def _pts_inv_remove(self):
+        """Remove the selected item from the selected user's inventory."""
+        import tkinter.messagebox as mb
+        if not self._pts_selected_uid or not GAME_GROUP_ID:
+            self._pts_adj_status.config(text="No user selected.", fg="#ff3b30")
+            return
+
+        sel = self._pts_inv_list.curselection()
+        if not sel:
+            self._pts_adj_status.config(text="Select an inventory item first.", fg="#ff3b30")
+            return
+
+        uid   = self._pts_selected_uid
+        uname = self._pts_selected_name
+        inv   = _load_inventory(GAME_GROUP_ID, uid)
+
+        # Map listbox index → actual item
+        items_in_order = []
+        for item in inv.get("point_items", []):
+            items_in_order.append(("point_items", item))
+        for creation in inv.get("creations", []):
+            items_in_order.append(("creations", creation))
+
+        idx = sel[0]
+        if idx >= len(items_in_order):
+            self._pts_adj_status.config(text="Item not found.", fg="#ff3b30")
+            return
+
+        section, item = items_in_order[idx]
+        if section == "point_items" and item.get("type") == "clicker":
+            label = f"Clicker ×{item.get('count', 1)}"
+        else:
+            label = f'"{item.get("name", "?")}" (worth {item.get("worth", 0)} pts)'
+
+        if not mb.askyesno("Confirm Remove", f"Remove {label} from {uname}'s inventory?"):
+            return
+
+        if section == "point_items":
+            inv["point_items"].remove(item)
+        else:
+            inv["creations"].remove(item)
+
+        _save_inventory(GAME_GROUP_ID, uid, inv)
+        self._pts_adj_status.config(text=f"✅ Removed {label} from {uname}.", fg="#34c759")
+        self._pts_refresh()
+
+    def _pts_inv_add_clicker(self):
+        """Add one clicker to the selected user's inventory."""
+        import tkinter.messagebox as mb
+        if not self._pts_selected_uid or not GAME_GROUP_ID:
+            self._pts_adj_status.config(text="No user selected.", fg="#ff3b30")
+            return
+
+        uid   = self._pts_selected_uid
+        uname = self._pts_selected_name
+        cur   = _get_clicker_count(GAME_GROUP_ID, uid)
+        _set_clicker_count(GAME_GROUP_ID, uid, cur + 1)
+        self._pts_adj_status.config(
+            text=f"✅ Added clicker to {uname} (now {cur + 1}×).", fg="#34c759")
+        self._pts_refresh()
+
+    def _pts_inv_inject(self):
+        """Inject an arbitrary creation item (name + worth) into the selected user's inventory.
+        Worth can be zero or negative for prank items."""
+        import tkinter.messagebox as mb
+        if not self._pts_selected_uid or not GAME_GROUP_ID:
+            self._pts_adj_status.config(text="No user selected.", fg="#ff3b30")
+            return
+
+        name_raw  = self._pts_inject_name_var.get().strip()
+        worth_raw = self._pts_inject_worth_var.get().strip()
+
+        if not name_raw:
+            self._pts_adj_status.config(text="Enter an item name.", fg="#ff3b30")
+            return
+        if len(name_raw) > ITEM_NAME_MAX_LEN:
+            self._pts_adj_status.config(
+                text=f"Name too long (max {ITEM_NAME_MAX_LEN} chars).", fg="#ff3b30")
+            return
+
+        try:
+            worth = int(worth_raw)
+        except ValueError:
+            self._pts_adj_status.config(text="Worth must be an integer.", fg="#ff3b30")
+            return
+
+        uid   = self._pts_selected_uid
+        uname = self._pts_selected_name
+        inv   = _load_inventory(GAME_GROUP_ID, uid)
+        inv["creations"].append({"name": name_raw, "worth": worth})
+        _save_inventory(GAME_GROUP_ID, uid, inv)
+
+        worth_str = f"{worth:+,} pts" if worth != 0 else "worthless"
+        self._pts_adj_status.config(
+            text=f'✅ Injected "{name_raw}" ({worth_str}) → {uname}.', fg="#34c759")
+        # Clear fields for next use
+        self._pts_inject_name_var.set("")
+        self._pts_inject_worth_var.set("0")
         self._pts_refresh()
 
     # ── Tab: AI Controls ──────────────────────────────────────────────────────

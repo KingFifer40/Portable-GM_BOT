@@ -120,6 +120,7 @@ _acquire_instance_lock()
 # Standard library + now-guaranteed third-party imports
 sys.stdout.reconfigure(encoding='utf-8')
 import time
+import queue
 import threading
 import traceback
 import requests
@@ -1666,6 +1667,47 @@ def gm_post(path, data=None):
 
 
 # ---------------------------------------------------------
+# Rate-limited outbox
+# GroupMe enforces ~1 POST /messages per second per token.
+# All sends go through _MSG_QUEUE so a single background thread
+# can pace them — no more 429s, no dropped messages.
+# ---------------------------------------------------------
+import queue as _queue_mod
+
+_MSG_QUEUE: _queue_mod.Queue = _queue_mod.Queue()
+_MIN_SEND_INTERVAL = 1.1   # seconds between sends (comfortably under 1/s limit)
+
+
+def _message_sender_loop():
+    """Drain _MSG_QUEUE one message at a time, enforcing the rate limit."""
+    _last_sent = [0.0]
+    while True:
+        item = _MSG_QUEUE.get()          # block until something arrives
+        elapsed = time.time() - _last_sent[0]
+        if elapsed < _MIN_SEND_INTERVAL:
+            time.sleep(_MIN_SEND_INTERVAL - elapsed)
+        for attempt in range(5):
+            try:
+                gm_post(f"/groups/{item['group_id']}/messages", item['data'])
+                _last_sent[0] = time.time()
+                break
+            except Exception as exc:
+                status = getattr(getattr(exc, 'response', None), 'status_code', None)
+                if status == 429:
+                    wait = 2 ** (attempt + 1)
+                    print(f"[sender] 429 rate-limit — backing off {wait}s (attempt {attempt + 1}/5)")
+                    time.sleep(wait)
+                    _last_sent[0] = time.time()
+                elif attempt < 4:
+                    print(f"[sender] send error attempt {attempt + 1}/5: {exc}")
+                    time.sleep(1.0)
+                else:
+                    print("[sender] gave up after 5 attempts:")
+                    traceback.print_exc()
+        _MSG_QUEUE.task_done()
+
+
+# ---------------------------------------------------------
 # Profile-picture swap helpers
 # ---------------------------------------------------------
 # Paths where the two avatar images are cached next to the script.
@@ -1865,13 +1907,38 @@ def send_message_as_bot(group_id: str, text: str, reply_to_id=None):
         _set_my_avatar(orig_url)
 
 
+
+def _sanitize_outgoing(text):
+    """Remove control chars, directional/bidi formatting from outgoing text."""
+    bad = (
+        list(range(0x00, 0x09)) +        # C0 controls (keep \\t=0x09)
+        list(range(0x0B, 0x0A + 1)) +    # 0x0B-0x0B (VT), skip \\n=0x0A
+        [0x0B, 0x0C] +                   # VT, FF
+        list(range(0x0E, 0x20)) +         # SO..US
+        list(range(0x7F, 0xA0)) +         # DEL + C1 controls
+        [0x00AD] +                        # soft hyphen
+        list(range(0x200B, 0x200A + 1)) + # zero-width space..right-to-left mark
+        [0x200B, 0x200C, 0x200D,
+         0x200E, 0x200F] +               # ZW-space, ZW-non-joiner, ZW-joiner, LRM, RLM
+        list(range(0x202A, 0x2030)) +    # directional formatting chars
+        [0x2060, 0x2061, 0x2062,
+         0x2063, 0x2064] +              # word joiner, invisible operators
+        list(range(0x2066, 0x2070)) +   # bidirectional isolate chars
+        [0xFEFF] +                      # BOM / zero-width no-break space
+        [0xFFFC] +                      # object replacement char
+        list(range(0xFFF9, 0xFFFF + 1)) # interlinear annotation + specials
+    )
+    table = str.maketrans({chr(c): "" for c in bad if 0 <= c <= 0x10FFFF})
+    return text.translate(table)
+
 def send_message(group_id, text, reply_to_id=None):
-    # Add clanker signature
+    # Sanitise text (strip control/directional chars), then add bot signature
+    text = _sanitize_outgoing(text)
     text = f"{text}\n-bot"
 
     data = {
         "message": {
-            "source_guid": f"cf-bot-{time.time()}",
+            "source_guid": f"cf-bot-{time.time()}-{id(text)}",
             "text": text,
         }
     }
@@ -1885,12 +1952,8 @@ def send_message(group_id, text, reply_to_id=None):
             }
         ]
 
-    try:
-        gm_post(f"/groups/{group_id}/messages", data)
-    except Exception:
-        print("Error sending message:")
-        traceback.print_exc()
-
+    # Enqueue — never call gm_post directly to avoid rate-limit storms
+    _MSG_QUEUE.put({"group_id": group_id, "data": data})
 
 def list_groups():
     groups = []
@@ -4140,10 +4203,7 @@ def handle_game_command(message):
             "\u2022 #help 8ball       \u2014 Magic 8-Ball\n"
             "\u2022 #help scripture   \u2014 Bible & Book of Mormon\n"
             "\u2022 #help ai          \u2014 AI chat & personality\n"
-            "\u2022 #help points      \u2014 Points sections index\n"
-            "\u2022 #help points 1    \u2014 Earning & spending\n"
-            "\u2022 #help points 2    \u2014 Shop & inventory\n"
-            "\u2022 #help points 3    \u2014 Trading & requests\n"
+            "\u2022 #help points      \u2014 Points, shop & trading\n"
             "\u2022 #help gamepoints  \u2014 Game betting & AI rewards\n"
             "\u2022 #help admin       \u2014 Admin feature controls\n"
             "\n"
@@ -6448,10 +6508,12 @@ def main():
         last_game_since_id = None
 
     # Start bot threads (daemon=True so they die if the process exits)
-    dev_thread = threading.Thread(target=dev_poll_loop, daemon=True)
-    game_thread = threading.Thread(target=game_poll_loop, daemon=True)
+    sender_thread  = threading.Thread(target=_message_sender_loop, daemon=True)
+    dev_thread     = threading.Thread(target=dev_poll_loop, daemon=True)
+    game_thread    = threading.Thread(target=game_poll_loop, daemon=True)
     clicker_thread = threading.Thread(target=clicker_loop, args=(lambda: GAME_GROUP_ID,), daemon=True)
 
+    sender_thread.start()   # start first — everything else calls send_message
     dev_thread.start()
     game_thread.start()
     clicker_thread.start()

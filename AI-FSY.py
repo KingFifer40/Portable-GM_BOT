@@ -1038,6 +1038,7 @@ POINTS_STEAL_MIN       = 5      # minimum points stolen by !steal
 POINTS_STEAL_MAX       = 30     # maximum points stolen by !steal
 POINTS_STEAL_CD        = 300    # !steal cooldown in seconds
 POINTS_COIN_CD         = 60     # !coin cooldown in seconds (1 min)
+POINTS_MAX_CAP         = 1000000  # maximum points any user can hold (0 = no cap)
 POINTS_C4_WIN          = 50     # base points won in PvP (from pvp_bets pool)
 POINTS_C4_WIN_AI_EASY  = 50     # points gained for beating Easy AI
 POINTS_C4_WIN_AI_MED   = 125    # points gained for beating Medium AI
@@ -1164,14 +1165,26 @@ def get_points(group_id, user_id, name=None):
 
 
 def add_points(group_id, user_id, name, delta):
-    """Add or subtract points. Cannot go below 0. Returns new total."""
+    """Add or subtract points. Cannot go below 0 or above POINTS_MAX_CAP.
+    Returns (new_total, capped) where capped=True if the cap was hit."""
     uid    = str(user_id)
     record = _load_user_record(group_id, uid)
     record["name"]   = name or record.get("name") or uid
     current = max(0, record.get("points", 0))  # clamp stored negatives defensively
-    record["points"] = max(0, current + delta)
+    new_val = current + delta
+    capped = False
+    if POINTS_MAX_CAP > 0 and new_val > POINTS_MAX_CAP and delta > 0:
+        new_val = POINTS_MAX_CAP
+        capped = True
+    record["points"] = max(0, new_val)
     _save_user_record(group_id, uid, record)
-    return record["points"]
+    return record["points"], capped
+
+
+def _add_pts(group_id, user_id, name, delta):
+    """Convenience wrapper — returns just the new balance (ignores cap flag)."""
+    bal, _ = add_points(group_id, user_id, name, delta)
+    return bal
 
 
 def transfer_points(group_id, from_id, from_name, to_id, to_name, amount):
@@ -1197,6 +1210,199 @@ def points_leaderboard(group_id, top_n=None):
     ledger = load_points(group_id)
     ranked = sorted(ledger.values(), key=lambda e: e.get("points", 0), reverse=True)
     return ranked[:top_n]
+
+
+
+# =============================================================================
+# INVENTORY & SHOP SYSTEM
+# =============================================================================
+
+SHOP_CLICKER_COST = 10000   # points to buy a clicker
+SHOP_CLICKER_RATE = 1       # points per second per clicker owned
+
+ITEM_NAME_MAX_LEN = 20
+CREATION_MIN_WORTH = 20
+
+
+def _inventory_path(group_id, user_id):
+    cid = _canonical_group_id(group_id)
+    inv_dir = os.path.join(SCRIPT_DIR, "groups", cid, "inventory")
+    os.makedirs(inv_dir, exist_ok=True)
+    return os.path.join(inv_dir, f"{user_id}.json")
+
+
+def _load_inventory(group_id, user_id):
+    path = _inventory_path(group_id, str(user_id))
+    if not os.path.exists(path):
+        return {"point_items": [], "creations": []}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data.setdefault("point_items", [])
+        data.setdefault("creations", [])
+        return data
+    except Exception:
+        return {"point_items": [], "creations": []}
+
+
+def _save_inventory(group_id, user_id, data):
+    path = _inventory_path(group_id, str(user_id))
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"Warning: could not save inventory for {user_id}: {e}")
+
+
+def _get_clicker_count(group_id, user_id):
+    inv = _load_inventory(group_id, user_id)
+    for item in inv["point_items"]:
+        if item.get("type") == "clicker":
+            return item.get("count", 0)
+    return 0
+
+
+def _set_clicker_count(group_id, user_id, count):
+    inv = _load_inventory(group_id, user_id)
+    for item in inv["point_items"]:
+        if item.get("type") == "clicker":
+            if count <= 0:
+                inv["point_items"].remove(item)
+            else:
+                item["count"] = count
+            _save_inventory(group_id, user_id, inv)
+            return
+    if count > 0:
+        inv["point_items"].append({"type": "clicker", "count": count})
+        _save_inventory(group_id, user_id, inv)
+
+
+def _requests_path(group_id, user_id):
+    cid = _canonical_group_id(group_id)
+    req_dir = os.path.join(SCRIPT_DIR, "groups", cid, "requests")
+    os.makedirs(req_dir, exist_ok=True)
+    return os.path.join(req_dir, f"{user_id}.json")
+
+
+def _load_requests(group_id, user_id):
+    path = _requests_path(group_id, str(user_id))
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _save_requests(group_id, user_id, data):
+    path = _requests_path(group_id, str(user_id))
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"Warning: could not save requests for {user_id}: {e}")
+
+
+def _all_creation_names(group_id):
+    """Return a set of all creation names (lowercase) across all users in a group."""
+    cid = _canonical_group_id(group_id)
+    inv_dir = os.path.join(SCRIPT_DIR, "groups", cid, "inventory")
+    if not os.path.exists(inv_dir):
+        return set()
+    names = set()
+    for fname in os.listdir(inv_dir):
+        if fname.endswith(".json"):
+            uid = fname[:-5]
+            inv = _load_inventory(group_id, uid)
+            for c in inv.get("creations", []):
+                names.add(c.get("name", "").lower())
+    return names
+
+
+def _inventory_display(inv, owner_name):
+    """Format a user's inventory as a readable string."""
+    lines = [f"\U0001f392 Inventory of {owner_name}:"]
+
+    if inv["point_items"]:
+        lines.append("")
+        lines.append("\U0001f4c8 Point Gaining Items:")
+        idx = 1
+        for item in inv["point_items"]:
+            if item.get("type") == "clicker":
+                count = item.get("count", 0)
+                rate = count * SHOP_CLICKER_RATE
+                lines.append(f"  i{idx}. Clicker \xd7{count} \u2192 +{rate} pt/s")
+                idx += 1
+    else:
+        lines.append("  (no point items)")
+
+    if inv["creations"]:
+        lines.append("")
+        lines.append("\U0001f6e0\ufe0f Creations:")
+        offset = len(inv["point_items"])
+        for i, c in enumerate(inv["creations"]):
+            slot = offset + i + 1
+            lines.append(f"  i{slot}. \"{c['name']}\" \u2014 worth {c['worth']} pts")
+    else:
+        lines.append("")
+        lines.append("  (no creations)")
+
+    return "\n".join(lines)
+
+
+def _get_item_by_slot(inv, slot_number):
+    """
+    Returns (section, index, item_dict) for a 1-based slot number.
+    section: "point_items" or "creations"
+    Returns (None, None, None) if slot is out of range.
+    """
+    point_count = len(inv["point_items"])
+    creation_count = len(inv["creations"])
+    if slot_number < 1 or slot_number > point_count + creation_count:
+        return None, None, None
+    if slot_number <= point_count:
+        idx = slot_number - 1
+        return "point_items", idx, inv["point_items"][idx]
+    else:
+        idx = slot_number - point_count - 1
+        return "creations", idx, inv["creations"][idx]
+
+
+def run_clicker_tick(group_id):
+    """Award clicker passive income to all users who own clickers. Silent at cap."""
+    cid = _canonical_group_id(group_id)
+    inv_dir = os.path.join(SCRIPT_DIR, "groups", cid, "inventory")
+    if not os.path.exists(inv_dir):
+        return
+    for fname in os.listdir(inv_dir):
+        if not fname.endswith(".json"):
+            continue
+        uid = fname[:-5]
+        count = _get_clicker_count(group_id, uid)
+        if count <= 0:
+            continue
+        pts = count * SHOP_CLICKER_RATE
+        record = _load_user_record(group_id, uid)
+        current = max(0, record.get("points", 0))
+        if POINTS_MAX_CAP > 0 and current >= POINTS_MAX_CAP:
+            continue  # silently skip — cap reached
+        new_val = min(current + pts, POINTS_MAX_CAP) if POINTS_MAX_CAP > 0 else current + pts
+        record["points"] = new_val
+        _save_user_record(group_id, uid, record)
+
+
+def clicker_loop(get_group_id_fn):
+    """Background thread that ticks clicker income every second."""
+    while True:
+        time.sleep(1)
+        try:
+            gid = get_group_id_fn()
+            if gid:
+                run_clicker_tick(gid)
+        except Exception as e:
+            print(f"[clicker] Error: {e}")
+
 
 def _group_config_path(group_id):
     groups_dir = os.path.join(SCRIPT_DIR, "groups")
@@ -1295,6 +1501,7 @@ def apply_settings_from_config():
     global POINTS_FIH_MIN, POINTS_FIH_MAX, POINTS_FIH_CD, POINTS_FIH_LOSE_CHANCE
     global POINTS_STEAL_MIN, POINTS_STEAL_MAX, POINTS_STEAL_CD
     global POINTS_C4_WIN, POINTS_C4_WIN_AI, LEADERBOARD_SIZE
+    global POINTS_COIN_CD, POINTS_MAX_CAP
     global FIH_WIN_MESSAGES, FIH_LOSE_MESSAGES, FIH_COOLDOWN_MESSAGE
     global STEAL_SUCCESS_MESSAGES, STEAL_EMPTY_MESSAGE, STEAL_COOLDOWN_MESSAGE
 
@@ -1334,6 +1541,8 @@ def apply_settings_from_config():
     POINTS_C4_WIN          = _int("c4_win",    POINTS_C4_WIN)
     POINTS_C4_WIN_AI       = _int("c4_win_ai", POINTS_C4_WIN_AI)
     LEADERBOARD_SIZE       = _int("lb_size",   LEADERBOARD_SIZE)
+    POINTS_COIN_CD         = _int("coin_cd",   POINTS_COIN_CD)
+    POINTS_MAX_CAP         = _int("points_max_cap", POINTS_MAX_CAP)
 
     # AI cooldowns
     global AI_COOLDOWN_SECONDS, AISET_COOLDOWN_SECONDS, AI_MEMORY_MAX_TURNS
@@ -1988,13 +2197,13 @@ def _refund_all_bets(group_id):
         if amt > 0:
             pdata = game_state["players"].get(uid, {})
             name = pdata.get("name") or uid
-            new_bal = add_points(group_id, uid, name, amt)
+            new_bal = _add_pts(group_id, uid, name, amt)
             lines.append(f"  {name}: +{amt} pts refunded ({new_bal} pts)")
     # Refund spectator bets
     for uid, bdata in game_state["spectator_bets"].items():
         amt = bdata["amount"]
         name = bdata["bettor_name"]
-        new_bal = add_points(group_id, uid, name, amt)
+        new_bal = _add_pts(group_id, uid, name, amt)
         lines.append(f"  {name}: +{amt} pts refunded ({new_bal} pts)")
     return lines
 
@@ -2036,7 +2245,7 @@ def _settle_spectator_bets(group_id, winner_id):
         # Nobody bet on the winner — refund all losers (no opposing pool)
         for uid, bdata in losing_bets.items():
             payout = bdata["amount"]
-            new_bal = add_points(group_id, uid, bdata["bettor_name"], payout)
+            new_bal = _add_pts(group_id, uid, bdata["bettor_name"], payout)
             lines.append(f"  🔄 {bdata['bettor_name']} bet on {bdata['on_name']} (lost), but no one bet on the winner — refunded {payout} pts. ({new_bal} pts)")
         return lines
 
@@ -2044,7 +2253,7 @@ def _settle_spectator_bets(group_id, winner_id):
         # Nobody bet on the loser — winners just get their stake back, no profit
         for uid, bdata in winning_bets.items():
             payout = bdata["amount"]
-            new_bal = add_points(group_id, uid, bdata["bettor_name"], payout)
+            new_bal = _add_pts(group_id, uid, bdata["bettor_name"], payout)
             lines.append(f"  🔄 {bdata['bettor_name']} bet on the winner, but no one bet against them — refunded {payout} pts. ({new_bal} pts)")
         return lines
 
@@ -2055,7 +2264,7 @@ def _settle_spectator_bets(group_id, winner_id):
         # Proportional share of the loser pool
         losers_share = round(stake / total_winning_stake * total_losing_stake)
         payout = stake + losers_share
-        new_bal = add_points(group_id, uid, bdata["bettor_name"], payout)
+        new_bal = _add_pts(group_id, uid, bdata["bettor_name"], payout)
         profit = payout - stake
         lines.append(
             f"  🎉 {bdata['bettor_name']} bet {stake} pts on {bdata['on_name']} and wins {profit} pts profit! "
@@ -3017,7 +3226,7 @@ def handle_game_command(message):
         # 1-in-1000 chance of a GOLDEN FIH!
         if random.randint(1, 1000) == 1:
             golden_pts = 2000
-            new_bal = add_points(GAME_GROUP_ID, sender_id, sender_name, golden_pts)
+            new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, golden_pts)
             send_message(
                 GAME_GROUP_ID,
                 f"✨🐟✨ GOLDEN FIH!! ✨🐟✨\n"
@@ -3035,12 +3244,12 @@ def handle_game_command(message):
         if lose:
             # Cap the loss to actual balance so the message is accurate
             actual_loss = min(amt, cur_bal)
-            new_bal = add_points(GAME_GROUP_ID, sender_id, sender_name, -actual_loss)
+            new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, -actual_loss)
             pool   = FIH_LOSE_MESSAGES
             prefix = "🦀 "
             text   = random.choice(pool).format(name=sender_name, pts=actual_loss, bal=new_bal)
         else:
-            new_bal = add_points(GAME_GROUP_ID, sender_id, sender_name, amt)
+            new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, amt)
             pool   = FIH_WIN_MESSAGES
             prefix = "🎣 "
             text   = random.choice(pool).format(name=sender_name, pts=amt, bal=new_bal)
@@ -3140,19 +3349,20 @@ def handle_game_command(message):
         won = (chosen_heads == result_heads)
 
         if won:
-            new_bal = add_points(GAME_GROUP_ID, sender_id, sender_name, bet)
+            new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, bet)
             send_message(GAME_GROUP_ID,
                 f"🪙 {result_word}! {sender_name} wins {bet} pts! ({new_bal} pts total)",
                 reply_to_id=msg_id)
         else:
-            new_bal = add_points(GAME_GROUP_ID, sender_id, sender_name, -bet)
+            new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, -bet)
             send_message(GAME_GROUP_ID,
                 f"🪙 {result_word}! {sender_name} loses {bet} pts. ({new_bal} pts total)",
                 reply_to_id=msg_id)
         return
 
     # !give @mentioned_user amount  — give points to another user
-    if cmd == "!give":
+    # (item gifting with i<N> slots is handled further below)
+    if cmd == "!give" and not (len(parts) >= 3 and parts[-1].lower().startswith("i") and parts[-1][1:].isdigit()):
         if len(parts) < 3:
             send_message(GAME_GROUP_ID,
                 "Usage: !give @username <points>\nExample: !give @PlayerName 50",
@@ -3244,10 +3454,430 @@ def handle_game_command(message):
         if column_letter_to_index(possible_col) is not None:
             send_message(
                 GAME_GROUP_ID,
-                f"💡 Tip: use #{possible_col.upper()} (with a #) to drop a piece in that column.",
+                f"\U0001f4a1 Tip: use #{possible_col.upper()} (with a #) to drop a piece in that column.",
                 reply_to_id=msg_id,
             )
             return
+
+    # ── SHOP: !shop ───────────────────────────────────────────────────────────
+    if cmd == "!shop":
+        shop_text = (
+            "\U0001f3ea *Point Item Shop:*\n"
+            f"\u2022 Clicker \u2014 {SHOP_CLICKER_COST:,} pts\n"
+            f"  Earns {SHOP_CLICKER_RATE} pt/s passively per clicker owned.\n"
+            "  Owning multiple multiplies the rate!\n"
+            "\n"
+            "Use !buy clicker to purchase."
+        )
+        send_message(GAME_GROUP_ID, shop_text, reply_to_id=msg_id)
+        return
+
+    # ── SHOP: !buy <item> ─────────────────────────────────────────────────────
+    if cmd == "!buy":
+        if len(parts) < 2:
+            send_message(GAME_GROUP_ID, "Usage: !buy clicker", reply_to_id=msg_id)
+            return
+        item_arg = parts[1].lower()
+        if item_arg == "clicker":
+            bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
+            if bal < SHOP_CLICKER_COST:
+                send_message(
+                    GAME_GROUP_ID,
+                    f"\u274c You need {SHOP_CLICKER_COST:,} pts to buy a Clicker. You have {bal:,} pts.",
+                    reply_to_id=msg_id,
+                )
+                return
+            new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, -SHOP_CLICKER_COST)
+            cur_count = _get_clicker_count(GAME_GROUP_ID, sender_id)
+            _set_clicker_count(GAME_GROUP_ID, sender_id, cur_count + 1)
+            new_count = cur_count + 1
+            rate = new_count * SHOP_CLICKER_RATE
+            send_message(
+                GAME_GROUP_ID,
+                f"\u2705 {sender_name} bought a Clicker! "
+                f"(Now {new_count}\xd7 Clicker \u2192 +{rate} pt/s)\n"
+                f"Balance: {new_bal:,} pts",
+                reply_to_id=msg_id,
+            )
+        else:
+            send_message(GAME_GROUP_ID, f"\u274c Unknown item. Try !shop to see what\'s available.", reply_to_id=msg_id)
+        return
+
+    # ── CREATIONS: !create "<name>" <worth>  (any order) ─────────────────────
+    if cmd == "!create":
+        import re as _re2
+        arg_text = text[len("!create"):].strip()
+        quote_match = _re2.search(r'"([^"]+)"', arg_text)
+        if not quote_match:
+            send_message(
+                GAME_GROUP_ID,
+                '\u274c Usage: !create "Item Name" <worth>\nExample: !create "The Left Kidney" 200',
+                reply_to_id=msg_id,
+            )
+            return
+        creation_name = quote_match.group(1).strip()
+        if len(creation_name) > ITEM_NAME_MAX_LEN:
+            send_message(
+                GAME_GROUP_ID,
+                f"\u274c Item name too long (max {ITEM_NAME_MAX_LEN} characters).",
+                reply_to_id=msg_id,
+            )
+            return
+        if not creation_name:
+            send_message(GAME_GROUP_ID, "\u274c Item name cannot be empty.", reply_to_id=msg_id)
+            return
+        remaining = arg_text[:quote_match.start()] + arg_text[quote_match.end():]
+        worth_match = _re2.search(r'\b(\d+)\b', remaining)
+        if not worth_match:
+            send_message(
+                GAME_GROUP_ID,
+                '\u274c Please include a point worth. Example: !create "The Left Kidney" 200',
+                reply_to_id=msg_id,
+            )
+            return
+        worth = int(worth_match.group(1))
+        if worth < CREATION_MIN_WORTH:
+            send_message(
+                GAME_GROUP_ID,
+                f"\u274c Minimum creation worth is {CREATION_MIN_WORTH} pts.",
+                reply_to_id=msg_id,
+            )
+            return
+        existing_names = _all_creation_names(GAME_GROUP_ID)
+        if creation_name.lower() in existing_names:
+            send_message(
+                GAME_GROUP_ID,
+                f'\u274c An item named "{creation_name}" already exists. Choose a unique name.',
+                reply_to_id=msg_id,
+            )
+            return
+        bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
+        if bal < worth:
+            send_message(
+                GAME_GROUP_ID,
+                f"\u274c You need {worth} pts to create this item. You have {bal} pts.",
+                reply_to_id=msg_id,
+            )
+            return
+        new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, -worth)
+        inv = _load_inventory(GAME_GROUP_ID, sender_id)
+        inv["creations"].append({"name": creation_name, "worth": worth})
+        _save_inventory(GAME_GROUP_ID, sender_id, inv)
+        send_message(
+            GAME_GROUP_ID,
+            f'\U0001f6e0\ufe0f {sender_name} created "{creation_name}" (worth {worth} pts)!\n'
+            f"Balance: {new_bal} pts",
+            reply_to_id=msg_id,
+        )
+        return
+
+    # ── INVENTORY: !items  or  !items @user ───────────────────────────────────
+    if cmd == "!items":
+        target_id = sender_id
+        target_name = sender_name
+        for att in message.get("attachments", []):
+            if att.get("type") == "mentions":
+                for uid in att.get("user_ids", []):
+                    target_id = uid
+                    target_name = _known_names.get(str(uid), str(uid))
+                    break
+        if target_id == sender_id and len(parts) >= 2:
+            mention_text_it = " ".join(parts[1:]).lstrip("@").strip().lower()
+            for uid, name_val in _known_names.items():
+                if name_val.lower() == mention_text_it or mention_text_it in name_val.lower():
+                    target_id = uid
+                    target_name = name_val
+                    break
+        inv = _load_inventory(GAME_GROUP_ID, target_id)
+        send_message(GAME_GROUP_ID, _inventory_display(inv, target_name), reply_to_id=msg_id)
+        return
+
+    # ── GIFT: !give @user i<N>  (item gift — different from points give) ──────
+    if cmd == "!give" and len(parts) >= 3 and parts[-1].lower().startswith("i") and parts[-1][1:].isdigit():
+        slot = int(parts[-1][1:])
+        mention_text_gv = " ".join(parts[1:-1]).lstrip("@").strip().lower()
+        target_id_gv = None
+        target_name_gv = None
+        for att in message.get("attachments", []):
+            if att.get("type") == "mentions":
+                for uid in att.get("user_ids", []):
+                    if str(uid) != str(sender_id):
+                        target_id_gv = uid
+                        target_name_gv = _known_names.get(str(uid), str(uid))
+                        break
+        if target_id_gv is None and mention_text_gv:
+            for uid, name_val in _known_names.items():
+                if uid == str(sender_id):
+                    continue
+                if name_val.lower() == mention_text_gv or mention_text_gv in name_val.lower():
+                    target_id_gv = uid
+                    target_name_gv = name_val
+                    break
+        if target_id_gv is None or str(target_id_gv) == str(sender_id):
+            send_message(GAME_GROUP_ID, "\u274c Couldn\'t find that user to gift to.", reply_to_id=msg_id)
+            return
+        inv = _load_inventory(GAME_GROUP_ID, sender_id)
+        section, idx, item = _get_item_by_slot(inv, slot)
+        if section is None:
+            send_message(GAME_GROUP_ID, f"\u274c You don\'t have an item in slot i{slot}.", reply_to_id=msg_id)
+            return
+        if section == "point_items" and item.get("type") == "clicker":
+            if item.get("count", 0) > 1:
+                inv["point_items"][idx]["count"] -= 1
+            else:
+                inv["point_items"].pop(idx)
+            _save_inventory(GAME_GROUP_ID, sender_id, inv)
+            recv_inv = _load_inventory(GAME_GROUP_ID, target_id_gv)
+            found = False
+            for it in recv_inv["point_items"]:
+                if it.get("type") == "clicker":
+                    it["count"] = it.get("count", 0) + 1
+                    found = True
+                    break
+            if not found:
+                recv_inv["point_items"].append({"type": "clicker", "count": 1})
+            _save_inventory(GAME_GROUP_ID, target_id_gv, recv_inv)
+            send_message(
+                GAME_GROUP_ID,
+                f"\U0001f381 {sender_name} gifted a Clicker to {target_name_gv}!",
+                reply_to_id=msg_id,
+            )
+        elif section == "creations":
+            creation = inv["creations"].pop(idx)
+            _save_inventory(GAME_GROUP_ID, sender_id, inv)
+            recv_inv = _load_inventory(GAME_GROUP_ID, target_id_gv)
+            recv_inv["creations"].append(creation)
+            _save_inventory(GAME_GROUP_ID, target_id_gv, recv_inv)
+            send_message(
+                GAME_GROUP_ID,
+                f'\U0001f381 {sender_name} gifted "{creation["name"]}" (worth {creation["worth"]} pts) to {target_name_gv}!',
+                reply_to_id=msg_id,
+            )
+        else:
+            send_message(GAME_GROUP_ID, "\u274c That item can\'t be gifted.", reply_to_id=msg_id)
+        return
+
+    # ── SELL TO BOT: !sellitem i<N> ───────────────────────────────────────────
+    if cmd == "!sellitem":
+        if len(parts) < 2 or not parts[1].lower().startswith("i") or not parts[1][1:].isdigit():
+            send_message(GAME_GROUP_ID, "Usage: !sellitem i<slot>  e.g. !sellitem i2", reply_to_id=msg_id)
+            return
+        slot = int(parts[1][1:])
+        inv = _load_inventory(GAME_GROUP_ID, sender_id)
+        section, idx, item = _get_item_by_slot(inv, slot)
+        if section is None:
+            send_message(GAME_GROUP_ID, f"\u274c You don\'t have an item in slot i{slot}.", reply_to_id=msg_id)
+            return
+        if section == "point_items":
+            send_message(GAME_GROUP_ID, "\u274c Point items (like Clickers) cannot be sold to the bot.", reply_to_id=msg_id)
+            return
+        creation = inv["creations"].pop(idx)
+        _save_inventory(GAME_GROUP_ID, sender_id, inv)
+        worth = creation["worth"]
+        new_bal, capped = add_points(GAME_GROUP_ID, sender_id, sender_name, worth)
+        cap_note = f"\n\u26a0\ufe0f You\'ve hit the point cap of {POINTS_MAX_CAP:,}!" if capped else ""
+        send_message(
+            GAME_GROUP_ID,
+            f'\U0001f4b0 {sender_name} sold "{creation["name"]}" to the bot for {worth} pts!\n'
+            f"Balance: {new_bal:,} pts{cap_note}",
+            reply_to_id=msg_id,
+        )
+        return
+
+    # ── REQUEST: !request @user i<N>  or  !request @user <pts> ───────────────
+    if cmd == "!request":
+        if len(parts) < 3:
+            send_message(
+                GAME_GROUP_ID,
+                "Usage:\n"
+                "  !request @user i<slot> \u2014 ask to buy their item\n"
+                "  !request @user <amount> \u2014 ask for points",
+                reply_to_id=msg_id,
+            )
+            return
+        arg_r = parts[-1]
+        is_item_req = arg_r.lower().startswith("i") and arg_r[1:].isdigit()
+        is_pts_req  = arg_r.isdigit()
+        if not is_item_req and not is_pts_req:
+            send_message(GAME_GROUP_ID, "\u274c Last arg must be i<slot> for an item or a number for points.", reply_to_id=msg_id)
+            return
+        mention_text_rq = " ".join(parts[1:-1]).lstrip("@").strip().lower()
+        target_id_rq = None
+        target_name_rq = None
+        for att in message.get("attachments", []):
+            if att.get("type") == "mentions":
+                for uid in att.get("user_ids", []):
+                    if str(uid) != str(sender_id):
+                        target_id_rq = uid
+                        target_name_rq = _known_names.get(str(uid), str(uid))
+                        break
+        if target_id_rq is None and mention_text_rq:
+            for uid, name_val in _known_names.items():
+                if uid == str(sender_id):
+                    continue
+                if name_val.lower() == mention_text_rq or mention_text_rq in name_val.lower():
+                    target_id_rq = uid
+                    target_name_rq = name_val
+                    break
+        if target_id_rq is None or str(target_id_rq) == str(sender_id):
+            send_message(GAME_GROUP_ID, "\u274c Couldn\'t find that user.", reply_to_id=msg_id)
+            return
+        if is_item_req:
+            slot = int(arg_r[1:])
+            inv = _load_inventory(GAME_GROUP_ID, target_id_rq)
+            section, idx, item = _get_item_by_slot(inv, slot)
+            if section is None:
+                send_message(GAME_GROUP_ID, f"\u274c {target_name_rq} doesn\'t have an item in slot i{slot}.", reply_to_id=msg_id)
+                return
+            if section == "point_items":
+                send_message(GAME_GROUP_ID, "\u274c Point items can only be gifted with !give, not requested.", reply_to_id=msg_id)
+                return
+            creation = item
+            req = {
+                "from_id": str(sender_id), "from_name": sender_name,
+                "type": "item", "item_index": idx,
+                "item_name": creation["name"], "item_worth": creation["worth"],
+                "points_amount": None,
+            }
+            reqs = _load_requests(GAME_GROUP_ID, target_id_rq)
+            reqs.append(req)
+            _save_requests(GAME_GROUP_ID, target_id_rq, reqs)
+            send_message(
+                GAME_GROUP_ID,
+                f'\U0001f4e8 {sender_name} requested to buy "{creation["name"]}" (worth {creation["worth"]} pts) from {target_name_rq}.\n'
+                f"{target_name_rq}: check !listrequests and use !yes or !no to respond.",
+                reply_to_id=msg_id,
+            )
+        else:
+            pts_amount_rq = int(arg_r)
+            if pts_amount_rq <= 0:
+                send_message(GAME_GROUP_ID, "\u274c Amount must be positive.", reply_to_id=msg_id)
+                return
+            req = {
+                "from_id": str(sender_id), "from_name": sender_name,
+                "type": "points", "item_index": None,
+                "item_name": None, "item_worth": None,
+                "points_amount": pts_amount_rq,
+            }
+            reqs = _load_requests(GAME_GROUP_ID, target_id_rq)
+            reqs.append(req)
+            _save_requests(GAME_GROUP_ID, target_id_rq, reqs)
+            send_message(
+                GAME_GROUP_ID,
+                f"\U0001f4e8 {sender_name} requested {pts_amount_rq} pts from {target_name_rq}.\n"
+                f"{target_name_rq}: check !listrequests and use !yes or !no to respond.",
+                reply_to_id=msg_id,
+            )
+        return
+
+    # ── LIST REQUESTS: !listrequests ──────────────────────────────────────────
+    if cmd == "!listrequests":
+        reqs = _load_requests(GAME_GROUP_ID, sender_id)
+        if not reqs:
+            send_message(GAME_GROUP_ID, "\U0001f4ed You have no pending requests.", reply_to_id=msg_id)
+            return
+        lines = [f"\U0001f4ec Your Pending Requests ({len(reqs)} total):"]
+        for i, req in enumerate(reqs, 1):
+            from_name = req.get("from_name", "?")
+            if req["type"] == "item":
+                lines.append(f'  {i}. {from_name} wants to buy "{req["item_name"]}" (worth {req.get("item_worth", "?")} pts)')
+            else:
+                lines.append(f"  {i}. {from_name} is asking for {req['points_amount']} pts")
+        lines.append("")
+        lines.append("Use !yes <number> or !no <number> to respond.")
+        send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
+        return
+
+    # ── ACCEPT REQUEST: !yes <N> ──────────────────────────────────────────────
+    if cmd == "!yes":
+        if len(parts) < 2 or not parts[1].isdigit():
+            send_message(GAME_GROUP_ID, "Usage: !yes <request number>", reply_to_id=msg_id)
+            return
+        req_num = int(parts[1])
+        reqs = _load_requests(GAME_GROUP_ID, sender_id)
+        if req_num < 1 or req_num > len(reqs):
+            send_message(GAME_GROUP_ID, f"\u274c No request #{req_num}. Use !listrequests to see yours.", reply_to_id=msg_id)
+            return
+        req = reqs.pop(req_num - 1)
+        _save_requests(GAME_GROUP_ID, sender_id, reqs)
+        from_id = req["from_id"]
+        from_name = req["from_name"]
+        if req["type"] == "item":
+            inv = _load_inventory(GAME_GROUP_ID, sender_id)
+            found_idx = None
+            for ci, c in enumerate(inv["creations"]):
+                if c["name"] == req["item_name"]:
+                    found_idx = ci
+                    break
+            if found_idx is None:
+                send_message(
+                    GAME_GROUP_ID,
+                    f'\u274c Item "{req["item_name"]}" no longer exists in your inventory.',
+                    reply_to_id=msg_id,
+                )
+                return
+            creation = inv["creations"][found_idx]
+            worth = creation["worth"]
+            buyer_bal = get_points(GAME_GROUP_ID, from_id, from_name)
+            if buyer_bal < worth:
+                send_message(
+                    GAME_GROUP_ID,
+                    f'\u274c {from_name} can\'t afford "{creation["name"]}" ({worth} pts). Sale cancelled.',
+                    reply_to_id=msg_id,
+                )
+                return
+            inv["creations"].pop(found_idx)
+            _save_inventory(GAME_GROUP_ID, sender_id, inv)
+            buyer_new = _add_pts(GAME_GROUP_ID, from_id, from_name, -worth)
+            seller_new, capped = add_points(GAME_GROUP_ID, sender_id, sender_name, worth)
+            recv_inv = _load_inventory(GAME_GROUP_ID, from_id)
+            recv_inv["creations"].append(creation)
+            _save_inventory(GAME_GROUP_ID, from_id, recv_inv)
+            cap_note = f"\n\u26a0\ufe0f {sender_name} hit the point cap!" if capped else ""
+            send_message(
+                GAME_GROUP_ID,
+                f'\U0001f91d Sale complete!\n{sender_name} sold "{creation["name"]}" to {from_name} for {worth} pts.\n'
+                f"{sender_name}: {seller_new} pts | {from_name}: {buyer_new} pts{cap_note}",
+                reply_to_id=msg_id,
+            )
+        else:
+            pts_amount = req["points_amount"]
+            bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
+            actual = min(pts_amount, bal)
+            if actual <= 0:
+                send_message(GAME_GROUP_ID, f"\u274c You have no points to send to {from_name}.", reply_to_id=msg_id)
+                return
+            taken, s_new, t_new = transfer_points(
+                GAME_GROUP_ID, sender_id, sender_name, from_id, from_name, actual
+            )
+            send_message(
+                GAME_GROUP_ID,
+                f"\u2705 {sender_name} sent {taken} pts to {from_name}.\n"
+                f"{sender_name}: {s_new} pts | {from_name}: {t_new} pts",
+                reply_to_id=msg_id,
+            )
+        return
+
+    # ── DECLINE REQUEST: !no <N> ──────────────────────────────────────────────
+    if cmd == "!no":
+        if len(parts) < 2 or not parts[1].isdigit():
+            send_message(GAME_GROUP_ID, "Usage: !no <request number>", reply_to_id=msg_id)
+            return
+        req_num = int(parts[1])
+        reqs = _load_requests(GAME_GROUP_ID, sender_id)
+        if req_num < 1 or req_num > len(reqs):
+            send_message(GAME_GROUP_ID, f"\u274c No request #{req_num}. Use !listrequests to see yours.", reply_to_id=msg_id)
+            return
+        req = reqs.pop(req_num - 1)
+        _save_requests(GAME_GROUP_ID, sender_id, reqs)
+        from_name = req.get("from_name", "?")
+        desc = f'buy "{req["item_name"]}"' if req["type"] == "item" else f"receive {req['points_amount']} pts"
+        send_message(
+            GAME_GROUP_ID,
+            f"\u274c {sender_name} declined {from_name}\'s request to {desc}.",
+            reply_to_id=msg_id,
+        )
+        return
 
     # -----------------------------
     # All remaining commands must start with "#"
@@ -3373,23 +4003,89 @@ def handle_game_command(message):
                 send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
                 return
 
-            # POINTS HELP
+            # POINTS HELP — paginated
             if topic == "points":
-                help_text = (
-                    "💰 *Points Commands:*\n"
-                    "• !points — Check your point balance\n"
-                    "• !fih — Fish for points — win or lose! (5 min cooldown)\n"
-                    "• !steal — Steal points from a random person (5 min cooldown)\n"
-                    "• !give @username <amount> — Give points to another player\n"
-                    "  Example: !give @PlayerName 50\n"
-                    "• !coin <h/t> <bet> — Flip a coin to gamble points\n"
-                    "  Example: !coin h 50\n"
-                    "  Betting your full balance or more = All In!\n"
-                    "• #leaderboard — Top points ranking\n"
-                    "\n"
-                    "For game betting info, see: #help gamepoints"
+                subpage = None
+                if len(parts) >= 3 and parts[2].isdigit():
+                    subpage = int(parts[2])
+
+                if subpage is None:
+                    help_text = (
+                        "\U0001f4b0 The points menu has multiple sections.\n"
+                        "Use one of these to see details:\n"
+                        "\u2022 #help points 1 \u2014 Earning & spending points\n"
+                        "\u2022 #help points 2 \u2014 Shop & inventory\n"
+                        "\u2022 #help points 3 \u2014 Trading & requests\n"
+                        "\u2022 #help gamepoints \u2014 Game betting & AI rewards"
+                    )
+                    send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
+                    return
+
+                if subpage == 1:
+                    help_text = (
+                        "\U0001f4b0 *Points \u2014 Section 1: Earning & Spending*\n"
+                        "\u2022 !points \u2014 Check your point balance\n"
+                        "\u2022 !fih \u2014 Fish for points (5 min cooldown)\n"
+                        "\u2022 !steal \u2014 Steal from a random person (5 min cooldown)\n"
+                        "\u2022 !give @username <amount> \u2014 Give points to another player\n"
+                        "  Example: !give @PlayerName 50\n"
+                        "\u2022 !coin <h/t> <bet> \u2014 Flip a coin to gamble points\n"
+                        "  Example: !coin h 50\n"
+                        "  Betting your full balance or more = All In!\n"
+                        "\u2022 #leaderboard \u2014 Top points ranking\n"
+                        "\n"
+                        "\u26a0\ufe0f There is a max point cap set by the server admin."
+                    )
+                    send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
+                    return
+
+                if subpage == 2:
+                    help_text = (
+                        "\U0001f3ea *Points \u2014 Section 2: Shop & Inventory*\n"
+                        "\u2022 !shop \u2014 View available items to buy\n"
+                        f"\u2022 !buy clicker \u2014 Buy a Clicker for {SHOP_CLICKER_COST:,} pts\n"
+                        "  Earns 1 pt/s each, passively. Stacks!\n"
+                        "\n"
+                        "\u2022 !create \"Name\" <worth> \u2014 Create a named item\n"
+                        f"  Name max {ITEM_NAME_MAX_LEN} chars, min worth {CREATION_MIN_WORTH} pts.\n"
+                        "  Names must be unique. You pay the worth in points.\n"
+                        "  Example: !create \"The Left Kidney\" 200\n"
+                        "\n"
+                        "\u2022 !items \u2014 View your inventory\n"
+                        "\u2022 !items @user \u2014 View someone else's inventory\n"
+                        "\n"
+                        "\u2022 !sellitem i<slot> \u2014 Sell a creation to the bot\n"
+                        "  Destroys the item; gives you its worth in points.\n"
+                        "  Example: !sellitem i2"
+                    )
+                    send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
+                    return
+
+                if subpage == 3:
+                    help_text = (
+                        "\U0001f91d *Points \u2014 Section 3: Trading & Requests*\n"
+                        "\u2022 !give @user i<slot> \u2014 Gift an item for free\n"
+                        "  Example: !give @PlayerName i2\n"
+                        "\n"
+                        "\u2022 !request @user i<slot> \u2014 Request to buy their item\n"
+                        "  You pay the item's worth; they confirm with !yes.\n"
+                        "  Example: !request @PlayerName i3\n"
+                        "\n"
+                        "\u2022 !request @user <amount> \u2014 Ask someone for points\n"
+                        "  Example: !request @PlayerName 100\n"
+                        "\n"
+                        "\u2022 !listrequests \u2014 See all incoming requests\n"
+                        "\u2022 !yes <N> \u2014 Accept request number N\n"
+                        "\u2022 !no <N> \u2014 Decline request number N"
+                    )
+                    send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
+                    return
+
+                send_message(
+                    GAME_GROUP_ID,
+                    "Available points sections: #help points 1, #help points 2, #help points 3",
+                    reply_to_id=msg_id,
                 )
-                send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
                 return
 
             # GAME POINTS / BETTING HELP
@@ -3439,14 +4135,17 @@ def handle_game_command(message):
         # TOP-LEVEL HELP MENU
         # -----------------------------
         help_text = (
-            "📚 *Help Topics:*\n"
-            "• #help game        — Connect Four\n"
-            "• #help 8ball       — Magic 8-Ball\n"
-            "• #help scripture   — Bible & Book of Mormon\n"
-            "• #help ai          — AI chat & personality\n"
-            "• #help points      — Fishing, stealing & coin flip\n"
-            "• #help gamepoints  — Game betting & AI rewards\n"
-            "• #help admin       — Admin feature controls\n"
+            "\U0001f4da *Help Topics:*\n"
+            "\u2022 #help game        \u2014 Connect Four\n"
+            "\u2022 #help 8ball       \u2014 Magic 8-Ball\n"
+            "\u2022 #help scripture   \u2014 Bible & Book of Mormon\n"
+            "\u2022 #help ai          \u2014 AI chat & personality\n"
+            "\u2022 #help points      \u2014 Points sections index\n"
+            "\u2022 #help points 1    \u2014 Earning & spending\n"
+            "\u2022 #help points 2    \u2014 Shop & inventory\n"
+            "\u2022 #help points 3    \u2014 Trading & requests\n"
+            "\u2022 #help gamepoints  \u2014 Game betting & AI rewards\n"
+            "\u2022 #help admin       \u2014 Admin feature controls\n"
             "\n"
             "Quick tip: start any message with ? for the 8-Ball!"
         )
@@ -4097,7 +4796,7 @@ def handle_game_command(message):
                 pot = w_bet + l_bet
                 if pot > 0:
                     # Return winner's own stake + take loser's stake
-                    win_new = add_points(GAME_GROUP_ID, sender_id, sender_name, pot)
+                    win_new = _add_pts(GAME_GROUP_ID, sender_id, sender_name, pot)
                     if w_bet > 0 and l_bet > 0:
                         points_lines.append(f"💰 Pot: {pot} pts → {sender_name} wins {l_bet} pts from {opp_name} and gets their {w_bet} pts back! ({win_new} pts)")
                     elif w_bet > 0:
@@ -4122,7 +4821,7 @@ def handle_game_command(message):
                 diff = game_state["ai_difficulty"]
                 reward_map = {"easy": POINTS_C4_WIN_AI_EASY, "medium": POINTS_C4_WIN_AI_MED, "hard": POINTS_C4_WIN_AI_HARD}
                 reward = reward_map.get(diff, POINTS_C4_WIN_AI_MED)
-                win_new = add_points(GAME_GROUP_ID, sender_id, sender_name, reward)
+                win_new = _add_pts(GAME_GROUP_ID, sender_id, sender_name, reward)
                 send_message(
                     GAME_GROUP_ID,
                     f"🏆 {sender_name} beats the AI ({diff.capitalize()})!\n"
@@ -4267,7 +4966,7 @@ def handle_game_command(message):
                 send_message(GAME_GROUP_ID, f"💸 {sender_name}, you have 0 points — you can't bet anything.", reply_to_id=msg_id)
                 return
             # Reserve points immediately (held until game ends)
-            add_points(GAME_GROUP_ID, sender_id, sender_name, -bet_amt)
+            _add_pts(GAME_GROUP_ID, sender_id, sender_name, -bet_amt)
             game_state["pvp_bets"][str(sender_id)] = bet_amt
             conf_msg = (
                 f"{'🎰 ALL IN! ' if allin else '✅ '}{sender_name} wagered {bet_amt} pts — winner takes all!"
@@ -4365,7 +5064,7 @@ def handle_game_command(message):
             send_message(GAME_GROUP_ID, f"💸 {sender_name}, you have 0 points — you can't bet.", reply_to_id=msg_id)
             return
 
-        add_points(GAME_GROUP_ID, sender_id, sender_name, -bet_amt)
+        _add_pts(GAME_GROUP_ID, sender_id, sender_name, -bet_amt)
         game_state["spectator_bets"][str(sender_id)] = {
             "amount": bet_amt,
             "on": target_id,
@@ -4547,7 +5246,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "f5016a6"
+BOT_COMMIT_SHA = "319b81f"
 
 _control_panel_instance = None  # set when panel launches
 
@@ -5188,6 +5887,8 @@ class ControlPanel:
             ("C4 PvP win pts",       "c4_win",    str(cfg_now.get("c4_win",    POINTS_C4_WIN))),
             ("C4 vs AI win pts",     "c4_win_ai", str(cfg_now.get("c4_win_ai", POINTS_C4_WIN_AI))),
             ("Leaderboard size",     "lb_size",   str(cfg_now.get("lb_size",   LEADERBOARD_SIZE))),
+            ("!coin cooldown (s)",   "coin_cd",   str(cfg_now.get("coin_cd",   POINTS_COIN_CD))),
+            ("Max points cap",       "points_max_cap", str(cfg_now.get("points_max_cap", POINTS_MAX_CAP))),
         ]
         self._pts_vars = {}
         for r, (lbl, key, default) in enumerate(pts_fields):
@@ -5239,6 +5940,7 @@ class ControlPanel:
             global POINTS_FIH_MIN, POINTS_FIH_MAX, POINTS_FIH_CD, POINTS_FIH_LOSE_CHANCE
             global POINTS_STEAL_MIN, POINTS_STEAL_MAX, POINTS_STEAL_CD
             global POINTS_C4_WIN, POINTS_C4_WIN_AI, LEADERBOARD_SIZE
+            global POINTS_COIN_CD, POINTS_MAX_CAP
             global ACCESS_TOKEN, DEV_GROUP_ID, OLLAMA_BASE_MODEL
 
             # Validate points before touching anything
@@ -5278,6 +5980,16 @@ class ControlPanel:
             cfg["c4_win_ai"] = new_c4_win_ai
             cfg["lb_size"]   = new_lb_size
 
+            # Coin cooldown and point cap
+            try:
+                new_coin_cd      = int(self._pts_vars["coin_cd"].get())
+                new_points_cap   = int(self._pts_vars["points_max_cap"].get())
+            except (KeyError, ValueError):
+                new_coin_cd      = POINTS_COIN_CD
+                new_points_cap   = POINTS_MAX_CAP
+            cfg["coin_cd"]         = max(0, new_coin_cd)
+            cfg["points_max_cap"]  = max(0, new_points_cap)
+
             # Custom messages
             global FIH_WIN_MESSAGES, FIH_LOSE_MESSAGES, FIH_COOLDOWN_MESSAGE
             global STEAL_SUCCESS_MESSAGES, STEAL_EMPTY_MESSAGE, STEAL_COOLDOWN_MESSAGE
@@ -5303,6 +6015,8 @@ class ControlPanel:
             POINTS_C4_WIN          = new_c4_win
             POINTS_C4_WIN_AI       = new_c4_win_ai
             LEADERBOARD_SIZE       = new_lb_size
+            POINTS_COIN_CD         = max(0, new_coin_cd)
+            POINTS_MAX_CAP         = max(0, new_points_cap)
 
             # Apply custom message globals immediately
             if hasattr(self, "_msg_vars"):
@@ -5736,9 +6450,11 @@ def main():
     # Start bot threads (daemon=True so they die if the process exits)
     dev_thread = threading.Thread(target=dev_poll_loop, daemon=True)
     game_thread = threading.Thread(target=game_poll_loop, daemon=True)
+    clicker_thread = threading.Thread(target=clicker_loop, args=(lambda: GAME_GROUP_ID,), daemon=True)
 
     dev_thread.start()
     game_thread.start()
+    clicker_thread.start()
 
     # Launch the control panel GUI on the main thread.
     # If tkinter is unavailable (headless server), fall back to a simple

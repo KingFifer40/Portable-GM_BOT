@@ -1217,8 +1217,10 @@ def points_leaderboard(group_id, top_n=None):
 # INVENTORY & SHOP SYSTEM
 # =============================================================================
 
-SHOP_CLICKER_COST = 10000   # points to buy a clicker
-SHOP_CLICKER_RATE = 1       # points per second per clicker owned
+SHOP_CLICKER_COST  = 2500   # points to buy a clicker
+SHOP_CLICKER_RATE  = 1      # points awarded per tick per clicker owned
+SHOP_CLICKER_TICK  = 3      # seconds between clicker ticks (1 pt every 3s)
+SHOP_CLICKER_MAX   = 3      # maximum clickers a single user can own
 
 ITEM_NAME_MAX_LEN = 20
 CREATION_MIN_WORTH = 20
@@ -1332,7 +1334,7 @@ def _inventory_display(inv, owner_name):
             if item.get("type") == "clicker":
                 count = item.get("count", 0)
                 rate = count * SHOP_CLICKER_RATE
-                lines.append(f"  i{idx}. Clicker \xd7{count} \u2192 +{rate} pt/s")
+                lines.append(f"  i{idx}. Clicker \xd7{count}/{SHOP_CLICKER_MAX} \u2192 +{rate} pt every {SHOP_CLICKER_TICK}s")
                 idx += 1
     else:
         lines.append("  (no point items)")
@@ -1393,9 +1395,9 @@ def run_clicker_tick(group_id):
 
 
 def clicker_loop(get_group_id_fn):
-    """Background thread that ticks clicker income every second."""
+    """Background thread that ticks clicker income every SHOP_CLICKER_TICK seconds."""
     while True:
-        time.sleep(1)
+        time.sleep(SHOP_CLICKER_TICK)
         try:
             gid = get_group_id_fn()
             if gid:
@@ -2888,6 +2890,7 @@ def handle_dev_command(message):
 
     # !add GROUPID  OR  !add MAIN_GROUP_ID,SUB_GROUP_ID
     if cmd == "!add":
+        global GAME_GROUP_ID, USE_SUBGROUP, ADMIN_GROUP_ID, last_game_since_id
         if len(parts) < 2:
             send_message(DEV_GROUP_ID, "Usage: !add GROUPID  or  !add MAIN_GROUP_ID,SUB_GROUP_ID", reply_to_id=msg_id)
             return
@@ -3679,6 +3682,23 @@ def handle_game_command(message):
         send_message(GAME_GROUP_ID, f"💰 {sender_name} has {bal} points.", reply_to_id=msg_id)
         return
 
+    # !disabled  — show all currently disabled features
+    if cmd == "!disabled":
+        disabled = []
+        if not CONNECT4_ENABLED:  disabled.append("🎮 Connect Four   (#state connect4 true)")
+        if not EIGHTBALL_ENABLED: disabled.append("🎱 Magic 8-Ball   (#state 8ball true)")
+        if not SCRIPTURE_ENABLED: disabled.append("📖 Scripture      (#state scripture true)")
+        if not AI_ENABLED:        disabled.append("🤖 AI Chat        (#state ai true)")
+        if not GAME_ENABLED:      disabled.append("🔴 Bot master switch  (#state all true)")
+        if not disabled:
+            send_message(GAME_GROUP_ID, "✅ All features are currently enabled!", reply_to_id=msg_id)
+        else:
+            lines = ["🚫 *Disabled Features:*"] + [f"  • {d}" for d in disabled]
+            lines.append("")
+            lines.append("Admins can re-enable any feature using the command shown above.")
+            send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
+        return
+
     # !fih  — fish for points (win or lose!)
     if cmd == "!fih":
         allowed, remaining = check_ai_cooldown(sender_id, _fih_last_used, POINTS_FIH_CD)
@@ -3929,8 +3949,8 @@ def handle_game_command(message):
         shop_text = (
             "\U0001f3ea *Point Item Shop:*\n"
             f"\u2022 Clicker \u2014 {SHOP_CLICKER_COST:,} pts\n"
-            f"  Earns {SHOP_CLICKER_RATE} pt/s passively per clicker owned.\n"
-            "  Owning multiple multiplies the rate!\n"
+            f"  Earns {SHOP_CLICKER_RATE} pt every {SHOP_CLICKER_TICK}s passively per clicker owned.\n"
+            f"  Stack up to {SHOP_CLICKER_MAX} for {SHOP_CLICKER_MAX * SHOP_CLICKER_RATE} pt every {SHOP_CLICKER_TICK}s total!\n"
             "\n"
             "Use !buy clicker to purchase."
         )
@@ -3944,6 +3964,14 @@ def handle_game_command(message):
             return
         item_arg = parts[1].lower()
         if item_arg == "clicker":
+            cur_count = _get_clicker_count(GAME_GROUP_ID, sender_id)
+            if cur_count >= SHOP_CLICKER_MAX:
+                send_message(
+                    GAME_GROUP_ID,
+                    f"\u274c You already own the maximum of {SHOP_CLICKER_MAX} Clickers.",
+                    reply_to_id=msg_id,
+                )
+                return
             bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
             if bal < SHOP_CLICKER_COST:
                 send_message(
@@ -3953,14 +3981,16 @@ def handle_game_command(message):
                 )
                 return
             new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, -SHOP_CLICKER_COST)
-            cur_count = _get_clicker_count(GAME_GROUP_ID, sender_id)
             _set_clicker_count(GAME_GROUP_ID, sender_id, cur_count + 1)
             new_count = cur_count + 1
             rate = new_count * SHOP_CLICKER_RATE
+            slots_left = SHOP_CLICKER_MAX - new_count
+            slot_note = f"  ({slots_left} slot{'s' if slots_left != 1 else ''} remaining)" if slots_left > 0 else "  (Max clickers reached!)"
             send_message(
                 GAME_GROUP_ID,
-                f"\u2705 {sender_name} bought a Clicker! "
-                f"(Now {new_count}\xd7 Clicker \u2192 +{rate} pt/s)\n"
+                f"\u2705 {sender_name} bought a Clicker!\n"
+                f"  {new_count}\xd7 Clicker \u2192 +{rate} pt every {SHOP_CLICKER_TICK}s passively\n"
+                f"{slot_note}\n"
                 f"Balance: {new_bal:,} pts",
                 reply_to_id=msg_id,
             )
@@ -4367,6 +4397,9 @@ def handle_game_command(message):
 
             # GAME HELP
             if topic == "game":
+                if not CONNECT4_ENABLED:
+                    send_message(GAME_GROUP_ID, "🎮 Connect Four is currently disabled.\n\nRun !disabled to see all disabled features, or use #state connect4 true as an admin to enable it.", reply_to_id=msg_id)
+                    return
                 help_text = (
                     "🎮 *Connect Four Commands:*\n"
                     "• #start [easy|medium|hard] — Begin a new game\n"
@@ -4386,6 +4419,9 @@ def handle_game_command(message):
 
             # 8-BALL HELP
             if topic == "8ball":
+                if not EIGHTBALL_ENABLED:
+                    send_message(GAME_GROUP_ID, "🎱 Magic 8-Ball is currently disabled.\n\nRun !disabled to see all disabled features, or use #state 8ball true as an admin to enable it.", reply_to_id=msg_id)
+                    return
                 help_text = (
                     "🎱 *Magic 8-Ball:*\n"
                     "Start any message with ? to ask the 8-ball a question.\n"
@@ -4399,6 +4435,9 @@ def handle_game_command(message):
 
             # SCRIPTURE HELP
             if topic == "scripture":
+                if not SCRIPTURE_ENABLED:
+                    send_message(GAME_GROUP_ID, "📖 Scripture commands are currently disabled.\n\nRun !disabled to see all disabled features, or use #state scripture true as an admin to enable it.", reply_to_id=msg_id)
+                    return
                 help_text = (
                     "📖 *Scripture Commands:*\n"
                     "• #randverse — Random verse (Bible or Book of Mormon)\n"
@@ -4419,6 +4458,9 @@ def handle_game_command(message):
 
             # AI HELP
             if topic == "ai":
+                if not AI_ENABLED:
+                    send_message(GAME_GROUP_ID, "🤖 AI Chat is currently disabled.\n\nRun !disabled to see all disabled features, or use #state ai true as an admin to enable it.", reply_to_id=msg_id)
+                    return
                 help_text = (
                     "🤖 *AI Chat Commands:*\n"
                     "• !ai <message> — Chat with the AI (15s cooldown)\n"
@@ -4509,7 +4551,7 @@ def handle_game_command(message):
                         "\U0001f3ea *Points \u2014 Section 2: Shop & Inventory*\n"
                         "\u2022 !shop \u2014 View available items to buy\n"
                         f"\u2022 !buy clicker \u2014 Buy a Clicker for {SHOP_CLICKER_COST:,} pts\n"
-                        "  Earns 1 pt/s each, passively. Stacks!\n"
+                        f"  Earns {SHOP_CLICKER_RATE} pt every {SHOP_CLICKER_TICK}s passively. Max {SHOP_CLICKER_MAX} stacked.\n"
                         "\n"
                         "\u2022 !create \"Name\" <worth> \u2014 Create a named item\n"
                         f"  Name max {ITEM_NAME_MAX_LEN} chars, min worth {CREATION_MIN_WORTH} pts.\n"
@@ -4588,10 +4630,14 @@ def handle_game_command(message):
                 return
 
             # Unknown topic
+            known = ["points", "points 1", "points 2", "points 3", "gamepoints", "admin"]
+            if CONNECT4_ENABLED:  known.append("game")
+            if EIGHTBALL_ENABLED: known.append("8ball")
+            if SCRIPTURE_ENABLED: known.append("scripture")
+            if AI_ENABLED:        known.append("ai")
             send_message(
                 GAME_GROUP_ID,
-                "Unknown help topic.\n"
-                "Try: #help game, #help 8ball, #help scripture, #help ai, #help points, #help gamepoints, #help admin",
+                f"Unknown help topic.\nTry: {', '.join(f'#help {k}' for k in sorted(known))}",
                 reply_to_id=msg_id,
             )
             return
@@ -4599,22 +4645,38 @@ def handle_game_command(message):
         # -----------------------------
         # TOP-LEVEL HELP MENU
         # -----------------------------
-        help_text = (
-            "\U0001f4da *Help Topics:*\n"
-            "\u2022 #help game        \u2014 Connect Four\n"
-            "\u2022 #help 8ball       \u2014 Magic 8-Ball\n"
-            "\u2022 #help scripture   \u2014 Bible & Book of Mormon\n"
-            "\u2022 #help ai          \u2014 AI chat & personality\n"
-            "\u2022 #help points      \u2014 Points sections index\n"
-            "\u2022 #help points 1    \u2014 Earning & spending\n"
-            "\u2022 #help points 2    \u2014 Shop & inventory\n"
-            "\u2022 #help points 3    \u2014 Trading & requests\n"
-            "\u2022 #help gamepoints  \u2014 Game betting & AI rewards\n"
-            "\u2022 #help admin       \u2014 Admin feature controls\n"
-            "\n"
-            "Quick tip: start any message with ? for the 8-Ball!"
-        )
-        send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
+        lines = ["\U0001f4da *Help Topics:*"]
+
+        # Points topics are always shown (points are always active)
+        lines.append("\u2022 #help points      \u2014 Points sections index")
+        lines.append("\u2022 #help points 1    \u2014 Earning & spending")
+        lines.append("\u2022 #help points 2    \u2014 Shop & inventory")
+        lines.append("\u2022 #help points 3    \u2014 Trading & requests")
+        lines.append("\u2022 #help gamepoints  \u2014 Game betting & AI rewards")
+
+        # Feature-gated topics
+        if CONNECT4_ENABLED:
+            lines.append("\u2022 #help game        \u2014 Connect Four")
+        if EIGHTBALL_ENABLED:
+            lines.append("\u2022 #help 8ball       \u2014 Magic 8-Ball")
+        if SCRIPTURE_ENABLED:
+            lines.append("\u2022 #help scripture   \u2014 Bible & Book of Mormon")
+        if AI_ENABLED:
+            lines.append("\u2022 #help ai          \u2014 AI chat & personality")
+
+        lines.append("\u2022 #help admin       \u2014 Admin feature controls")
+
+        # Tip about hidden features (only show if something is actually disabled)
+        any_disabled = not CONNECT4_ENABLED or not EIGHTBALL_ENABLED or not SCRIPTURE_ENABLED or not AI_ENABLED
+        if any_disabled:
+            lines.append("")
+            lines.append("\U0001f4a4 Some features are hidden. Run !disabled to see them,")
+            lines.append("  or use #state <feature> true as an admin to re-enable.")
+        elif EIGHTBALL_ENABLED:
+            lines.append("")
+            lines.append("Quick tip: start any message with ? for the 8-Ball!")
+
+        send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
         return
         
     # -----------------------------
@@ -4632,12 +4694,10 @@ def handle_game_command(message):
         else:
             source = parts[1].lower()
 
-        # Map source to filename
+        # Map source to display name
         if source == "bom":
-            filename = "book_of_mormon_clean.txt"
             source_name = "Book of Mormon"
         elif source == "bible":
-            filename = "bible_clean.txt"
             source_name = "Bible (KJV)"
         else:
             send_message(
@@ -4650,34 +4710,24 @@ def handle_game_command(message):
             )
             return
 
-        # Load verses
-        try:
-            path = os.path.join(AI_RESOURCES_DIR, filename)
-            with open(path, "r", encoding="utf-8") as f:
-                verses = [line.strip() for line in f if line.strip()]
+        # Load verses using the shared cache (avoids re-reading from disk every call)
+        verses = _get_scripture_lines(source)
 
-            if not verses:
-                send_message(
-                    GAME_GROUP_ID,
-                    f"Error: {filename} is empty.",
-                    reply_to_id=msg_id
-                )
-                return
-
-            verse = random.choice(verses)
-
+        if not verses:
             send_message(
                 GAME_GROUP_ID,
-                f"Random verse from the {source_name}:\n{verse}",
+                f"Error: scripture file for '{source}' is empty or missing.",
                 reply_to_id=msg_id
             )
+            return
 
-        except Exception as e:
-            send_message(
-                GAME_GROUP_ID,
-                f"Error reading scripture file: {e}",
-                reply_to_id=msg_id
-            )
+        verse = random.choice(verses)
+
+        send_message(
+            GAME_GROUP_ID,
+            f"Random verse from the {source_name}:\n{verse}",
+            reply_to_id=msg_id
+        )
 
         return
 
@@ -5653,6 +5703,7 @@ def game_poll_loop():
                 if refund_lines:
                     timeout_msg += "\n💰 Bets refunded:\n" + "\n".join(refund_lines)
                 send_message(GAME_GROUP_ID, timeout_msg)
+                time.sleep(GAME_POLL_INTERVAL)
                 continue
 
             msgs, last_game_since_id_new = fetch_new_messages(
@@ -5715,7 +5766,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "65e9d7c"
+BOT_COMMIT_SHA = "192eef2"
 
 _control_panel_instance = None  # set when panel launches
 
@@ -7310,14 +7361,13 @@ class ControlPanel:
         self._update_btn.config(state="disabled")
 
         def do_update():
+            # _do_self_update calls os._exit(0) on success, so this thread
+            # only continues if the update actually failed.
             ok, err = _do_self_update()
-            if ok:
-                self.root.after(0, self._restart_bot)
-            else:
-                self.root.after(
-                    0,
-                    lambda: self._set_status(f"Update failed: {err}"),
-                )
+            self.root.after(
+                0,
+                lambda: self._set_status(f"Update failed: {err}"),
+            )
 
         threading.Thread(target=do_update, daemon=True).start()
 

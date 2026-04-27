@@ -5763,7 +5763,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "192eef2"
+BOT_COMMIT_SHA = "c1df0c5"
 
 _control_panel_instance = None  # set when panel launches
 

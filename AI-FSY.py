@@ -2942,9 +2942,12 @@ def handle_dev_command(message):
     # !reload
     if cmd == "!reload":
         send_message(DEV_GROUP_ID, "Reloading script...", reply_to_id=msg_id)
-        python = sys.executable
-        os.execv(python, [python] + sys.argv)
-        return
+        restart_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "restart_bot.py")
+        if not os.path.exists(restart_script):
+            send_message(DEV_GROUP_ID, "Reload failed: restart_bot.py not found in script directory.", reply_to_id=msg_id)
+            return
+        subprocess.Popen([sys.executable, restart_script])
+        os._exit(0)
 
     # !state true/false
     if cmd == "!state":
@@ -5763,7 +5766,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "c1df0c5"
+BOT_COMMIT_SHA = "bd875ee"
 
 _control_panel_instance = None  # set when panel launches
 
@@ -7372,8 +7375,19 @@ class ControlPanel:
 
     def _restart_bot(self):
         self._set_status("Restarting…")
-        self.root.after(500, lambda: os.execv(sys.executable,
-                                              [sys.executable] + sys.argv))
+
+        def do_restart():
+            restart_script = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "restart_bot.py"
+            )
+            if not os.path.exists(restart_script):
+                self.root.after(0, lambda: self._set_status(
+                    "Restart failed: restart_bot.py not found in script directory."))
+                return
+            subprocess.Popen([sys.executable, restart_script])
+            os._exit(0)
+
+        self.root.after(500, lambda: threading.Thread(target=do_restart, daemon=True).start())
 
     def _stop_bot(self):
         from tkinter import messagebox

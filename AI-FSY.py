@@ -4649,9 +4649,6 @@ def handle_game_command(message):
 
         # Points topics are always shown (points are always active)
         lines.append("\u2022 #help points      \u2014 Points sections index")
-        lines.append("\u2022 #help points 1    \u2014 Earning & spending")
-        lines.append("\u2022 #help points 2    \u2014 Shop & inventory")
-        lines.append("\u2022 #help points 3    \u2014 Trading & requests")
         lines.append("\u2022 #help gamepoints  \u2014 Game betting & AI rewards")
 
         # Feature-gated topics

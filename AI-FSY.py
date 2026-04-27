@@ -6209,7 +6209,6 @@ class ControlPanel:
                   command=self._pts_refresh, relief="flat",
                   padx=8, pady=3).pack(side="right", padx=(0, 4))
 
-        # Last-updated label
         self._pts_updated_var = tk.StringVar(value="")
         tk.Label(toolbar, textvariable=self._pts_updated_var,
                  font=("Helvetica", 8), fg="#888888").pack(side="right", padx=(0, 8))
@@ -6219,51 +6218,39 @@ class ControlPanel:
         summary_frame.pack(fill="x")
 
         self._pts_summary_labels = {}
-        for i, (key, label) in enumerate([
-            ("users",      "Users"),
-            ("total_pts",  "Total Points"),
-            ("top_user",   "Leader"),
-            ("top_pts",    "Leader Pts"),
-            ("clickers",   "Total Clickers"),
-            ("creations",  "Total Creations"),
-        ]):
+        for key, label in [
+            ("users", "Users"), ("total_pts", "Total Pts"),
+            ("top_user", "Leader"), ("top_pts", "Leader Pts"),
+        ]:
             col = tk.Frame(summary_frame, bg="#f0f0f5")
-            col.pack(side="left", padx=10)
+            col.pack(side="left", padx=12)
             tk.Label(col, text=label, font=("Helvetica", 8), fg="#666666", bg="#f0f0f5").pack()
-            val = tk.Label(col, text="—", font=("Helvetica", 11, "bold"), bg="#f0f0f5", fg="#1c1c1e")
+            val = tk.Label(col, text="—", font=("Helvetica", 10, "bold"), bg="#f0f0f5", fg="#1c1c1e")
             val.pack()
             self._pts_summary_labels[key] = val
 
-        # ── Main paned area (table left, detail right) ────────────────────────
-        pane = tk.PanedWindow(outer, orient="horizontal", sashwidth=5, sashrelief="flat")
-        pane.pack(fill="both", expand=True, padx=4, pady=4)
+        # ── Leaderboard table (compact, fixed height) ─────────────────────────
+        lb_outer = tk.Frame(outer, padx=6)
+        lb_outer.pack(fill="x", pady=(4, 0))
 
-        # LEFT: Leaderboard table
-        left = tk.Frame(pane)
-        pane.add(left, minsize=260)
-
-        tk.Label(left, text="Leaderboard", font=("Helvetica", 10, "bold")).pack(anchor="w", padx=6, pady=(4, 0))
-
-        # Sort controls
-        sort_row = tk.Frame(left)
-        sort_row.pack(fill="x", padx=6, pady=(2, 0))
+        sort_row = tk.Frame(lb_outer)
+        sort_row.pack(fill="x", pady=(0, 2))
         tk.Label(sort_row, text="Sort:", font=("Helvetica", 9)).pack(side="left")
         self._pts_sort_var = tk.StringVar(value="points")
         for val, lbl in [("points", "Points"), ("name", "Name"), ("clickers", "Clickers"), ("creations", "Items")]:
             ttk.Radiobutton(sort_row, text=lbl, variable=self._pts_sort_var, value=val,
                             command=self._pts_refresh_table).pack(side="left", padx=2)
 
-        # Treeview
         cols = ("rank", "name", "points", "clickers", "creations")
-        tree_frame = tk.Frame(left)
-        tree_frame.pack(fill="both", expand=True, padx=6, pady=4)
+        tree_frame = tk.Frame(lb_outer)
+        tree_frame.pack(fill="x")
 
         vsb = tk.Scrollbar(tree_frame, orient="vertical")
         self._pts_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
-                                       selectmode="browse", yscrollcommand=vsb.set)
+                                       selectmode="browse", yscrollcommand=vsb.set, height=7)
         vsb.config(command=self._pts_tree.yview)
         vsb.pack(side="right", fill="y")
-        self._pts_tree.pack(fill="both", expand=True)
+        self._pts_tree.pack(fill="x", expand=True)
 
         self._pts_tree.heading("rank",      text="#")
         self._pts_tree.heading("name",      text="Name")
@@ -6271,13 +6258,12 @@ class ControlPanel:
         self._pts_tree.heading("clickers",  text="Clickers")
         self._pts_tree.heading("creations", text="Items")
 
-        self._pts_tree.column("rank",      width=30,  anchor="center", stretch=False)
+        self._pts_tree.column("rank",      width=28,  anchor="center", stretch=False)
         self._pts_tree.column("name",      width=130, anchor="w")
         self._pts_tree.column("points",    width=70,  anchor="e")
-        self._pts_tree.column("clickers",  width=60,  anchor="center")
-        self._pts_tree.column("creations", width=40,  anchor="center")
+        self._pts_tree.column("clickers",  width=55,  anchor="center")
+        self._pts_tree.column("creations", width=38,  anchor="center")
 
-        # Row colors: gold / silver / bronze for top 3
         self._pts_tree.tag_configure("gold",   background="#fff8dc")
         self._pts_tree.tag_configure("silver", background="#f5f5f5")
         self._pts_tree.tag_configure("bronze", background="#fdf0e0")
@@ -6286,120 +6272,131 @@ class ControlPanel:
 
         self._pts_tree.bind("<<TreeviewSelect>>", self._pts_on_select)
 
-        # RIGHT: Detail panel
-        right = tk.Frame(pane, padx=8, pady=6)
-        pane.add(right, minsize=200)
+        ttk.Separator(outer, orient="horizontal").pack(fill="x", pady=(8, 0))
 
-        tk.Label(right, text="User Detail", font=("Helvetica", 10, "bold")).pack(anchor="w")
+        # ── Detail panel — scrollable canvas so nothing gets cut off ──────────
+        detail_outer = tk.Frame(outer)
+        detail_outer.pack(fill="both", expand=True)
 
-        self._pts_detail_name = tk.Label(right, text="Select a user →",
+        detail_canvas = tk.Canvas(detail_outer, highlightthickness=0)
+        detail_vsb = tk.Scrollbar(detail_outer, orient="vertical", command=detail_canvas.yview)
+        detail_canvas.configure(yscrollcommand=detail_vsb.set)
+        detail_vsb.pack(side="right", fill="y")
+        detail_canvas.pack(side="left", fill="both", expand=True)
+
+        detail = tk.Frame(detail_canvas, padx=10, pady=8)
+        detail_win = detail_canvas.create_window((0, 0), window=detail, anchor="nw")
+
+        def _on_detail_configure(e):
+            detail_canvas.configure(scrollregion=detail_canvas.bbox("all"))
+        detail.bind("<Configure>", _on_detail_configure)
+
+        def _on_canvas_configure(e):
+            detail_canvas.itemconfig(detail_win, width=e.width)
+        detail_canvas.bind("<Configure>", _on_canvas_configure)
+
+        # Mousewheel scrolling on the detail panel
+        def _on_mousewheel(e):
+            detail_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        detail_canvas.bind("<MouseWheel>", _on_mousewheel)
+        detail.bind("<MouseWheel>", _on_mousewheel)
+
+        # ── Selected user info ────────────────────────────────────────────────
+        self._pts_detail_name = tk.Label(detail, text="← Select a user above",
                                           font=("Helvetica", 11, "bold"), fg="#1c1c1e")
-        self._pts_detail_name.pack(anchor="w", pady=(4, 0))
+        self._pts_detail_name.pack(anchor="w")
 
-        self._pts_detail_pts = tk.Label(right, text="", font=("Helvetica", 10), fg="#0055aa")
+        self._pts_detail_pts = tk.Label(detail, text="", font=("Helvetica", 10), fg="#0055aa")
         self._pts_detail_pts.pack(anchor="w")
 
-        self._pts_detail_clickers = tk.Label(right, text="", font=("Helvetica", 9), fg="#555555")
+        self._pts_detail_clickers = tk.Label(detail, text="", font=("Helvetica", 9), fg="#555555")
         self._pts_detail_clickers.pack(anchor="w")
 
-        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=8)
+        ttk.Separator(detail, orient="horizontal").pack(fill="x", pady=6)
 
-        tk.Label(right, text="Inventory:", font=("Helvetica", 9, "bold")).pack(anchor="w")
-        inv_frame = tk.Frame(right)
-        inv_frame.pack(fill="both", expand=True)
+        # ── Quick point adjustment ────────────────────────────────────────────
+        tk.Label(detail, text="Points:", font=("Helvetica", 9, "bold")).pack(anchor="w")
+
+        adj_row = tk.Frame(detail)
+        adj_row.pack(fill="x", pady=(3, 0))
+        self._pts_adj_var = tk.StringVar()
+        tk.Entry(adj_row, textvariable=self._pts_adj_var, width=8,
+                 font=("Helvetica", 10)).pack(side="left", padx=(0, 4))
+        tk.Label(adj_row, text="pts", font=("Helvetica", 9)).pack(side="left")
+
+        btn_row_pts = tk.Frame(detail)
+        btn_row_pts.pack(fill="x", pady=(4, 0))
+        for text_, action, bg_ in [
+            ("➕ Add",    "add",    "#34c759"),
+            ("➖ Remove", "remove", "#ff9500"),
+            ("📌 Set",    "set",    "#0055aa"),
+            ("🗑 Reset",  "reset",  "#ff3b30"),
+        ]:
+            tk.Button(btn_row_pts, text=text_, font=("Helvetica", 9),
+                      command=lambda a=action: self._pts_adjust(a),
+                      bg=bg_, fg="white", relief="flat",
+                      padx=6, pady=3).pack(side="left", padx=(0, 3))
+
+        self._pts_adj_status = tk.Label(detail, text="", font=("Helvetica", 9), fg="#34c759",
+                                         wraplength=360, justify="left")
+        self._pts_adj_status.pack(anchor="w", pady=(3, 0))
+
+        ttk.Separator(detail, orient="horizontal").pack(fill="x", pady=6)
+
+        # ── Inventory list ────────────────────────────────────────────────────
+        tk.Label(detail, text="Inventory:", font=("Helvetica", 9, "bold")).pack(anchor="w")
+
+        inv_frame = tk.Frame(detail)
+        inv_frame.pack(fill="x", pady=(3, 0))
         inv_vsb = tk.Scrollbar(inv_frame, orient="vertical")
         self._pts_inv_list = tk.Listbox(inv_frame, font=("Courier", 9),
-                                         yscrollcommand=inv_vsb.set, height=5,
-                                         selectmode="browse", relief="flat", bd=1)
+                                         yscrollcommand=inv_vsb.set, height=4,
+                                         selectmode="browse", relief="solid", bd=1)
         inv_vsb.config(command=self._pts_inv_list.yview)
         inv_vsb.pack(side="right", fill="y")
-        self._pts_inv_list.pack(fill="both", expand=True)
+        self._pts_inv_list.pack(fill="x", expand=True)
 
-        # ── Inventory action buttons ───────────────────────────────────────
-        inv_btn_row = tk.Frame(right)
+        inv_btn_row = tk.Frame(detail)
         inv_btn_row.pack(fill="x", pady=(4, 0))
-
         tk.Button(inv_btn_row, text="🗑 Remove Selected", font=("Helvetica", 9),
                   command=self._pts_inv_remove,
                   bg="#ff3b30", fg="white", relief="flat",
                   padx=6, pady=3).pack(side="left", padx=(0, 4))
-
         tk.Button(inv_btn_row, text="🖱 +Clicker", font=("Helvetica", 9),
                   command=self._pts_inv_add_clicker,
                   bg="#5856d6", fg="white", relief="flat",
                   padx=6, pady=3).pack(side="left")
 
-        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
+        ttk.Separator(detail, orient="horizontal").pack(fill="x", pady=6)
 
-        # ── Inject custom item (prank / admin gift) ────────────────────────
-        tk.Label(right, text="Inject Item:", font=("Helvetica", 9, "bold")).pack(anchor="w")
-        tk.Label(right, text="Add any item directly to inventory. Worth can be\nnegative for prank items.",
-                 font=("Helvetica", 8), fg="#888888", justify="left").pack(anchor="w")
+        # ── Inject item ───────────────────────────────────────────────────────
+        tk.Label(detail, text="Inject Item:", font=("Helvetica", 9, "bold")).pack(anchor="w")
+        tk.Label(detail, text="Bypasses all normal limits. Worth can be negative (prank trap).",
+                 font=("Helvetica", 8), fg="#888888", wraplength=360, justify="left").pack(anchor="w")
 
-        inject_grid = tk.Frame(right)
+        inject_grid = tk.Frame(detail)
         inject_grid.pack(fill="x", pady=(4, 0))
-
-        tk.Label(inject_grid, text="Name:", font=("Helvetica", 9), width=6, anchor="w").grid(
-            row=0, column=0, sticky="w")
-        self._pts_inject_name_var = tk.StringVar()
-        tk.Entry(inject_grid, textvariable=self._pts_inject_name_var,
-                 font=("Helvetica", 9), width=16).grid(row=0, column=1, sticky="ew", padx=(2, 0))
-
-        tk.Label(inject_grid, text="Worth:", font=("Helvetica", 9), width=6, anchor="w").grid(
-            row=1, column=0, sticky="w", pady=(4, 0))
-        self._pts_inject_worth_var = tk.StringVar(value="0")
-        tk.Entry(inject_grid, textvariable=self._pts_inject_worth_var,
-                 font=("Helvetica", 9), width=8).grid(row=1, column=1, sticky="w", padx=(2, 0), pady=(4, 0))
-
         inject_grid.columnconfigure(1, weight=1)
 
-        tk.Button(right, text="💉 Inject Item", font=("Helvetica", 9),
+        tk.Label(inject_grid, text="Name:", font=("Helvetica", 9), anchor="w").grid(
+            row=0, column=0, sticky="w", padx=(0, 4))
+        self._pts_inject_name_var = tk.StringVar()
+        tk.Entry(inject_grid, textvariable=self._pts_inject_name_var,
+                 font=("Helvetica", 9)).grid(row=0, column=1, sticky="ew")
+
+        tk.Label(inject_grid, text="Worth:", font=("Helvetica", 9), anchor="w").grid(
+            row=1, column=0, sticky="w", padx=(0, 4), pady=(4, 0))
+        self._pts_inject_worth_var = tk.StringVar(value="0")
+        tk.Entry(inject_grid, textvariable=self._pts_inject_worth_var,
+                 font=("Helvetica", 9), width=8).grid(row=1, column=1, sticky="w", pady=(4, 0))
+
+        tk.Button(detail, text="💉 Inject Item", font=("Helvetica", 9),
                   command=self._pts_inv_inject,
                   bg="#ff9500", fg="white", relief="flat",
                   padx=8, pady=3).pack(anchor="w", pady=(6, 0))
 
-        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=6)
-
-        # ── Quick point adjustment ─────────────────────────────────────────
-        tk.Label(right, text="Quick Points:", font=("Helvetica", 9, "bold")).pack(anchor="w")
-
-        adj_row = tk.Frame(right)
-        adj_row.pack(fill="x", pady=(4, 0))
-
-        self._pts_adj_var = tk.StringVar()
-        adj_entry = tk.Entry(adj_row, textvariable=self._pts_adj_var, width=9,
-                             font=("Helvetica", 10))
-        adj_entry.pack(side="left", padx=(0, 4))
-        tk.Label(adj_row, text="pts", font=("Helvetica", 9)).pack(side="left")
-
-        btn_row2 = tk.Frame(right)
-        btn_row2.pack(fill="x", pady=(4, 0))
-
-        tk.Button(btn_row2, text="➕ Add", font=("Helvetica", 9),
-                  command=lambda: self._pts_adjust("add"),
-                  bg="#34c759", fg="white", relief="flat",
-                  padx=8, pady=3).pack(side="left", padx=(0, 4))
-
-        tk.Button(btn_row2, text="➖ Remove", font=("Helvetica", 9),
-                  command=lambda: self._pts_adjust("remove"),
-                  bg="#ff9500", fg="white", relief="flat",
-                  padx=8, pady=3).pack(side="left", padx=(0, 4))
-
-        tk.Button(btn_row2, text="📌 Set", font=("Helvetica", 9),
-                  command=lambda: self._pts_adjust("set"),
-                  bg="#0055aa", fg="white", relief="flat",
-                  padx=8, pady=3).pack(side="left", padx=(0, 4))
-
-        tk.Button(btn_row2, text="🗑 Reset", font=("Helvetica", 9),
-                  command=lambda: self._pts_adjust("reset"),
-                  bg="#ff3b30", fg="white", relief="flat",
-                  padx=8, pady=3).pack(side="left")
-
-        self._pts_adj_status = tk.Label(right, text="", font=("Helvetica", 9), fg="#34c759")
-        self._pts_adj_status.pack(anchor="w", pady=(4, 0))
-
         # Internal state
-        self._pts_data = []          # list of dicts: uid, name, points, clickers, creations, inv
+        self._pts_data = []
         self._pts_selected_uid = None
         self._pts_selected_name = None
 
@@ -6436,10 +6433,17 @@ class ControlPanel:
         return rows
 
     def _pts_refresh(self):
-        """Reload data and repopulate the table + summary."""
+        """Reload data and repopulate the table + summary + detail panel."""
         self._pts_data = self._pts_load_data()
         self._pts_refresh_table()
         self._pts_update_summary()
+        # If a user is already selected, re-render their detail panel from fresh data
+        # so inventory changes (injections, removals) appear immediately without
+        # requiring the user to click the row again.
+        if self._pts_selected_uid:
+            matched = next((r for r in self._pts_data if r["uid"] == self._pts_selected_uid), None)
+            if matched:
+                self._pts_render_detail(matched)
         import time as _t
         self._pts_updated_var.set(f"Updated {_t.strftime('%H:%M:%S')}")
 
@@ -6482,16 +6486,12 @@ class ControlPanel:
             return
 
         total_pts = sum(r["points"] for r in rows)
-        total_clickers = sum(r["clickers"] for r in rows)
-        total_creations = sum(r["creations"] for r in rows)
         top = max(rows, key=lambda r: r["points"])
 
         self._pts_summary_labels["users"].config(text=str(len(rows)))
         self._pts_summary_labels["total_pts"].config(text=f"{total_pts:,}")
         self._pts_summary_labels["top_user"].config(text=top["name"])
         self._pts_summary_labels["top_pts"].config(text=f"{top['points']:,}")
-        self._pts_summary_labels["clickers"].config(text=str(total_clickers))
-        self._pts_summary_labels["creations"].config(text=str(total_creations))
 
     def _pts_on_select(self, event):
         tree = self._pts_tree
@@ -6501,38 +6501,36 @@ class ControlPanel:
         values = tree.item(sel[0], "values")
         if not values:
             return
-        # Find the row in _pts_data by name (tree shows display name)
         display_name = values[1]
         matched = next((r for r in self._pts_data if r["name"] == display_name), None)
         if not matched:
             return
-
-        self._pts_selected_uid = matched["uid"]
+        self._pts_selected_uid  = matched["uid"]
         self._pts_selected_name = matched["name"]
+        self._pts_render_detail(matched)
+
+    def _pts_render_detail(self, matched):
+        """Populate the detail panel widgets from a data row dict."""
         self._pts_detail_name.config(text=matched["name"])
         self._pts_detail_pts.config(text=f"Points: {matched['points']:,}")
         rate = matched["clickers"] * SHOP_CLICKER_RATE
         self._pts_detail_clickers.config(
             text=f"Clickers: {matched['clickers']}  (+{rate} pt/s passive)")
 
-        # Populate inventory listbox
         lb = self._pts_inv_list
         lb.delete(0, "end")
         inv = matched["inv"]
-
         slot = 1
         for item in inv.get("point_items", []):
             if item.get("type") == "clicker":
                 count = item.get("count", 1)
                 lb.insert("end", f"  i{slot}  🖱 Clicker ×{count}")
                 slot += 1
-
         for creation in inv.get("creations", []):
             name_c = creation.get("name", "?")
-            worth = creation.get("worth", 0)
+            worth  = creation.get("worth", 0)
             lb.insert("end", f"  i{slot}  🛠 {name_c}  ({worth} pts)")
             slot += 1
-
         if slot == 1:
             lb.insert("end", "  (empty)")
 

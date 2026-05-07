@@ -2895,7 +2895,7 @@ def handle_dev_command(message):
             send_message(DEV_GROUP_ID, "Usage: !add GROUPID  or  !add MAIN_GROUP_ID,SUB_GROUP_ID", reply_to_id=msg_id)
             return
 
-        arg = parts[1].strip()
+        arg = "".join(parts[1:]).strip()
         old_gid = GAME_GROUP_ID
 
         if "," in arg:
@@ -5766,7 +5766,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "bd875ee"
+BOT_COMMIT_SHA = "c13216d"
 
 _control_panel_instance = None  # set when panel launches
 

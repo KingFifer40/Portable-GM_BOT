@@ -3726,12 +3726,12 @@ def handle_game_command(message):
 
     # ── LEGACY COMMAND REDIRECT ───────────────────────────────────────────────
     # Old points commands removed — point players to the new RPG system.
-    if cmd in ("!points", "!fih", "!steal", "!create", "!items", "!sellitem",
-               "!listrequests", "!request", "!yes", "!no"):
+    if cmd in ("#points", "!points", "#fih", "!fih", "#steal", "!steal",
+               "#create", "!create", "#items", "!items"):
         send_message(
             GAME_GROUP_ID,
             "🎮 The points system has been upgraded to a full RPG!\n"
-            "Use !beginpoints to register, then !help points for all commands.",
+            "Use #beginpoints to register, then #help points for all commands.",
             reply_to_id=msg_id,
         )
         return
@@ -4330,7 +4330,7 @@ def handle_game_command(message):
                 send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
                 return
 
-            # POINTS HELP — now delegates to game_engine help system
+            # POINTS HELP — delegates to game_engine help system
             if topic == "points":
                 subpage_str = " ".join(parts[2:]).strip() if len(parts) >= 3 else ""
                 if _GAME_ENGINE_AVAILABLE:
@@ -4338,7 +4338,7 @@ def handle_game_command(message):
                 else:
                     help_text = (
                         "🎮 RPG system unavailable right now.\n"
-                        "Use !beginpoints to register when it is back online."
+                        "Use #beginpoints to register when it is back online."
                     )
                 send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
                 return
@@ -4395,16 +4395,9 @@ def handle_game_command(message):
         # -----------------------------
         lines = ["📚 *Help Topics:*"]
 
-        # RPG / points help — always shown
-        lines.append("• !help points        — RPG game overview")
-        lines.append("• !help points start  — How to begin the RPG")
-        lines.append("• !help points basics — Core RPG commands")
-        lines.append("• !help points travel — Moving around the world")
-        lines.append("• !help points items  — Fishing, hunting, inventory")
-        lines.append("• !help points gems   — Currency & economy")
-        lines.append("• !help points chests — Safe gem storage")
-        lines.append("• !help points stats  — Character stats explained")
-        lines.append("• #help gamepoints   — Game betting & AI rewards")
+        # RPG — single entry pointing to #help points
+        lines.append("• #help points      — Fantasy RPG game (Aethermoor)")
+        lines.append("• #help gamepoints  — Game betting & AI rewards")
 
         # Feature-gated topics
         if CONNECT4_ENABLED:

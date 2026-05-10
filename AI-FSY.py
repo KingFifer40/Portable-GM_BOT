@@ -164,8 +164,9 @@ SETUP_DEFAULTS = {
 def _run_gui_wizard(existing: dict) -> dict:
     """
     Opens a tkinter window that lets the user fill in their credentials.
+    After entering the token, groups are fetched live from the GroupMe API
+    so the user can pick the dev group from a list instead of typing an ID.
     Returns a dict with the collected values, or None if cancelled.
-    Works on Windows, macOS, and Linux (any desktop with Tk).
     """
     import tkinter as tk
     from tkinter import ttk, messagebox
@@ -197,74 +198,161 @@ def _run_gui_wizard(existing: dict) -> dict:
 
     fields = {}
 
-    def add_field(parent, label, key, default="", show=None, help_text=""):
-        row = tk.Frame(parent)
-        row.pack(fill="x", pady=(0, 12))
-        tk.Label(row, text=label, font=("Helvetica", 11, "bold"), anchor="w").pack(fill="x")
-        if help_text:
-            tk.Label(row, text=help_text, font=("Helvetica", 9), fg="#666666", anchor="w",
-                     wraplength=440, justify="left").pack(fill="x")
-        entry_var = tk.StringVar(value=existing.get(key, default))
-        entry = tk.Entry(row, textvariable=entry_var, font=("Helvetica", 11),
-                         width=52, show=show or "")
-        entry.pack(fill="x", pady=(4, 0), ipady=5)
-        fields[key] = entry_var
-        return entry_var
+    # ── Token field ──────────────────────────────────────────────────────────
+    token_row = tk.Frame(body)
+    token_row.pack(fill="x", pady=(0, 4))
+    tk.Label(token_row, text="GroupMe Access Token",
+             font=("Helvetica", 11, "bold"), anchor="w").pack(fill="x")
+    tk.Label(token_row,
+             text="Go to dev.groupme.com → log in → click your avatar → Access Token.",
+             font=("Helvetica", 9), fg="#666666", anchor="w").pack(fill="x")
+    token_var = tk.StringVar(value=existing.get("access_token", ""))
+    token_entry = tk.Entry(token_row, textvariable=token_var,
+                           font=("Helvetica", 11), width=52, show="")
+    token_entry.pack(fill="x", pady=(4, 0), ipady=5)
+    fields["access_token"] = token_var
 
-    add_field(
-        body,
-        "GroupMe Access Token",
-        "access_token",
-        help_text="Go to dev.groupme.com → log in → click your avatar → Access Token.",
-    )
-    add_field(
-        body,
-        "Dev Group ID",
-        "dev_group_id",
-        help_text="Open your private dev group at web.groupme.com — the ID is in the URL.",
-    )
+    # ── Dev group picker ─────────────────────────────────────────────────────
+    group_row = tk.Frame(body)
+    group_row.pack(fill="x", pady=(10, 4))
+    tk.Label(group_row, text="Dev Group",
+             font=("Helvetica", 11, "bold"), anchor="w").pack(fill="x")
+    tk.Label(group_row,
+             text="Enter your token above, then click Fetch to pick your dev group from a list.",
+             font=("Helvetica", 9), fg="#666666", anchor="w",
+             wraplength=440, justify="left").pack(fill="x")
 
-    # Model dropdown with common options + custom entry
+    group_list_frame = tk.Frame(group_row)
+    group_list_frame.pack(fill="x", pady=(6, 0))
+
+    group_vsb = tk.Scrollbar(group_list_frame, orient="vertical")
+    group_lb = tk.Listbox(
+        group_list_frame,
+        font=("Helvetica", 10),
+        height=6,
+        selectmode="single",
+        activestyle="dotbox",
+        yscrollcommand=group_vsb.set,
+        exportselection=False,
+    )
+    group_vsb.config(command=group_lb.yview)
+    group_vsb.pack(side="right", fill="y")
+    group_lb.pack(side="left", fill="x", expand=True)
+
+    # Stored list of (name, id) tuples matching the listbox entries
+    _group_data = []
+
+    # Status / manual fallback
+    group_status = tk.Label(group_row, text="", font=("Helvetica", 9),
+                            fg="#888888", anchor="w")
+    group_status.pack(fill="x", pady=(3, 0))
+
+    # Manual ID entry (shown only if fetch fails)
+    manual_frame = tk.Frame(group_row)
+    manual_var = tk.StringVar(value=existing.get("dev_group_id", ""))
+    manual_entry = tk.Entry(manual_frame, textvariable=manual_var,
+                            font=("Helvetica", 11), width=28)
+    manual_entry.pack(side="left", ipady=4)
+    tk.Label(manual_frame, text=" (manual fallback)",
+             font=("Helvetica", 9), fg="#999999").pack(side="left")
+    fields["dev_group_id"] = manual_var   # always use this as the final value
+
+    # Pre-select if we already have a saved ID
+    _saved_gid = existing.get("dev_group_id", "")
+
+    def _fetch_groups():
+        token = token_var.get().strip()
+        if not token:
+            messagebox.showerror("Missing token", "Please enter your GroupMe Access Token first.")
+            return
+        group_status.config(text="⏳ Fetching groups...", fg="#888888")
+        root.update_idletasks()
+        try:
+            resp = requests.get(
+                "https://api.groupme.com/v3/groups",
+                params={"token": token, "per_page": 100},
+                timeout=10,
+            )
+            data = resp.json().get("response", [])
+        except Exception as e:
+            group_status.config(text=f"❌ Fetch failed: {e}", fg="#cc0000")
+            manual_frame.pack(fill="x", pady=(4, 0))
+            return
+
+        if not data:
+            group_status.config(text="⚠️ No groups found. Enter the ID manually below.", fg="#cc7700")
+            manual_frame.pack(fill="x", pady=(4, 0))
+            return
+
+        _group_data.clear()
+        group_lb.delete(0, "end")
+        for g in data:
+            gid  = str(g.get("id", ""))
+            name = g.get("name", gid)
+            _group_data.append((name, gid))
+            group_lb.insert("end", f"  {name}  [{gid}]")
+
+        # Auto-select a previously saved group if present
+        for i, (name, gid) in enumerate(_group_data):
+            if gid == _saved_gid:
+                group_lb.selection_set(i)
+                group_lb.see(i)
+                manual_var.set(gid)
+                break
+
+        group_status.config(
+            text=f"✅ {len(_group_data)} group(s) loaded. Select your dev group.",
+            fg="#227722")
+        manual_frame.pack_forget()
+
+    def _on_group_select(event):
+        sel = group_lb.curselection()
+        if sel:
+            _, gid = _group_data[sel[0]]
+            manual_var.set(gid)
+
+    group_lb.bind("<<ListboxSelect>>", _on_group_select)
+
+    fetch_btn = tk.Button(
+        group_row, text="🔄 Fetch My Groups",
+        font=("Helvetica", 10),
+        bg="#34c759", fg="white",
+        relief="flat", padx=10, pady=4, cursor="hand2",
+        command=_fetch_groups,
+    )
+    fetch_btn.pack(anchor="w", pady=(6, 0))
+
+    # ── Ollama model dropdown ────────────────────────────────────────────────
     model_row = tk.Frame(body)
-    model_row.pack(fill="x", pady=(0, 12))
+    model_row.pack(fill="x", pady=(12, 12))
     tk.Label(model_row, text="Ollama Base Model",
              font=("Helvetica", 11, "bold"), anchor="w").pack(fill="x")
     tk.Label(model_row,
              text="The AI model Ollama will download and use. Smaller = faster startup.",
              font=("Helvetica", 9), fg="#666666", anchor="w").pack(fill="x")
 
-    # Extended model list with RAM guidance
     MODEL_OPTIONS = [
-        # ── Llama 3.x family ──────────────────────────────────────────────
         ("llama3.1:8b",       "Llama 3.1  8B   (~5 GB RAM)  — great all-rounder"),
         ("llama3.2:3b",       "Llama 3.2  3B   (~2 GB RAM)  — fast, good quality"),
         ("llama3.2:1b",       "Llama 3.2  1B   (~1 GB RAM)  — very fast, basic"),
-        # ── Llama 3.3 ─────────────────────────────────────────────────────
         ("llama3.3:70b",      "Llama 3.3 70B   (~40 GB RAM) — best quality, needs GPU"),
-        # ── Mistral family ────────────────────────────────────────────────
         ("mistral",           "Mistral    7B   (~5 GB RAM)  — fast, great chat"),
         ("mistral-nemo",      "Mistral Nemo12B (~8 GB RAM)  — very capable"),
         ("mistral-small",     "Mistral Small   (~12 GB RAM) — high quality"),
-        # ── Phi family (Microsoft) ────────────────────────────────────────
         ("phi3:mini",         "Phi-3 Mini 3.8B (~3 GB RAM)  — great for Raspberry Pi"),
         ("phi3:medium",       "Phi-3 Med  14B  (~9 GB RAM)  — strong reasoning"),
         ("phi4-mini",         "Phi-4 Mini 3.8B (~3 GB RAM)  — improved Phi-3 mini"),
-        # ── Gemma family (Google) ─────────────────────────────────────────
         ("gemma2:2b",         "Gemma 2    2B   (~2 GB RAM)  — very fast, Pi-friendly"),
         ("gemma2:9b",         "Gemma 2    9B   (~6 GB RAM)  — excellent quality"),
         ("gemma2:27b",        "Gemma 2   27B   (~16 GB RAM) — near frontier quality"),
-        # ── Qwen family (Alibaba) ─────────────────────────────────────────
         ("qwen2.5:0.5b",      "Qwen 2.5   0.5B (~1 GB RAM)  — ultra-light"),
         ("qwen2.5:1.5b",      "Qwen 2.5   1.5B (~1 GB RAM)  — light, surprisingly good"),
         ("qwen2.5:3b",        "Qwen 2.5   3B   (~2 GB RAM)  — solid small model"),
         ("qwen2.5:7b",        "Qwen 2.5   7B   (~5 GB RAM)  — very capable"),
         ("qwen2.5:14b",       "Qwen 2.5  14B   (~9 GB RAM)  — strong"),
-        # ── TinyLlama ─────────────────────────────────────────────────────
         ("tinyllama",         "TinyLlama  1.1B (~1 GB RAM)  — Pi Zero / very low RAM"),
-        # ── DeepSeek ──────────────────────────────────────────────────────
         ("deepseek-r1:1.5b",  "DeepSeek-R1 1.5B (~1 GB RAM) — reasoning, very light"),
         ("deepseek-r1:7b",    "DeepSeek-R1 7B   (~5 GB RAM) — strong reasoning"),
-        # ── Llava (vision) ────────────────────────────────────────────────
         ("llava:7b",          "LLaVA      7B   (~5 GB RAM)  — vision+language"),
     ]
     model_names  = [m[0] for m in MODEL_OPTIONS]
@@ -273,17 +361,14 @@ def _run_gui_wizard(existing: dict) -> dict:
     default_model = existing.get("ollama_base_model", "llama3.1:8b")
     default_idx   = model_names.index(default_model) if default_model in model_names else 0
 
-    # Advice label
     tk.Label(
         model_row,
         text="Not sure which to pick? Check ollama.com/library for the full list and details.",
         font=("Helvetica", 9), fg="#0066cc", anchor="w", cursor="hand2",
     ).pack(fill="x", pady=(2, 6))
 
-    # Scrollable listbox frame
     lb_frame = tk.Frame(model_row)
     lb_frame.pack(fill="x")
-
     scrollbar = tk.Scrollbar(lb_frame, orient="vertical")
     listbox = tk.Listbox(
         lb_frame,
@@ -297,21 +382,18 @@ def _run_gui_wizard(existing: dict) -> dict:
     scrollbar.config(command=listbox.yview)
     scrollbar.pack(side="right", fill="y")
     listbox.pack(side="left", fill="x", expand=True)
-
     for label in model_labels:
         listbox.insert("end", "  " + label)
-
     listbox.selection_set(default_idx)
     listbox.see(default_idx)
 
-    # Custom entry for models not in the list
     tk.Label(model_row, text="Or type a custom model name:",
              font=("Helvetica", 9), fg="#666666", anchor="w").pack(fill="x", pady=(6, 0))
     model_var = tk.StringVar(value=default_model)
-    custom_entry = tk.Entry(model_row, textvariable=model_var, font=("Helvetica", 11), width=30)
+    custom_entry = tk.Entry(model_row, textvariable=model_var,
+                            font=("Helvetica", 11), width=30)
     custom_entry.pack(anchor="w", ipady=4)
 
-    # Sync listbox → custom entry
     def on_listbox_select(event):
         sel = listbox.curselection()
         if sel:
@@ -320,7 +402,7 @@ def _run_gui_wizard(existing: dict) -> dict:
 
     fields["ollama_base_model"] = model_var
 
-    # ── Buttons ─────────────────────────────────────────────────────────────
+    # ── Buttons ──────────────────────────────────────────────────────────────
     btn_row = tk.Frame(body)
     btn_row.pack(fill="x", pady=(6, 0))
 
@@ -333,7 +415,8 @@ def _run_gui_wizard(existing: dict) -> dict:
             messagebox.showerror("Missing field", "Please enter your GroupMe Access Token.")
             return
         if not dev_gid:
-            messagebox.showerror("Missing field", "Please enter your Dev Group ID.")
+            messagebox.showerror("Missing field",
+                "Please fetch your groups and select a Dev Group, or enter the ID manually.")
             return
         if not model:
             messagebox.showerror("Missing field", "Please enter an Ollama model name.")
@@ -390,9 +473,43 @@ def _run_terminal_wizard(existing: dict) -> dict:
             val = input(f"  {label}{hint}: ").strip()
         return val if val else current
 
-    token   = prompt("GroupMe Access Token", "access_token")
-    dev_gid = prompt("Dev Group ID", "dev_group_id")
-    model   = prompt("Ollama Base Model", "ollama_base_model", default="llama3.1:8b")
+    token = prompt("GroupMe Access Token", "access_token")
+
+    # Try to fetch groups with the token so the user can pick by number
+    dev_gid = ""
+    if token:
+        try:
+            resp = requests.get(
+                "https://api.groupme.com/v3/groups",
+                params={"token": token, "per_page": 100},
+                timeout=10,
+            )
+            groups = resp.json().get("response", [])
+            if groups:
+                print()
+                print("  Your GroupMe groups:")
+                for i, g in enumerate(groups, 1):
+                    print(f"    {i:2}. {g.get('name', '?')}  [ID: {g.get('id')}]")
+                print()
+                saved = existing.get("dev_group_id", "")
+                hint = f" [{saved}]" if saved else ""
+                raw = input(f"  Select Dev Group number (or paste ID manually){hint}: ").strip()
+                if not raw and saved:
+                    dev_gid = saved
+                elif raw.isdigit() and 1 <= int(raw) <= len(groups):
+                    dev_gid = str(groups[int(raw) - 1]["id"])
+                else:
+                    dev_gid = raw  # treat as manual ID
+            else:
+                print("  (No groups returned — enter Dev Group ID manually)")
+                dev_gid = prompt("Dev Group ID", "dev_group_id")
+        except Exception as e:
+            print(f"  (Could not fetch groups: {e} — enter Dev Group ID manually)")
+            dev_gid = prompt("Dev Group ID", "dev_group_id")
+    else:
+        dev_gid = prompt("Dev Group ID", "dev_group_id")
+
+    model = prompt("Ollama Base Model", "ollama_base_model", default="llama3.1:8b")
 
     if not token or not dev_gid:
         print()

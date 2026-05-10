@@ -128,73 +128,6 @@ import signal
 import random
 import socket
 
-# ── Game engine — auto-downloaded from GitHub if missing ─────────────────────
-_GAME_ENGINE_RAW  = "https://raw.githubusercontent.com/KingFifer40/Portable-GM_BOT/main/game_engine.py"
-_GAME_ENGINE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "game_engine.py")
-
-def _ensure_game_engine():
-    """Download game_engine.py from GitHub if it is not present locally."""
-    if os.path.exists(_GAME_ENGINE_PATH):
-        return True
-    print("[setup] game_engine.py not found — downloading from GitHub...")
-    try:
-        resp = requests.get(_GAME_ENGINE_RAW, timeout=30)
-        if resp.status_code == 200:
-            with open(_GAME_ENGINE_PATH, "w", encoding="utf-8") as f:
-                f.write(resp.text)
-            print("[setup] game_engine.py downloaded successfully.")
-            return True
-        else:
-            print(f"[setup] Failed to download game_engine.py: HTTP {resp.status_code}")
-            return False
-    except Exception as e:
-        print(f"[setup] Error downloading game_engine.py: {e}")
-        return False
-
-_ensure_game_engine()
-
-try:
-    import game_engine
-    _GAME_ENGINE_AVAILABLE = True
-except ImportError as _ge_err:
-    print(f"[setup] WARNING: game_engine.py could not be imported: {_ge_err}")
-    _GAME_ENGINE_AVAILABLE = False
-
-# ── Game Panel (separate window) ─────────────────────────────────────────────
-_GAME_PANEL_RAW  = "https://raw.githubusercontent.com/KingFifer40/Portable-GM_BOT/main/game_panel.py"
-_GAME_PANEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "game_panel.py")
-
-def _ensure_game_panel():
-    if os.path.exists(_GAME_PANEL_PATH):
-        return True
-    print("[setup] game_panel.py not found — downloading from GitHub...")
-    try:
-        resp = requests.get(_GAME_PANEL_RAW, timeout=30)
-        if resp.status_code == 200:
-            with open(_GAME_PANEL_PATH, "w", encoding="utf-8") as f:
-                f.write(resp.text)
-            print("[setup] game_panel.py downloaded successfully.")
-            return True
-        else:
-            print(f"[setup] Failed to download game_panel.py: HTTP {resp.status_code}")
-            return False
-    except Exception as e:
-        print(f"[setup] Error downloading game_panel.py: {e}")
-        return False
-
-_ensure_game_panel()
-
-try:
-    import game_panel
-    _GAME_PANEL_AVAILABLE = True
-except ImportError as _gp_err:
-    print(f"[setup] WARNING: game_panel.py could not be imported: {_gp_err}")
-    _GAME_PANEL_AVAILABLE = False
-
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ─────────────────────────────────────────────────────────────────────────────
-
 EIGHTBALL_ANSWERS = [
     "It is certain.",
     "Without a doubt.",
@@ -1284,7 +1217,6 @@ def points_leaderboard(group_id, top_n=None):
 # INVENTORY & SHOP SYSTEM
 # =============================================================================
 
-
 ITEM_NAME_MAX_LEN = 20
 CREATION_MIN_WORTH = 20
 
@@ -1367,21 +1299,11 @@ def _inventory_display(inv, owner_name):
     """Format a user's inventory as a readable string."""
     lines = [f"\U0001f392 Inventory of {owner_name}:"]
 
-    if inv["point_items"]:
-        lines.append("")
-        lines.append("\U0001f4c8 Point Gaining Items:")
-        idx = 1
-        for item in inv["point_items"]:
-            idx += 1
-    else:
-        lines.append("  (no point items)")
-
     if inv["creations"]:
         lines.append("")
         lines.append("\U0001f6e0\ufe0f Creations:")
-        offset = len(inv["point_items"])
         for i, c in enumerate(inv["creations"]):
-            slot = offset + i + 1
+            slot = i + 1
             lines.append(f"  i{slot}. \"{c['name']}\" \u2014 worth {c['worth']} pts")
     else:
         lines.append("")
@@ -3679,29 +3601,12 @@ def handle_game_command(message):
         send_message(GAME_GROUP_ID, "🧹 Shared AI conversation history has been cleared.", reply_to_id=msg_id)
         return
 
-    # ── GAME ENGINE COMMANDS — handles all RPG / ! commands ────────────────
-    if _GAME_ENGINE_AVAILABLE:
-        try:
-            _ge_resp = game_engine.handle_message(
-                GAME_GROUP_ID, sender_id, sender_name, text
-            )
-            if _ge_resp is not None:
-                send_message(GAME_GROUP_ID, _ge_resp, reply_to_id=msg_id)
-                return
-        except Exception:
-            print("[game_engine] Error handling message:")
-            traceback.print_exc()
+    # ── POINTS COMMANDS (! prefix — must be checked before the # guard below) ──
 
-    # ── LEGACY COMMAND REDIRECT ───────────────────────────────────────────────
-    # Old points commands removed — point players to the new RPG system.
-    if cmd in ("#points", "!points", "#fih", "!fih", "#steal", "!steal",
-               "#create", "!create", "#items", "!items"):
-        send_message(
-            GAME_GROUP_ID,
-            "🎮 The points system has been upgraded to a full RPG!\n"
-            "Use #beginpoints to register, then #help points for all commands.",
-            reply_to_id=msg_id,
-        )
+    # !points  — check own balance
+    if cmd == "!points":
+        bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
+        send_message(GAME_GROUP_ID, f"💰 {sender_name} has {bal} points.", reply_to_id=msg_id)
         return
 
     # !disabled  — show all currently disabled features
@@ -3715,10 +3620,244 @@ def handle_game_command(message):
         if not disabled:
             send_message(GAME_GROUP_ID, "✅ All features are currently enabled!", reply_to_id=msg_id)
         else:
-            lines_out = ["🚫 *Disabled Features:*"] + [f"  • {d}" for d in disabled]
-            lines_out.append("")
-            lines_out.append("Admins can re-enable any feature using the command shown above.")
-            send_message(GAME_GROUP_ID, "\n".join(lines_out), reply_to_id=msg_id)
+            lines = ["🚫 *Disabled Features:*"] + [f"  • {d}" for d in disabled]
+            lines.append("")
+            lines.append("Admins can re-enable any feature using the command shown above.")
+            send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
+        return
+
+    # !fih  — fish for points (win or lose!)
+    if cmd == "!fih":
+        allowed, remaining = check_ai_cooldown(sender_id, _fih_last_used, POINTS_FIH_CD)
+        if not allowed:
+            m, s = divmod(remaining, 60)
+            msg = FIH_COOLDOWN_MESSAGE.format(m=m, s=s)
+            send_message(GAME_GROUP_ID, f"🎣 {msg}", reply_to_id=msg_id)
+            return
+        set_ai_cooldown(sender_id, _fih_last_used)
+        # 1-in-1000 chance of a GOLDEN FIH!
+        if random.randint(1, 1000) == 1:
+            golden_pts = 2000
+            new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, golden_pts)
+            send_message(
+                GAME_GROUP_ID,
+                f"✨🐟✨ GOLDEN FIH!! ✨🐟✨\n"
+                f"{sender_name} reeled in the legendary GOLDEN FIH and earned {golden_pts} points! "
+                f"({new_bal} pts)",
+                reply_to_id=msg_id,
+            )
+            return
+        amt  = random.randint(POINTS_FIH_MIN, POINTS_FIH_MAX)
+        lose = random.random() < POINTS_FIH_LOSE_CHANCE
+        cur_bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
+        # If the player has 0 points, they can't lose anything — force a win
+        if lose and cur_bal == 0:
+            lose = False
+        if lose:
+            # Cap the loss to actual balance so the message is accurate
+            actual_loss = min(amt, cur_bal)
+            new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, -actual_loss)
+            pool   = FIH_LOSE_MESSAGES
+            prefix = "🦀 "
+            text   = random.choice(pool).format(name=sender_name, pts=actual_loss, bal=new_bal)
+        else:
+            new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, amt)
+            pool   = FIH_WIN_MESSAGES
+            prefix = "🎣 "
+            text   = random.choice(pool).format(name=sender_name, pts=amt, bal=new_bal)
+        send_message(GAME_GROUP_ID, prefix + text, reply_to_id=msg_id)
+        return
+
+    # !steal  — steal points from a random active user
+    if cmd == "!steal":
+        allowed, remaining = check_ai_cooldown(sender_id, _steal_last_used, POINTS_STEAL_CD)
+        if not allowed:
+            m, s = divmod(remaining, 60)
+            msg = STEAL_COOLDOWN_MESSAGE.format(m=m, s=s)
+            send_message(GAME_GROUP_ID, f"🦀 {msg}", reply_to_id=msg_id)
+            return
+        ledger = load_points(GAME_GROUP_ID)
+        victims = [
+            (uid, data) for uid, data in ledger.items()
+            if uid != str(sender_id) and data.get("points", 0) > 0
+        ]
+        if not victims:
+            send_message(GAME_GROUP_ID, f"🦀 {STEAL_EMPTY_MESSAGE}", reply_to_id=msg_id)
+            return
+        set_ai_cooldown(sender_id, _steal_last_used)
+        victim_id, victim_data = random.choice(victims)
+        # The random steal amount may exceed what the victim actually has;
+        # transfer_points caps it automatically and returns the real amount taken.
+        amt = random.randint(POINTS_STEAL_MIN, POINTS_STEAL_MAX)
+        taken, v_new, s_new = transfer_points(
+            GAME_GROUP_ID, victim_id, victim_data["name"],
+            sender_id, sender_name, amt,
+        )
+        # Edge case: victim's balance hit 0 between the filter check and the
+        # transfer (e.g. another command ran concurrently).
+        if taken == 0:
+            send_message(GAME_GROUP_ID, f"🦀 {STEAL_EMPTY_MESSAGE}", reply_to_id=msg_id)
+            return
+        tmpl = random.choice(STEAL_SUCCESS_MESSAGES)
+        text = tmpl.format(
+            thief=sender_name, victim=victim_data["name"],
+            pts=taken, thief_bal=s_new, victim_bal=v_new,
+        )
+        send_message(GAME_GROUP_ID, f"🦀 {text}", reply_to_id=msg_id)
+        return
+
+    # !coin <h/t> <bet>  — coin flip gamble
+    if cmd == "!coin":
+        allowed, remaining = check_ai_cooldown(sender_id, _coin_last_used, POINTS_COIN_CD)
+        if not allowed:
+            m, s = divmod(remaining, 60)
+            cd_msg = f"You're flipping too fast! Try again in {int(m)}m {int(s)}s." if m else f"You're flipping too fast! Try again in {int(s)}s."
+            send_message(GAME_GROUP_ID, f"🪙 {cd_msg}", reply_to_id=msg_id)
+            return
+        if len(parts) < 3:
+            send_message(GAME_GROUP_ID,
+                "Usage: !coin <h/t> <points>\nExample: !coin h 50",
+                reply_to_id=msg_id)
+            return
+        side_arg = parts[1].lower()
+        if side_arg not in ("h", "t", "heads", "tails"):
+            send_message(GAME_GROUP_ID, "Choose h (heads) or t (tails).", reply_to_id=msg_id)
+            return
+
+        # Reject non-integers (decimals etc.)
+        raw_bet = parts[2]
+        if "." in raw_bet:
+            send_message(GAME_GROUP_ID, "❌ Bets must be whole numbers, no decimals.", reply_to_id=msg_id)
+            return
+        try:
+            bet = int(raw_bet)
+            if bet <= 0:
+                raise ValueError
+        except ValueError:
+            send_message(GAME_GROUP_ID, "Bet must be a positive whole number.", reply_to_id=msg_id)
+            return
+
+        bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
+        if bal == 0:
+            send_message(GAME_GROUP_ID,
+                f"💸 {sender_name}, you have 0 points — earn some first with !fih!",
+                reply_to_id=msg_id)
+            return
+
+        allin = False
+        if bet >= bal:
+            bet = bal
+            allin = True
+
+        set_ai_cooldown(sender_id, _coin_last_used)
+        chosen_heads = side_arg in ("h", "heads")
+        send_message(GAME_GROUP_ID,
+            f"{'🎰 ALL IN! ' if allin else '🪙 '}{sender_name} bets {bet} pts on {'Heads' if chosen_heads else 'Tails'}... Flipping!",
+            reply_to_id=msg_id)
+        time.sleep(1.2)
+
+        result_heads = random.getrandbits(1) == 1  # fully unweighted random
+        result_word  = "Heads" if result_heads else "Tails"
+        won = (chosen_heads == result_heads)
+
+        if won:
+            new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, bet)
+            send_message(GAME_GROUP_ID,
+                f"🪙 {result_word}! {sender_name} wins {bet} pts! ({new_bal} pts total)",
+                reply_to_id=msg_id)
+        else:
+            new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, -bet)
+            send_message(GAME_GROUP_ID,
+                f"🪙 {result_word}! {sender_name} loses {bet} pts. ({new_bal} pts total)",
+                reply_to_id=msg_id)
+        return
+
+    # !give @mentioned_user amount  — give points to another user
+    # (item gifting with i<N> slots is handled further below)
+    if cmd == "!give" and not (len(parts) >= 3 and parts[-1].lower().startswith("i") and parts[-1][1:].isdigit()):
+        if len(parts) < 3:
+            send_message(GAME_GROUP_ID,
+                "Usage: !give @username <points>\nExample: !give @PlayerName 50",
+                reply_to_id=msg_id)
+            return
+
+        # Parse amount (last token)
+        raw_amt = parts[-1]
+        if "." in raw_amt:
+            send_message(GAME_GROUP_ID, "❌ Amount must be a whole number, no decimals.", reply_to_id=msg_id)
+            return
+        try:
+            give_amt = int(raw_amt)
+            if give_amt <= 0:
+                raise ValueError
+        except ValueError:
+            send_message(GAME_GROUP_ID, "Amount must be a positive whole number.", reply_to_id=msg_id)
+            return
+
+        # Resolve target — try attachment mentions first, then name matching
+        mention_text = " ".join(parts[1:-1]).lstrip("@").strip().lower()
+        target_id = None
+        target_name = None
+
+        # Try GroupMe attachment mentions
+        for att in message.get("attachments", []):
+            if att.get("type") == "mentions":
+                for uid in att.get("user_ids", []):
+                    if str(uid) != str(sender_id):
+                        target_id = uid
+                        target_name = _known_names.get(str(uid))
+                        break
+            if target_id:
+                break
+
+        # Fall back to name matching in the known names registry
+        if target_id is None:
+            for uid, name_val in _known_names.items():
+                if uid == str(sender_id):
+                    continue
+                if name_val.lower() == mention_text or mention_text in name_val.lower():
+                    target_id = uid
+                    target_name = name_val
+                    break
+
+        if target_id is None or str(target_id) == str(sender_id):
+            send_message(GAME_GROUP_ID,
+                "❌ Couldn't find that user. Make sure you @mention them or spell their name correctly.",
+                reply_to_id=msg_id)
+            return
+
+        if target_name is None:
+            target_name = str(target_id)
+
+        # Check sender balance
+        sender_bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
+        if sender_bal == 0:
+            send_message(GAME_GROUP_ID,
+                f"💸 {sender_name}, you have 0 points — nothing to give!",
+                reply_to_id=msg_id)
+            return
+
+        # Cap at available balance (all-in)
+        allin = False
+        if give_amt >= sender_bal:
+            give_amt = sender_bal
+            allin = True
+
+        # Transfer
+        taken, s_new, t_new = transfer_points(
+            GAME_GROUP_ID, sender_id, sender_name, target_id, target_name, give_amt
+        )
+
+        if taken == 0:
+            send_message(GAME_GROUP_ID,
+                f"💸 {sender_name}, you don't have enough points to give.",
+                reply_to_id=msg_id)
+            return
+
+        send_message(GAME_GROUP_ID,
+            f"{'🎰 ALL IN! ' if allin else '🎁 '}{sender_name} gave {taken} pts to {target_name}! "
+            f"({sender_name}: {s_new} pts | {target_name}: {t_new} pts)",
+            reply_to_id=msg_id)
         return
 
     # Catch common typo: player types =A through =G instead of #A through #G during a game
@@ -3731,20 +3870,6 @@ def handle_game_command(message):
                 reply_to_id=msg_id,
             )
             return
-
-    # ── SHOP: !shop ───────────────────────────────────────────────────────────
-    if cmd == "!shop":
-        shop_text = (
-            "\U0001f3ea *Point Item Shop:*\n"
-            "The shop is currently empty. Check back later!"
-        )
-        send_message(GAME_GROUP_ID, shop_text, reply_to_id=msg_id)
-        return
-
-    # ── SHOP: !buy <item> ─────────────────────────────────────────────────────
-    if cmd == "!buy":
-        send_message(GAME_GROUP_ID, "\u274c There are no items available to buy right now. Try !shop to see what's available.", reply_to_id=msg_id)
-        return
 
     # ── CREATIONS: !create "<name>" <worth>  (any order) ─────────────────────
     if cmd == "!create":
@@ -4239,17 +4364,85 @@ def handle_game_command(message):
                 send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
                 return
 
-            # POINTS HELP — delegates to game_engine help system
+            # POINTS HELP — paginated
             if topic == "points":
-                subpage_str = " ".join(parts[2:]).strip() if len(parts) >= 3 else ""
-                if _GAME_ENGINE_AVAILABLE:
-                    help_text = game_engine.cmd_help(f"points {subpage_str}".strip())
-                else:
+                subpage = None
+                if len(parts) >= 3 and parts[2].isdigit():
+                    subpage = int(parts[2])
+
+                if subpage is None:
                     help_text = (
-                        "🎮 RPG system unavailable right now.\n"
-                        "Use #beginpoints to register when it is back online."
+                        "\U0001f4b0 The points menu has multiple sections.\n"
+                        "Use one of these to see details:\n"
+                        "\u2022 #help points 1 \u2014 Earning & spending points\n"
+                        "\u2022 #help points 2 \u2014 Inventory\n"
+                        "\u2022 #help points 3 \u2014 Trading & requests\n"
+                        "\u2022 #help gamepoints \u2014 Game betting & AI rewards"
                     )
-                send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
+                    send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
+                    return
+
+                if subpage == 1:
+                    help_text = (
+                        "\U0001f4b0 *Points \u2014 Section 1: Earning & Spending*\n"
+                        "\u2022 !points \u2014 Check your point balance\n"
+                        "\u2022 !fih \u2014 Fish for points (5 min cooldown)\n"
+                        "\u2022 !steal \u2014 Steal from a random person (5 min cooldown)\n"
+                        "\u2022 !give @username <amount> \u2014 Give points to another player\n"
+                        "  Example: !give @PlayerName 50\n"
+                        "\u2022 !coin <h/t> <bet> \u2014 Flip a coin to gamble points\n"
+                        "  Example: !coin h 50\n"
+                        "  Betting your full balance or more = All In!\n"
+                        "\u2022 #leaderboard \u2014 Top points ranking\n"
+                        "\n"
+                        "\u26a0\ufe0f There is a max point cap set by the server admin."
+                    )
+                    send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
+                    return
+
+                if subpage == 2:
+                    help_text = (
+                        "\U0001f6e0\ufe0f *Points \u2014 Section 2: Inventory*\n"
+                        "\u2022 !create \"Name\" <worth> \u2014 Create a named item\n"
+                        f"  Name max {ITEM_NAME_MAX_LEN} chars, min worth {CREATION_MIN_WORTH} pts.\n"
+                        "  Names must be unique. You pay the worth in points.\n"
+                        "  Example: !create \"The Left Kidney\" 200\n"
+                        "\n"
+                        "\u2022 !items \u2014 View your inventory\n"
+                        "\u2022 !items @user \u2014 View someone else's inventory\n"
+                        "\n"
+                        "\u2022 !sellitem i<slot> \u2014 Sell a creation to the bot\n"
+                        "  Destroys the item; gives you its worth in points.\n"
+                        "  Example: !sellitem i2"
+                    )
+                    send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
+                    return
+
+                if subpage == 3:
+                    help_text = (
+                        "\U0001f91d *Points \u2014 Section 3: Trading & Requests*\n"
+                        "\u2022 !give @user i<slot> \u2014 Gift an item for free\n"
+                        "  Example: !give @PlayerName i2\n"
+                        "\n"
+                        "\u2022 !request @user i<slot> \u2014 Request to buy their item\n"
+                        "  You pay the item's worth; they confirm with !yes.\n"
+                        "  Example: !request @PlayerName i3\n"
+                        "\n"
+                        "\u2022 !request @user <amount> \u2014 Ask someone for points\n"
+                        "  Example: !request @PlayerName 100\n"
+                        "\n"
+                        "\u2022 !listrequests \u2014 See all incoming requests\n"
+                        "\u2022 !yes <N> \u2014 Accept request number N\n"
+                        "\u2022 !no <N> \u2014 Decline request number N"
+                    )
+                    send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
+                    return
+
+                send_message(
+                    GAME_GROUP_ID,
+                    "Available points sections: #help points 1, #help points 2, #help points 3",
+                    reply_to_id=msg_id,
+                )
                 return
 
             # GAME POINTS / BETTING HELP
@@ -4302,11 +4495,11 @@ def handle_game_command(message):
         # -----------------------------
         # TOP-LEVEL HELP MENU
         # -----------------------------
-        lines = ["📚 *Help Topics:*"]
+        lines = ["\U0001f4da *Help Topics:*"]
 
-        # RPG — single entry pointing to #help points
-        lines.append("• #help points      — Fantasy RPG game (Aethermoor)")
-        lines.append("• #help gamepoints  — Game betting & AI rewards")
+        # Points topics are always shown (points are always active)
+        lines.append("\u2022 #help points      \u2014 Points sections index")
+        lines.append("\u2022 #help gamepoints  \u2014 Game betting & AI rewards")
 
         # Feature-gated topics
         if CONNECT4_ENABLED:
@@ -5299,12 +5492,19 @@ def handle_game_command(message):
         send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
         return
 
-    # ── GEM LEADERBOARD (#leaderboard) — now powered by game_engine ──────────
+    # ── POINTS LEADERBOARD (#leaderboard) ────────────────────────────────────
+
+    # #leaderboard
     if cmd == "#leaderboard":
-        if _GAME_ENGINE_AVAILABLE:
-            send_message(GAME_GROUP_ID, game_engine.cmd_leaderboard(GAME_GROUP_ID), reply_to_id=msg_id)
-        else:
-            send_message(GAME_GROUP_ID, "Leaderboard unavailable right now.", reply_to_id=msg_id)
+        board_entries = points_leaderboard(GAME_GROUP_ID)
+        if not board_entries:
+            send_message(GAME_GROUP_ID, "No points earned yet in this group!", reply_to_id=msg_id)
+            return
+        medals = ["🥇", "🥈", "🥉"] + ["   "] * 7
+        lines = ["🏆 Points Leaderboard:"]
+        for i, entry in enumerate(board_entries):
+            lines.append(f"{medals[i]} {entry['name']}: {entry['points']} pts")
+        send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
         return
 
     send_message(GAME_GROUP_ID, "Unknown command. Use #help for a list of commands.", reply_to_id=msg_id)
@@ -5363,15 +5563,6 @@ def game_poll_loop():
                     continue
                 handle_game_command(msg)
 
-            # Game engine tick — process travel arrivals, etc.
-            if _GAME_ENGINE_AVAILABLE and GAME_GROUP_ID:
-                try:
-                    tick_msgs = game_engine.tick_group(GAME_GROUP_ID)
-                    for tmsg in tick_msgs:
-                        send_message(GAME_GROUP_ID, tmsg)
-                except Exception:
-                    pass
-
         except Exception:
             print("Error in game_poll_loop:")
             traceback.print_exc()
@@ -5422,7 +5613,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "ee50a57"
+BOT_COMMIT_SHA = "c13216d"
 
 _control_panel_instance = None  # set when panel launches
 
@@ -5481,23 +5672,6 @@ def _do_self_update():
         with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(new_source)
         os.replace(tmp_path, script_path)
-
-        # Also update game_engine.py and game_panel.py from GitHub
-        for _upd_url, _upd_name in [
-            (_GAME_ENGINE_RAW, "game_engine.py"),
-            (_GAME_PANEL_RAW,  "game_panel.py"),
-        ]:
-            try:
-                _upd_resp = requests.get(_upd_url, timeout=30)
-                if _upd_resp.status_code == 200:
-                    _upd_path = os.path.join(os.path.dirname(script_path), _upd_name)
-                    _upd_tmp  = _upd_path + ".update_tmp"
-                    with open(_upd_tmp, "w", encoding="utf-8") as _uf:
-                        _uf.write(_upd_resp.text)
-                    os.replace(_upd_tmp, _upd_path)
-                    print(f"[update] {_upd_name} updated successfully.")
-            except Exception as _upd_err:
-                print(f"[update] {_upd_name} update failed (non-fatal): {_upd_err}")
         
         # Find and call restart_bot.py in the same directory
         restart_script = os.path.join(os.path.dirname(script_path), "restart_bot.py")
@@ -5567,25 +5741,6 @@ class ControlPanel:
                                    bg="#1c1c1e", fg="#888888")
         self._ver_label.pack(side="right")
 
-        # ── Game Panel launch button ──────────────────────────────────────────
-        def _open_game_panel():
-            if _GAME_PANEL_AVAILABLE and _GAME_ENGINE_AVAILABLE:
-                game_panel.open_game_panel(game_engine, SCRIPT_DIR)
-            else:
-                import tkinter.messagebox as mb
-                mb.showerror("Unavailable",
-                    "game_panel.py or game_engine.py is not loaded.\n"
-                    "Check the console for errors.")
-
-        tk.Button(
-            hdr, text="🏰 Game Panel",
-            font=("Helvetica", 10, "bold"),
-            bg="#7c3aed", fg="white",
-            relief="flat", padx=10, pady=4,
-            cursor="hand2",
-            command=_open_game_panel,
-        ).pack(side="right", padx=(0, 12))
-
         # ── Status bar at bottom ──────────────────────────────────────────────
         self._status_var = tk.StringVar(value="Ready.")
         tk.Label(root, textvariable=self._status_var,
@@ -5599,6 +5754,7 @@ class ControlPanel:
 
         self._build_tab_status(nb)
         self._build_tab_groups(nb)
+        self._build_tab_points(nb)
         self._build_tab_ai(nb)
         self._build_tab_settings(nb)
         self._build_tab_update(nb)
@@ -6248,8 +6404,6 @@ class ControlPanel:
         lb.delete(0, "end")
         inv = matched["inv"]
         slot = 1
-        for item in inv.get("point_items", []):
-            slot += 1
         for creation in inv.get("creations", []):
             name_c = creation.get("name", "?")
             worth  = creation.get("worth", 0)
@@ -7089,15 +7243,6 @@ def main():
 
     ensure_ai_directories()
     pfp_startup_check()
-
-    # Initialise the RPG game engine
-    if _GAME_ENGINE_AVAILABLE:
-        def _ge_send(gid, text):
-            send_message(gid, text)
-        try:
-            game_engine.init(SCRIPT_DIR, _ge_send)
-        except Exception as _ge_init_err:
-            print(f"[game_engine] init failed: {_ge_init_err}")
     global GAME_GROUP_ID, ADMIN_GROUP_ID, USE_SUBGROUP, last_dev_since_id, last_game_since_id
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)

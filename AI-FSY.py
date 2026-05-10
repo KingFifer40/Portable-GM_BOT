@@ -160,6 +160,39 @@ except ImportError as _ge_err:
     print(f"[setup] WARNING: game_engine.py could not be imported: {_ge_err}")
     _GAME_ENGINE_AVAILABLE = False
 
+# ── Game Panel (separate window) ─────────────────────────────────────────────
+_GAME_PANEL_RAW  = "https://raw.githubusercontent.com/KingFifer40/Portable-GM_BOT/main/game_panel.py"
+_GAME_PANEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "game_panel.py")
+
+def _ensure_game_panel():
+    if os.path.exists(_GAME_PANEL_PATH):
+        return True
+    print("[setup] game_panel.py not found — downloading from GitHub...")
+    try:
+        resp = requests.get(_GAME_PANEL_RAW, timeout=30)
+        if resp.status_code == 200:
+            with open(_GAME_PANEL_PATH, "w", encoding="utf-8") as f:
+                f.write(resp.text)
+            print("[setup] game_panel.py downloaded successfully.")
+            return True
+        else:
+            print(f"[setup] Failed to download game_panel.py: HTTP {resp.status_code}")
+            return False
+    except Exception as e:
+        print(f"[setup] Error downloading game_panel.py: {e}")
+        return False
+
+_ensure_game_panel()
+
+try:
+    import game_panel
+    _GAME_PANEL_AVAILABLE = True
+except ImportError as _gp_err:
+    print(f"[setup] WARNING: game_panel.py could not be imported: {_gp_err}")
+    _GAME_PANEL_AVAILABLE = False
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 EIGHTBALL_ANSWERS = [
@@ -5573,18 +5606,22 @@ def _do_self_update():
             f.write(new_source)
         os.replace(tmp_path, script_path)
 
-        # Also update game_engine.py from GitHub
-        try:
-            ge_resp = requests.get(_GAME_ENGINE_RAW, timeout=30)
-            if ge_resp.status_code == 200:
-                ge_path = os.path.join(os.path.dirname(script_path), "game_engine.py")
-                ge_tmp  = ge_path + ".update_tmp"
-                with open(ge_tmp, "w", encoding="utf-8") as gf:
-                    gf.write(ge_resp.text)
-                os.replace(ge_tmp, ge_path)
-                print("[update] game_engine.py updated successfully.")
-        except Exception as _ge_upd_err:
-            print(f"[update] game_engine.py update failed (non-fatal): {_ge_upd_err}")
+        # Also update game_engine.py and game_panel.py from GitHub
+        for _upd_url, _upd_name in [
+            (_GAME_ENGINE_RAW, "game_engine.py"),
+            (_GAME_PANEL_RAW,  "game_panel.py"),
+        ]:
+            try:
+                _upd_resp = requests.get(_upd_url, timeout=30)
+                if _upd_resp.status_code == 200:
+                    _upd_path = os.path.join(os.path.dirname(script_path), _upd_name)
+                    _upd_tmp  = _upd_path + ".update_tmp"
+                    with open(_upd_tmp, "w", encoding="utf-8") as _uf:
+                        _uf.write(_upd_resp.text)
+                    os.replace(_upd_tmp, _upd_path)
+                    print(f"[update] {_upd_name} updated successfully.")
+            except Exception as _upd_err:
+                print(f"[update] {_upd_name} update failed (non-fatal): {_upd_err}")
         
         # Find and call restart_bot.py in the same directory
         restart_script = os.path.join(os.path.dirname(script_path), "restart_bot.py")
@@ -5654,6 +5691,25 @@ class ControlPanel:
                                    bg="#1c1c1e", fg="#888888")
         self._ver_label.pack(side="right")
 
+        # ── Game Panel launch button ──────────────────────────────────────────
+        def _open_game_panel():
+            if _GAME_PANEL_AVAILABLE and _GAME_ENGINE_AVAILABLE:
+                game_panel.open_game_panel(game_engine, SCRIPT_DIR)
+            else:
+                import tkinter.messagebox as mb
+                mb.showerror("Unavailable",
+                    "game_panel.py or game_engine.py is not loaded.\n"
+                    "Check the console for errors.")
+
+        tk.Button(
+            hdr, text="🏰 Game Panel",
+            font=("Helvetica", 10, "bold"),
+            bg="#7c3aed", fg="white",
+            relief="flat", padx=10, pady=4,
+            cursor="hand2",
+            command=_open_game_panel,
+        ).pack(side="right", padx=(0, 12))
+
         # ── Status bar at bottom ──────────────────────────────────────────────
         self._status_var = tk.StringVar(value="Ready.")
         tk.Label(root, textvariable=self._status_var,
@@ -5667,7 +5723,6 @@ class ControlPanel:
 
         self._build_tab_status(nb)
         self._build_tab_groups(nb)
-        self._build_tab_points(nb)
         self._build_tab_ai(nb)
         self._build_tab_settings(nb)
         self._build_tab_update(nb)

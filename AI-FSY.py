@@ -1284,10 +1284,6 @@ def points_leaderboard(group_id, top_n=None):
 # INVENTORY & SHOP SYSTEM
 # =============================================================================
 
-SHOP_CLICKER_COST  = 2500   # points to buy a clicker
-SHOP_CLICKER_RATE  = 1      # points awarded per tick per clicker owned
-SHOP_CLICKER_TICK  = 3      # seconds between clicker ticks (1 pt every 3s)
-SHOP_CLICKER_MAX   = 3      # maximum clickers a single user can own
 
 ITEM_NAME_MAX_LEN = 20
 CREATION_MIN_WORTH = 20
@@ -1322,28 +1318,6 @@ def _save_inventory(group_id, user_id, data):
     except Exception as e:
         print(f"Warning: could not save inventory for {user_id}: {e}")
 
-
-def _get_clicker_count(group_id, user_id):
-    inv = _load_inventory(group_id, user_id)
-    for item in inv["point_items"]:
-        if item.get("type") == "clicker":
-            return item.get("count", 0)
-    return 0
-
-
-def _set_clicker_count(group_id, user_id, count):
-    inv = _load_inventory(group_id, user_id)
-    for item in inv["point_items"]:
-        if item.get("type") == "clicker":
-            if count <= 0:
-                inv["point_items"].remove(item)
-            else:
-                item["count"] = count
-            _save_inventory(group_id, user_id, inv)
-            return
-    if count > 0:
-        inv["point_items"].append({"type": "clicker", "count": count})
-        _save_inventory(group_id, user_id, inv)
 
 
 def _requests_path(group_id, user_id):
@@ -1398,11 +1372,7 @@ def _inventory_display(inv, owner_name):
         lines.append("\U0001f4c8 Point Gaining Items:")
         idx = 1
         for item in inv["point_items"]:
-            if item.get("type") == "clicker":
-                count = item.get("count", 0)
-                rate = count * SHOP_CLICKER_RATE
-                lines.append(f"  i{idx}. Clicker \xd7{count}/{SHOP_CLICKER_MAX} \u2192 +{rate} pt every {SHOP_CLICKER_TICK}s")
-                idx += 1
+            idx += 1
     else:
         lines.append("  (no point items)")
 
@@ -1437,40 +1407,6 @@ def _get_item_by_slot(inv, slot_number):
         idx = slot_number - point_count - 1
         return "creations", idx, inv["creations"][idx]
 
-
-def run_clicker_tick(group_id):
-    """Award clicker passive income to all users who own clickers. Silent at cap."""
-    cid = _canonical_group_id(group_id)
-    inv_dir = os.path.join(SCRIPT_DIR, "groups", cid, "inventory")
-    if not os.path.exists(inv_dir):
-        return
-    for fname in os.listdir(inv_dir):
-        if not fname.endswith(".json"):
-            continue
-        uid = fname[:-5]
-        count = _get_clicker_count(group_id, uid)
-        if count <= 0:
-            continue
-        pts = count * SHOP_CLICKER_RATE
-        record = _load_user_record(group_id, uid)
-        current = max(0, record.get("points", 0))
-        if POINTS_MAX_CAP > 0 and current >= POINTS_MAX_CAP:
-            continue  # silently skip — cap reached
-        new_val = min(current + pts, POINTS_MAX_CAP) if POINTS_MAX_CAP > 0 else current + pts
-        record["points"] = new_val
-        _save_user_record(group_id, uid, record)
-
-
-def clicker_loop(get_group_id_fn):
-    """Background thread that ticks clicker income every SHOP_CLICKER_TICK seconds."""
-    while True:
-        time.sleep(SHOP_CLICKER_TICK)
-        try:
-            gid = get_group_id_fn()
-            if gid:
-                run_clicker_tick(gid)
-        except Exception as e:
-            print(f"[clicker] Error: {e}")
 
 
 def _group_config_path(group_id):
@@ -3279,10 +3215,9 @@ def handle_dev_command(message):
             return
         bal = get_points(GAME_GROUP_ID, uid, uname)
         inv = _load_inventory(GAME_GROUP_ID, uid)
-        clickers = _get_clicker_count(GAME_GROUP_ID, uid)
         creations = len(inv.get("creations", []))
         send_message(DEV_GROUP_ID,
-            f"📊 {uname}:\n  Points: {bal:,}\n  Clickers: {clickers}\n  Creations: {creations}",
+            f"📊 {uname}:\n  Points: {bal:,}\n  Creations: {creations}",
             reply_to_id=msg_id)
         return
 
@@ -3801,54 +3736,14 @@ def handle_game_command(message):
     if cmd == "!shop":
         shop_text = (
             "\U0001f3ea *Point Item Shop:*\n"
-            f"\u2022 Clicker \u2014 {SHOP_CLICKER_COST:,} pts\n"
-            f"  Earns {SHOP_CLICKER_RATE} pt every {SHOP_CLICKER_TICK}s passively per clicker owned.\n"
-            f"  Stack up to {SHOP_CLICKER_MAX} for {SHOP_CLICKER_MAX * SHOP_CLICKER_RATE} pt every {SHOP_CLICKER_TICK}s total!\n"
-            "\n"
-            "Use !buy clicker to purchase."
+            "The shop is currently empty. Check back later!"
         )
         send_message(GAME_GROUP_ID, shop_text, reply_to_id=msg_id)
         return
 
     # ── SHOP: !buy <item> ─────────────────────────────────────────────────────
     if cmd == "!buy":
-        if len(parts) < 2:
-            send_message(GAME_GROUP_ID, "Usage: !buy clicker", reply_to_id=msg_id)
-            return
-        item_arg = parts[1].lower()
-        if item_arg == "clicker":
-            cur_count = _get_clicker_count(GAME_GROUP_ID, sender_id)
-            if cur_count >= SHOP_CLICKER_MAX:
-                send_message(
-                    GAME_GROUP_ID,
-                    f"\u274c You already own the maximum of {SHOP_CLICKER_MAX} Clickers.",
-                    reply_to_id=msg_id,
-                )
-                return
-            bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
-            if bal < SHOP_CLICKER_COST:
-                send_message(
-                    GAME_GROUP_ID,
-                    f"\u274c You need {SHOP_CLICKER_COST:,} pts to buy a Clicker. You have {bal:,} pts.",
-                    reply_to_id=msg_id,
-                )
-                return
-            new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, -SHOP_CLICKER_COST)
-            _set_clicker_count(GAME_GROUP_ID, sender_id, cur_count + 1)
-            new_count = cur_count + 1
-            rate = new_count * SHOP_CLICKER_RATE
-            slots_left = SHOP_CLICKER_MAX - new_count
-            slot_note = f"  ({slots_left} slot{'s' if slots_left != 1 else ''} remaining)" if slots_left > 0 else "  (Max clickers reached!)"
-            send_message(
-                GAME_GROUP_ID,
-                f"\u2705 {sender_name} bought a Clicker!\n"
-                f"  {new_count}\xd7 Clicker \u2192 +{rate} pt every {SHOP_CLICKER_TICK}s passively\n"
-                f"{slot_note}\n"
-                f"Balance: {new_bal:,} pts",
-                reply_to_id=msg_id,
-            )
-        else:
-            send_message(GAME_GROUP_ID, f"\u274c Unknown item. Try !shop to see what\'s available.", reply_to_id=msg_id)
+        send_message(GAME_GROUP_ID, "\u274c There are no items available to buy right now. Try !shop to see what's available.", reply_to_id=msg_id)
         return
 
     # ── CREATIONS: !create "<name>" <worth>  (any order) ─────────────────────
@@ -3969,27 +3864,8 @@ def handle_game_command(message):
         if section is None:
             send_message(GAME_GROUP_ID, f"\u274c You don\'t have an item in slot i{slot}.", reply_to_id=msg_id)
             return
-        if section == "point_items" and item.get("type") == "clicker":
-            if item.get("count", 0) > 1:
-                inv["point_items"][idx]["count"] -= 1
-            else:
-                inv["point_items"].pop(idx)
-            _save_inventory(GAME_GROUP_ID, sender_id, inv)
-            recv_inv = _load_inventory(GAME_GROUP_ID, target_id_gv)
-            found = False
-            for it in recv_inv["point_items"]:
-                if it.get("type") == "clicker":
-                    it["count"] = it.get("count", 0) + 1
-                    found = True
-                    break
-            if not found:
-                recv_inv["point_items"].append({"type": "clicker", "count": 1})
-            _save_inventory(GAME_GROUP_ID, target_id_gv, recv_inv)
-            send_message(
-                GAME_GROUP_ID,
-                f"\U0001f381 {sender_name} gifted a Clicker to {target_name_gv}!",
-                reply_to_id=msg_id,
-            )
+        if section == "point_items":
+            send_message(GAME_GROUP_ID, "\u274c That item can\'t be gifted.", reply_to_id=msg_id)
         elif section == "creations":
             creation = inv["creations"].pop(idx)
             _save_inventory(GAME_GROUP_ID, sender_id, inv)
@@ -4017,7 +3893,7 @@ def handle_game_command(message):
             send_message(GAME_GROUP_ID, f"\u274c You don\'t have an item in slot i{slot}.", reply_to_id=msg_id)
             return
         if section == "point_items":
-            send_message(GAME_GROUP_ID, "\u274c Point items (like Clickers) cannot be sold to the bot.", reply_to_id=msg_id)
+            send_message(GAME_GROUP_ID, "\u274c Point items cannot be sold to the bot.", reply_to_id=msg_id)
             return
         creation = inv["creations"].pop(idx)
         _save_inventory(GAME_GROUP_ID, sender_id, inv)
@@ -6103,11 +5979,11 @@ class ControlPanel:
         sort_row.pack(fill="x", pady=(0, 2))
         tk.Label(sort_row, text="Sort:", font=("Helvetica", 9)).pack(side="left")
         self._pts_sort_var = tk.StringVar(value="points")
-        for val, lbl in [("points", "Points"), ("name", "Name"), ("clickers", "Clickers"), ("creations", "Items")]:
+        for val, lbl in [("points", "Points"), ("name", "Name"), ("creations", "Items")]:
             ttk.Radiobutton(sort_row, text=lbl, variable=self._pts_sort_var, value=val,
                             command=self._pts_refresh_table).pack(side="left", padx=2)
 
-        cols = ("rank", "name", "points", "clickers", "creations")
+        cols = ("rank", "name", "points", "creations")
         tree_frame = tk.Frame(lb_outer)
         tree_frame.pack(fill="x")
 
@@ -6121,13 +5997,11 @@ class ControlPanel:
         self._pts_tree.heading("rank",      text="#")
         self._pts_tree.heading("name",      text="Name")
         self._pts_tree.heading("points",    text="Points")
-        self._pts_tree.heading("clickers",  text="Clickers")
         self._pts_tree.heading("creations", text="Items")
 
         self._pts_tree.column("rank",      width=28,  anchor="center", stretch=False)
         self._pts_tree.column("name",      width=130, anchor="w")
         self._pts_tree.column("points",    width=70,  anchor="e")
-        self._pts_tree.column("clickers",  width=55,  anchor="center")
         self._pts_tree.column("creations", width=38,  anchor="center")
 
         self._pts_tree.tag_configure("gold",   background="#fff8dc")
@@ -6174,9 +6048,6 @@ class ControlPanel:
 
         self._pts_detail_pts = tk.Label(detail, text="", font=("Helvetica", 10), fg="#0055aa")
         self._pts_detail_pts.pack(anchor="w")
-
-        self._pts_detail_clickers = tk.Label(detail, text="", font=("Helvetica", 9), fg="#555555")
-        self._pts_detail_clickers.pack(anchor="w")
 
         ttk.Separator(detail, orient="horizontal").pack(fill="x", pady=6)
 
@@ -6228,10 +6099,6 @@ class ControlPanel:
                   command=self._pts_inv_remove,
                   bg="#ff3b30", fg="white", relief="flat",
                   padx=6, pady=3).pack(side="left", padx=(0, 4))
-        tk.Button(inv_btn_row, text="🖱 +Clicker", font=("Helvetica", 9),
-                  command=self._pts_inv_add_clicker,
-                  bg="#5856d6", fg="white", relief="flat",
-                  padx=6, pady=3).pack(side="left")
 
         ttk.Separator(detail, orient="horizontal").pack(fill="x", pady=6)
 
@@ -6286,13 +6153,11 @@ class ControlPanel:
         rows = []
         for uid, record in ledger.items():
             inv = _load_inventory(gid, uid)
-            clickers = _get_clicker_count(gid, uid)
             creations = len(inv.get("creations", []))
             rows.append({
                 "uid":        uid,
                 "name":       record.get("name", uid),
                 "points":     record.get("points", 0),
-                "clickers":   clickers,
                 "creations":  creations,
                 "inv":        inv,
             })
@@ -6316,11 +6181,10 @@ class ControlPanel:
     def _pts_refresh_table(self):
         """Re-sort and repopulate the treeview from cached _pts_data."""
         sort = self._pts_sort_var.get()
-        reverse = sort in ("points", "clickers", "creations")
+        reverse = sort in ("points", "creations")
         key_fn = {
             "points":    lambda r: r["points"],
             "name":      lambda r: r["name"].lower(),
-            "clickers":  lambda r: r["clickers"],
             "creations": lambda r: r["creations"],
         }.get(sort, lambda r: r["points"])
 
@@ -6337,7 +6201,7 @@ class ControlPanel:
             tag = tag_map.get(i, "even" if i % 2 == 0 else "odd")
             iid = tree.insert("", "end",
                               values=(rank_str, row["name"], f"{row['points']:,}",
-                                      row["clickers"], row["creations"]),
+                                      row["creations"]),
                               tags=(tag,))
             # Restore selection if this was the selected user
             if row["uid"] == self._pts_selected_uid:
@@ -6379,19 +6243,13 @@ class ControlPanel:
         """Populate the detail panel widgets from a data row dict."""
         self._pts_detail_name.config(text=matched["name"])
         self._pts_detail_pts.config(text=f"Points: {matched['points']:,}")
-        rate = matched["clickers"] * SHOP_CLICKER_RATE
-        self._pts_detail_clickers.config(
-            text=f"Clickers: {matched['clickers']}  (+{rate} pt/s passive)")
 
         lb = self._pts_inv_list
         lb.delete(0, "end")
         inv = matched["inv"]
         slot = 1
         for item in inv.get("point_items", []):
-            if item.get("type") == "clicker":
-                count = item.get("count", 1)
-                lb.insert("end", f"  i{slot}  🖱 Clicker ×{count}")
-                slot += 1
+            slot += 1
         for creation in inv.get("creations", []):
             name_c = creation.get("name", "?")
             worth  = creation.get("worth", 0)
@@ -6473,8 +6331,8 @@ class ControlPanel:
             return
 
         section, item = items_in_order[idx]
-        if section == "point_items" and item.get("type") == "clicker":
-            label = f"Clicker ×{item.get('count', 1)}"
+        if section == "point_items":
+            label = f"point item"
         else:
             label = f'"{item.get("name", "?")}" (worth {item.get("worth", 0)} pts)'
 
@@ -6490,20 +6348,6 @@ class ControlPanel:
         self._pts_adj_status.config(text=f"✅ Removed {label} from {uname}.", fg="#34c759")
         self._pts_refresh()
 
-    def _pts_inv_add_clicker(self):
-        """Add one clicker to the selected user's inventory."""
-        import tkinter.messagebox as mb
-        if not self._pts_selected_uid or not GAME_GROUP_ID:
-            self._pts_adj_status.config(text="No user selected.", fg="#ff3b30")
-            return
-
-        uid   = self._pts_selected_uid
-        uname = self._pts_selected_name
-        cur   = _get_clicker_count(GAME_GROUP_ID, uid)
-        _set_clicker_count(GAME_GROUP_ID, uid, cur + 1)
-        self._pts_adj_status.config(
-            text=f"✅ Added clicker to {uname} (now {cur + 1}×).", fg="#34c759")
-        self._pts_refresh()
 
     def _pts_inv_inject(self):
         """Inject an arbitrary creation item (name + worth) into the selected user's inventory.
@@ -7303,11 +7147,9 @@ def main():
     # Start bot threads (daemon=True so they die if the process exits)
     dev_thread = threading.Thread(target=dev_poll_loop, daemon=True)
     game_thread = threading.Thread(target=game_poll_loop, daemon=True)
-    clicker_thread = threading.Thread(target=clicker_loop, args=(lambda: GAME_GROUP_ID,), daemon=True)
 
     dev_thread.start()
     game_thread.start()
-    clicker_thread.start()
 
     # Launch the control panel GUI on the main thread.
     # If tkinter is unavailable (headless server), fall back to a simple

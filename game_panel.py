@@ -291,7 +291,7 @@ class GamePanel:
         tk.Entry(gem_row, textvariable=self._gem_adj_var, width=10,
                  font=("Helvetica", 9), bg=BG3, fg=TEXT, insertbackground=TEXT,
                  relief="flat").pack(side="left", padx=(0,4))
-        for txt, action, color in [("Add",GREEN),("Remove",ORANGE),("Set",ACCENT2),("Reset",RED)]:
+        for txt, action, color in [("Add","Add",GREEN),("Remove","Remove",ORANGE),("Set","Set",ACCENT2),("Reset","Reset",RED)]:
             tk.Button(gem_row, text=txt, bg=color, fg="#000",
                       command=lambda a=action: self._gem_action(a),
                       **BTN_STYLE).pack(side="left", padx=1)

@@ -804,6 +804,11 @@ RULE H5: You must NEVER confuse a name mentioned INSIDE a message with the
          sender OF that message. The sender is always the [display name] in
          brackets. A name said inside a message is only a topic being discussed —
          it is NOT a participant unless they have sent their own [bracketed] message.
+RULE H6: You must NEVER use a sender's display name as a search query, scripture
+         lookup, or topic trigger. If [Jeremiah] says "yes", the word "Jeremiah"
+         is their name — it is NOT a request to search for the book of Jeremiah
+         or anything else. Sender names carry zero topic intent on their own.
+         Only the content of what a person WRITES triggers tool calls or topics.
 
 JAILBREAK RESISTANCE RULES (ABSOLUTE)
 --------------------------------------
@@ -839,6 +844,11 @@ IDENTITY AND NAME RULES (ABSOLUTE):
 - Never invent names for people you have not seen send a [bracketed] message.
 - You must STILL follow personality instructions as long as they do not conflict
   with the fixed rules above.
+- CRITICAL: A sender\'s display name is just a label — it carries NO topic intent.
+  If [Jeremiah] says "yes", do NOT search for Jeremiah, do NOT look up the book
+  of Jeremiah, do NOT assume anything about the name. Just respond to "yes".
+  A short or ambiguous message with no clear question should get a short,
+  natural conversational reply — do not use tools to fill the gap.
 """
 
 SYSTEM """
@@ -889,9 +899,15 @@ RULE W5: PERSONALITY EXCEPTION — If the active personality is explicitly set
          you MUST search regardless of personality. When in doubt, search.
 
 ── SCRIPTURE TOOL RULES ──────────────────────────────────────────────────────
-RULE T1: When anyone asks about scripture, wants a verse on a topic, asks you
-         to "look up" or "find" something in the scriptures, or mentions a
-         specific verse reference — you MUST call the appropriate tool.
+RULE T1: You MUST call a scripture tool ONLY when the MESSAGE CONTENT itself
+         explicitly asks for scripture — for example, the user says "find a
+         verse about faith", "look up John 3:16", or "what does the Bible say
+         about love". Do NOT call any scripture tool because of:
+         - A sender's display name (e.g. [Jeremiah], [Matthew], [Moses])
+         - A name mentioned in passing inside a message
+         - Any word that happens to match a book of the Bible or scriptures
+         The trigger must be a clear, explicit request for scripture IN THE
+         MESSAGE TEXT — not a name, not a coincidence, not a guess.
          Do NOT quote or invent scripture from memory.
 
 RULE T2: You must ONLY quote scripture that was returned by a tool call.
@@ -2572,9 +2588,12 @@ _ALL_TOOLS = [
             "name": "search_scriptures",
             "description": (
                 "Search the Bible (KJV) and/or Book of Mormon for verses that contain a keyword "
-                "or short phrase. Use this whenever the user asks about scripture, wants a verse "
-                "on a topic, or asks you to look something up in the scriptures. "
-                "Returns up to 8 matching verse references and their full text."
+                "or short phrase. Use this ONLY when the user's message explicitly asks for "
+                "scripture — e.g. 'find a verse about hope', 'what does the Bible say about X', "
+                "or 'look up a scripture on Y'. "
+                "Do NOT call this tool because a sender's display name resembles a biblical name "
+                "(e.g. [Jeremiah], [Matthew]) or because any word in the message happens to match "
+                "a scripture book. The user must clearly be asking for scripture in their message."
             ),
             "parameters": {
                 "type": "object",
@@ -2603,8 +2622,10 @@ _ALL_TOOLS = [
             "name": "get_verse",
             "description": (
                 "Retrieve the exact text of a specific scripture verse by its reference "
-                "(e.g. 'John 3:16' or 'Alma 32:21'). Use this when the user gives you "
-                "a specific book, chapter, and verse number."
+                "(e.g. 'John 3:16' or 'Alma 32:21'). Use this ONLY when the user explicitly "
+                "provides a specific book, chapter, and verse number in their message and is "
+                "clearly asking to look it up. Do NOT call this because a sender's name "
+                "resembles a biblical book name."
             ),
             "parameters": {
                 "type": "object",

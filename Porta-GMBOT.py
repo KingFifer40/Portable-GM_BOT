@@ -630,11 +630,11 @@ GAME_POLL_INTERVAL = 3  # seconds
 # ─────────────────────────────────────────────────────────────────────────────
 # Feature toggles — all controllable at runtime via #state <feature> true/false
 # ─────────────────────────────────────────────────────────────────────────────
-GAME_ENABLED       = True   # master switch — when False only #state works
-AI_ENABLED         = True   # !ai, !aiset, !aiforget, etc.
-EIGHTBALL_ENABLED  = True   # ? magic 8-ball
-SCRIPTURE_ENABLED  = True   # #randverse, #findverse
-CONNECT4_ENABLED   = True   # #start, #join, #addai, #quit, column moves
+GAME_ENABLED       = False  # master switch — disabled by default for new groups
+AI_ENABLED         = False  # !ai, !aiset, !aiforget, etc.
+EIGHTBALL_ENABLED  = False  # ? magic 8-ball
+SCRIPTURE_ENABLED  = False  # #randverse, #findverse
+CONNECT4_ENABLED   = False  # #start, #join, #addai, #quit, column moves
 
 # Human-readable names used in status messages
 FEATURE_NAMES = {
@@ -1522,11 +1522,11 @@ def apply_group_config(group_id):
     global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED
     global SCRIPTURE_ENABLED, CONNECT4_ENABLED, GAME_TIMEOUT_SECONDS
     cfg = load_group_config(group_id)
-    GAME_ENABLED      = cfg.get("game_enabled",      True)
-    AI_ENABLED        = cfg.get("ai_enabled",         True)
-    EIGHTBALL_ENABLED = cfg.get("eightball_enabled",  True)
-    SCRIPTURE_ENABLED = cfg.get("scripture_enabled",  True)
-    CONNECT4_ENABLED  = cfg.get("connect4_enabled",   True)
+    GAME_ENABLED      = cfg.get("game_enabled",      False)
+    AI_ENABLED        = cfg.get("ai_enabled",         False)
+    EIGHTBALL_ENABLED = cfg.get("eightball_enabled",  False)
+    SCRIPTURE_ENABLED = cfg.get("scripture_enabled",  False)
+    CONNECT4_ENABLED  = cfg.get("connect4_enabled",   False)
     GAME_TIMEOUT_SECONDS = cfg.get("game_timeout",    300)
 
 
@@ -1578,11 +1578,12 @@ def _fresh_group_record(group_id):
         # Game state (mutated in-place by game logic)
         "game_state": _fresh_group_state(),
         # Feature toggles (restored from disk)
-        "GAME_ENABLED":      cfg.get("game_enabled",     True),
-        "AI_ENABLED":        cfg.get("ai_enabled",        True),
-        "EIGHTBALL_ENABLED": cfg.get("eightball_enabled", True),
-        "SCRIPTURE_ENABLED": cfg.get("scripture_enabled", True),
-        "CONNECT4_ENABLED":  cfg.get("connect4_enabled",  True),
+        # Feature toggles — all off by default; enable via dev group or control panel
+        "GAME_ENABLED":      cfg.get("game_enabled",     False),
+        "AI_ENABLED":        cfg.get("ai_enabled",        False),
+        "EIGHTBALL_ENABLED": cfg.get("eightball_enabled", False),
+        "SCRIPTURE_ENABLED": cfg.get("scripture_enabled", False),
+        "CONNECT4_ENABLED":  cfg.get("connect4_enabled",  False),
         "GAME_TIMEOUT_SECONDS": cfg.get("game_timeout",   300),
         # Polling cursor
         "since_id": None,
@@ -3042,8 +3043,8 @@ def handle_dev_command(message):
         latest = get_latest_message_id(new_gid)
         rec["since_id"] = latest if latest else "0"
         _ensure_group_thread(new_gid)
-        send_message(new_gid, "🤖 Porta-GMBOT has been added to this group!")
-        send_message(new_gid, "Admins: enable/disable the bot with #state true or #state false.")
+        send_message(new_gid, "🤖 Porta-GMBOT has been added to this group! All features are disabled by default.")
+        send_message(new_gid, "Enable features from the dev group (!toggle) or control panel.")
         active = all_active_group_ids()
         send_message(DEV_GROUP_ID,
             f"✅ Group {new_gid} added.\nNow active in {len(active)} group(s): {', '.join(active)}",
@@ -6585,8 +6586,8 @@ class ControlPanel:
         _ensure_group_thread(gid)
 
         def notify():
-            send_message(gid, "🤖 Porta-GMBOT has been added to this group!")
-            send_message(gid, "Admins: use #state true / #state false to enable or disable.")
+            send_message(gid, "🤖 Porta-GMBOT has been added to this group! All features are disabled by default.")
+            send_message(gid, "Enable features from the dev group (!toggle) or control panel.")
 
         threading.Thread(target=notify, daemon=True).start()
         self.root.after(300, self._refresh_active_groups_list)
@@ -7908,10 +7909,10 @@ def main():
         # Start just after the last existing message so we don't replay history
         rec["since_id"] = str(int(latest) + 1) if latest else "0"
         _ensure_group_thread(gid)
-        send_message(gid, "🤖 Porta-GMBOT is now online.")
+        send_message(gid, "🤖 Porta-GMBOT is now online. All features are disabled by default — enable them from the dev group or control panel.")
         send_message(
             gid,
-            "Admins: enable/disable the bot with '#state false' or '#state true'.",
+            "Admins: use #state true to enable the bot, or enable individual features from the dev group.",
         )
         print(f"[startup] Group {gid} ready.")
 

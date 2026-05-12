@@ -175,14 +175,14 @@ def _run_gui_wizard(existing: dict) -> dict:
     cancelled = [False]
 
     root = tk.Tk()
-    root.title("AI-FSY Bot — First-Time Setup")
+    root.title("Porta-GMBOT — First-Time Setup")
     root.resizable(False, False)
 
     # ── Header ──────────────────────────────────────────────────────────────
     header = tk.Frame(root, bg="#2c2c2e", pady=14, padx=20)
     header.pack(fill="x")
     tk.Label(
-        header, text="🤖  AI-FSY Bot Setup",
+        header, text="🤖  Porta-GMBOT Setup",
         font=("Helvetica", 17, "bold"),
         bg="#2c2c2e", fg="white",
     ).pack(anchor="w")
@@ -457,7 +457,7 @@ def _run_terminal_wizard(existing: dict) -> dict:
     """Fallback plain-text wizard for headless / no-GUI environments."""
     print()
     print("=" * 60)
-    print("  AI-FSY Bot — First-Time Setup")
+    print("  Porta-GMBOT — First-Time Setup")
     print("=" * 60)
     print("  config.json not found or incomplete.")
     print("  Please answer the prompts below.")
@@ -969,7 +969,7 @@ PERSONALITY OVERRIDE:
 '''
 
 
-AI_MODEL_DIR = os.path.join(SCRIPT_DIR, "AI-BOT")
+AI_MODEL_DIR = os.path.join(SCRIPT_DIR, "Porta-GMBOT")
 AI_MODEL_FILE = os.path.join(AI_MODEL_DIR, "Modelfile")
 AI_MODEL_NAME = "connect4-ai"
 AI_RESOURCES_DIR = os.path.join(AI_MODEL_DIR, "resources")
@@ -1776,8 +1776,8 @@ def gm_post(path, data=None):
 # Profile-picture swap helpers
 # ---------------------------------------------------------
 # Paths where the two avatar images are cached next to the script.
-_PFP_ORIGINAL_PATH = os.path.join(SCRIPT_DIR, "AI-BOT", "pfp_original.jpg")
-_PFP_BOT_PATH      = os.path.join(SCRIPT_DIR, "AI-BOT", "pfp_bot.jpg")
+_PFP_ORIGINAL_PATH = os.path.join(SCRIPT_DIR, "Porta-GMBOT", "pfp_original.jpg")
+_PFP_BOT_PATH      = os.path.join(SCRIPT_DIR, "Porta-GMBOT", "pfp_bot.jpg")
 
 # GroupMe image-service URL (used to upload avatars)
 _GM_IMAGE_SERVICE = "https://image.groupme.com/pictures"
@@ -1919,7 +1919,7 @@ def pfp_startup_check():
     Called once at startup.
     • Downloads the current avatar as pfp_original.jpg (if not already present).
     • Generates pfp_bot.jpg (bright + BOT text) from the original.
-    Both files are saved in the AI-BOT/ folder next to the script.
+    Both files are saved in the Porta-GMBOT/ folder next to the script.
     """
     ensure_ai_directories()
 
@@ -5745,25 +5745,25 @@ def get_latest_message_id(group_id):
 
 GITHUB_REPO        = "KingFifer40/Portable-GM_BOT"
 GITHUB_COMMITS_URL = f"https://api.github.com/repos/{GITHUB_REPO}/commits/main"
-GITHUB_RAW_URL     = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/AI-FSY.py"
+GITHUB_RAW_URL     = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/Porta-GMBOT.py"
 GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "c13216d"
+BOT_COMMIT_SHA = "a8df03d"
 
 _control_panel_instance = None  # set when panel launches
 
 
 def _check_for_update():
     """
-    Checks the latest commit that touched AI-FSY.py specifically.
+    Checks the latest commit that touched Porta-GMBOT.py specifically.
     Commits to README, resources, or other files are ignored.
     Returns (sha_short, commit_message, commit_url) or (None, None, None) on failure.
     """
     try:
-        api_url = f"https://api.github.com/repos/{GITHUB_REPO}/commits?path=AI-FSY.py&per_page=1"
+        api_url = f"https://api.github.com/repos/{GITHUB_REPO}/commits?path=Porta-GMBOT.py&per_page=1"
         resp = requests.get(api_url, timeout=8)
         if resp.status_code == 200:
             data = resp.json()
@@ -5781,7 +5781,7 @@ def _check_for_update():
 
 def _do_self_update():
     """
-    Downloads the latest AI-FSY.py from the main branch, stamps the new
+    Downloads the latest Porta-GMBOT.py from the main branch, stamps the new
     commit SHA into it so the update checker knows what version is running,
     then replaces this file atomically and triggers a restart via restart_bot.py.
     """
@@ -5840,7 +5840,7 @@ class ControlPanel:
 
     def __init__(self, root):
         self.root = root
-        root.title(f"AI-FSY Control Panel  [{BOT_COMMIT_SHA}]")
+        root.title(f"Porta-GMBOT Control Panel  [{BOT_COMMIT_SHA}]")
         root.resizable(True, True)
         root.minsize(480, 360)
 
@@ -5871,7 +5871,7 @@ class ControlPanel:
         # ── Header bar ───────────────────────────────────────────────────────
         hdr = tk.Frame(root, bg="#1c1c1e", pady=10, padx=16)
         hdr.pack(fill="x")
-        tk.Label(hdr, text="🤖  AI-FSY Control Panel",
+        tk.Label(hdr, text="🤖  Porta-GMBOT Control Panel",
                  font=("Helvetica", 15, "bold"),
                  bg="#1c1c1e", fg="white").pack(side="left")
         self._ver_label = tk.Label(hdr, text=f"commit {BOT_COMMIT_SHA}",
@@ -7071,9 +7071,9 @@ class ControlPanel:
         ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=16)
         tk.Label(tab,
                  text=(
-                     "\u26a0\ufe0f  'Download & Restart' replaces AI-FSY.py with the latest version "
+                     "\u26a0\ufe0f  'Download & Restart' replaces Porta-GMBOT.py with the latest version "
                      "from the main branch and restarts the bot. "
-                     "Your config.json and AI-BOT/ folder are not affected."
+                     "Your config.json and Porta-GMBOT/ folder are not affected."
                  ),
                  font=("Helvetica", 9), fg="#888888", justify="left", wraplength=440).pack(anchor="w")
 
@@ -7301,9 +7301,9 @@ class ControlPanel:
         from tkinter import messagebox
         if not messagebox.askyesno(
             "Confirm Update",
-            "This will download the latest AI-FSY.py from GitHub\n"
+            "This will download the latest Porta-GMBOT.py from GitHub\n"
             "and restart the bot.\n\n"
-            "Your config.json and AI-BOT/ folder will not be changed.\n\n"
+            "Your config.json and Porta-GMBOT/ folder will not be changed.\n\n"
             "Continue?",
         ):
             return

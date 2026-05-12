@@ -2901,15 +2901,21 @@ def handle_dev_command(message):
 
         GAME_GROUP_ID = game_gid
 
+        # Demote old primary to extra (keeps it active) rather than dropping it.
+        if old_gid and old_gid != game_gid:
+            if old_gid not in EXTRA_GROUP_IDS:
+                EXTRA_GROUP_IDS.append(old_gid)
+        # New primary must not also appear in extras
+        if game_gid in EXTRA_GROUP_IDS:
+            EXTRA_GROUP_IDS.remove(game_gid)
+
         cfg = load_config()
-        cfg["game_group_id"] = GAME_GROUP_ID
+        cfg["game_group_id"]    = GAME_GROUP_ID
+        cfg["extra_group_ids"]  = EXTRA_GROUP_IDS
         cfg["use_subgroup_mode"] = USE_SUBGROUP
         if USE_SUBGROUP:
             cfg["admin_group_id"] = ADMIN_GROUP_ID
         save_config(cfg)
-
-        if old_gid and old_gid != game_gid:
-            send_message(old_gid, "Connect Four bot has been removed from this group.")
 
         send_message(game_gid, "Connect Four bot has been added to this group.")
         send_message(game_gid, "Admins: enable/disable the bot with #state true or #state false.")
@@ -6424,15 +6430,27 @@ class ControlPanel:
 
     def _set_game_group_internal(self, gid, name, use_subgroup, admin_gid):
         """Set the PRIMARY game group (replaces current primary)."""
-        global GAME_GROUP_ID, ADMIN_GROUP_ID, USE_SUBGROUP, last_game_since_id
+        global GAME_GROUP_ID, ADMIN_GROUP_ID, USE_SUBGROUP, last_game_since_id, EXTRA_GROUP_IDS
 
         old_gid = GAME_GROUP_ID
-        GAME_GROUP_ID = gid
-        USE_SUBGROUP  = use_subgroup
+
+        # If there was a previous primary, demote it to an extra (keep it active)
+        # rather than silently orphaning it.
+        if old_gid and old_gid != gid:
+            if old_gid not in EXTRA_GROUP_IDS:
+                EXTRA_GROUP_IDS.append(old_gid)
+
+        GAME_GROUP_ID  = gid
+        USE_SUBGROUP   = use_subgroup
         ADMIN_GROUP_ID = admin_gid
+
+        # Make sure the new primary isn't also listed as an extra
+        if gid in EXTRA_GROUP_IDS:
+            EXTRA_GROUP_IDS.remove(gid)
 
         cfg = load_config()
         cfg["game_group_id"]      = gid
+        cfg["extra_group_ids"]    = EXTRA_GROUP_IDS
         cfg["use_subgroup_mode"]  = use_subgroup
         if use_subgroup and admin_gid:
             cfg["admin_group_id"] = admin_gid
@@ -6446,11 +6464,6 @@ class ControlPanel:
         _ensure_group_thread(gid)
 
         def notify():
-            if old_gid and old_gid != gid:
-                try:
-                    send_message(old_gid, "Porta-GMBOT has been removed from this group.")
-                except Exception:
-                    pass
             send_message(gid, "🤖 Porta-GMBOT has been set as the primary game group.")
             send_message(gid, "Admins: use #state true / #state false to enable or disable.")
 

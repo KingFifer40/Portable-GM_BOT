@@ -6169,10 +6169,10 @@ class ControlPanel:
 
         self._info_labels = {}
         rows = [
-            ("Game group",   "game_group"),
-            ("Dev group",    "dev_group"),
-            ("Model",        "model"),
-            ("Uptime",       "uptime"),
+            ("Active groups",  "game_group"),
+            ("Dev group",      "dev_group"),
+            ("Model",          "model"),
+            ("Uptime",         "uptime"),
         ]
         for r, (lbl, key) in enumerate(rows):
             tk.Label(info_frame, text=lbl + ":", font=("Helvetica", 10),
@@ -6206,7 +6206,6 @@ class ControlPanel:
         outer = tk.Frame(nb)
         nb.add(outer, text="  Groups  ")
 
-        # Scrollable canvas wrapper
         canvas = tk.Canvas(outer, highlightthickness=0)
         vsb = tk.Scrollbar(outer, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=vsb.set)
@@ -6215,109 +6214,145 @@ class ControlPanel:
 
         tab = tk.Frame(canvas, padx=16, pady=12)
         tab_window = canvas.create_window((0, 0), window=tab, anchor="nw")
+        tab.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(tab_window, width=e.width))
 
-        def _on_tab_configure(event):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-        tab.bind("<Configure>", _on_tab_configure)
-
-        def _on_canvas_configure(event):
-            canvas.itemconfig(tab_window, width=event.width)
-        canvas.bind("<Configure>", _on_canvas_configure)
-
-        # ─── Main groups (left) ────────────────────────────────────────────────
-        tk.Label(tab, text="Group & Topic Selection",
+        # ── Section 1: All-groups picker ──────────────────────────────────────
+        tk.Label(tab, text="Your GroupMe Groups",
                  font=("Helvetica", 12, "bold")).pack(anchor="w")
-        tk.Label(tab, text="Select a main group, then choose a topic if desired.",
+        tk.Label(tab, text="Fetch your groups, select one, then choose what to do with it.",
                  font=("Helvetica", 9), fg="#888888").pack(anchor="w", pady=(0, 8))
 
-        # Two-column layout
         lists_frame = tk.Frame(tab)
-        lists_frame.pack(fill="both", expand=True, pady=(0, 8))
+        lists_frame.pack(fill="both", expand=True, pady=(0, 4))
 
-        # ── Left side: Main groups ────────────────────────────────────────────
+        # Left: main groups
         left_frame = tk.Frame(lists_frame)
-        left_frame.pack(side="left", fill="both", expand=True, padx=(0, 4))
-
+        left_frame.pack(side="left", fill="both", expand=True, padx=(0, 6))
         tk.Label(left_frame, text="Main Groups",
                  font=("Helvetica", 10, "bold")).pack(anchor="w")
-
         lb_frame = tk.Frame(left_frame)
         lb_frame.pack(fill="both", expand=True)
-
         sb = tk.Scrollbar(lb_frame, orient="vertical")
         self._group_listbox = tk.Listbox(lb_frame, font=("Courier", 9),
-                                         height=10, selectmode="single",
+                                         height=9, selectmode="single",
                                          yscrollcommand=sb.set,
                                          exportselection=False)
         sb.config(command=self._group_listbox.yview)
         sb.pack(side="right", fill="y")
         self._group_listbox.pack(side="left", fill="both", expand=True)
         self._group_listbox.bind("<<ListboxSelect>>", self._on_group_select)
-        self._group_data = []  # list of (name, id) tuples
+        self._group_data = []
 
-        # ── Right side: Topics ───────────────────────────────────────────────���
+        # Right: topics
         right_frame = tk.Frame(lists_frame)
-        right_frame.pack(side="left", fill="both", expand=True, padx=(4, 0))
-
-        tk.Label(right_frame, text="Topics/Subgroups",
+        right_frame.pack(side="left", fill="both", expand=True, padx=(6, 0))
+        tk.Label(right_frame, text="Topics / Subgroups",
                  font=("Helvetica", 10, "bold")).pack(anchor="w")
-
         tpc_lb_frame = tk.Frame(right_frame)
         tpc_lb_frame.pack(fill="both", expand=True)
-
         tpc_sb = tk.Scrollbar(tpc_lb_frame, orient="vertical")
         self._topics_listbox = tk.Listbox(tpc_lb_frame, font=("Courier", 9),
-                                          height=10, selectmode="single",
+                                          height=9, selectmode="single",
                                           yscrollcommand=tpc_sb.set,
                                           exportselection=False)
         tpc_sb.config(command=self._topics_listbox.yview)
         tpc_sb.pack(side="right", fill="y")
         self._topics_listbox.pack(side="left", fill="both", expand=True)
-        self._topics_data = []  # list of (name, id) tuples for topics
-
-        self._topic_status = tk.Label(right_frame, text="Select a group to see topics",
-                                     font=("Helvetica", 9), fg="#888888")
+        self._topics_data = []
+        self._topic_status = tk.Label(right_frame, text="Select a group to load topics",
+                                      font=("Helvetica", 9), fg="#888888")
         self._topic_status.pack(anchor="w", pady=(4, 0))
 
-        # ── Buttons ───────────────────────────────────────────────────────────
+        # Action buttons row
         btn_row_1 = tk.Frame(tab)
-        btn_row_1.pack(fill="x", pady=(6, 0))
-        tk.Button(btn_row_1, text="🔃  Refresh", font=("Helvetica", 10),
+        btn_row_1.pack(fill="x", pady=(8, 0))
+        tk.Button(btn_row_1, text="🔃 Refresh List", font=("Helvetica", 10),
                   command=self._refresh_groups,
                   relief="flat", padx=10, pady=5).pack(side="left", padx=(0, 4))
-        tk.Button(btn_row_1, text="➕ Set Main", font=("Helvetica", 10),
+        tk.Button(btn_row_1, text="▶ Set as Primary", font=("Helvetica", 10),
                   command=self._set_main_group,
+                  bg="#007aff", fg="white", relief="flat",
+                  padx=10, pady=5).pack(side="left", padx=(0, 4))
+        tk.Button(btn_row_1, text="➕ Add Group", font=("Helvetica", 10),
+                  command=self._add_extra_group,
                   bg="#34c759", fg="white", relief="flat",
                   padx=10, pady=5).pack(side="left", padx=(0, 4))
-        tk.Button(btn_row_1, text="➕ Set Topic", font=("Helvetica", 10),
+        tk.Button(btn_row_1, text="➕ Add Topic", font=("Helvetica", 10),
                   command=self._set_topic_group,
                   bg="#34c759", fg="white", relief="flat",
                   padx=10, pady=5).pack(side="left")
 
-        # ── Active game group display ──────────────────────────────────────────
-        ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=8)
-        tk.Label(tab, text="Active Game Group",
-                 font=("Helvetica", 12, "bold")).pack(anchor="w")
-        self._game_group_var = tk.StringVar()
-        tk.Entry(tab, textvariable=self._game_group_var,
-                 font=("Helvetica", 11), width=40,
-                 state="readonly").pack(anchor="w", pady=(4, 0), ipady=4)
+        # ── Section 2: Active game groups ────────────────────────────────────
+        ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=10)
+        hdr = tk.Frame(tab)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="Active Game Groups",
+                 font=("Helvetica", 12, "bold")).pack(side="left", anchor="w")
+        tk.Button(hdr, text="🔃 Refresh", font=("Helvetica", 9),
+                  command=self._refresh_active_groups_list,
+                  relief="flat", padx=6, pady=2).pack(side="right")
 
-        # ── Send message ─────────────���────────────────────────────────────────
-        ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=8)
-        tk.Label(tab, text="Send Message to Game Group",
+        tk.Label(tab, text="All groups the bot is currently serving. Select one to remove or message it.",
+                 font=("Helvetica", 9), fg="#888888").pack(anchor="w", pady=(2, 6))
+
+        active_lb_frame = tk.Frame(tab)
+        active_lb_frame.pack(fill="both", expand=True)
+        active_sb = tk.Scrollbar(active_lb_frame, orient="vertical")
+        self._active_groups_listbox = tk.Listbox(
+            active_lb_frame, font=("Courier", 9),
+            height=6, selectmode="single",
+            yscrollcommand=active_sb.set,
+            exportselection=False,
+        )
+        active_sb.config(command=self._active_groups_listbox.yview)
+        active_sb.pack(side="right", fill="y")
+        self._active_groups_listbox.pack(side="left", fill="both", expand=True)
+        self._active_groups_data = []  # list of (display_str, gid)
+
+        # Remove / broadcast buttons
+        btn_row_2 = tk.Frame(tab)
+        btn_row_2.pack(fill="x", pady=(6, 0))
+        tk.Button(btn_row_2, text="🗑 Remove Selected", font=("Helvetica", 10),
+                  command=self._remove_active_group,
+                  bg="#ff3b30", fg="white", relief="flat",
+                  padx=10, pady=5).pack(side="left", padx=(0, 4))
+        tk.Button(btn_row_2, text="📢 Broadcast to All", font=("Helvetica", 10),
+                  command=self._broadcast_message,
+                  bg="#ff9500", fg="white", relief="flat",
+                  padx=10, pady=5).pack(side="left")
+
+        # ── Section 3: Send message ───────────────────────────────────────────
+        ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=10)
+        tk.Label(tab, text="Send Message",
                  font=("Helvetica", 12, "bold")).pack(anchor="w")
+        tk.Label(tab, text="Select a group above, then type and send.",
+                 font=("Helvetica", 9), fg="#888888").pack(anchor="w", pady=(2, 6))
+
+        send_row = tk.Frame(tab)
+        send_row.pack(fill="x")
+
+        # Dropdown to pick target group
+        self._send_target_var = tk.StringVar(value="(select a group above)")
+        self._send_target_menu = ttk.Combobox(
+            send_row, textvariable=self._send_target_var,
+            state="readonly", font=("Helvetica", 10), width=26,
+        )
+        self._send_target_menu.pack(side="left", padx=(0, 6), ipady=3)
+
         self._send_msg_var = tk.StringVar()
-        tk.Entry(tab, textvariable=self._send_msg_var,
-                 font=("Helvetica", 11), width=44).pack(anchor="w", pady=(4, 0),
-                                                        ipady=4, fill="x")
-        tk.Button(tab, text="Send", font=("Helvetica", 10),
+        tk.Entry(send_row, textvariable=self._send_msg_var,
+                 font=("Helvetica", 10), width=28).pack(side="left", ipady=3, padx=(0, 6))
+        tk.Button(send_row, text="Send", font=("Helvetica", 10),
                   command=self._send_group_message,
                   bg="#007aff", fg="white", relief="flat",
-                  padx=10, pady=5).pack(anchor="e", pady=(6, 0))
+                  padx=10, pady=4).pack(side="left")
 
-        # Hidden field to track which group is selected for topic lookup
+        # Hidden state
         self._selected_group_id = None
+
+        # Populate active groups list right away
+        self.root.after(200, self._refresh_active_groups_list)
 
     def _on_group_select(self, event=None):
         """Called when user selects a group from the listbox."""
@@ -6388,39 +6423,183 @@ class ControlPanel:
                                      admin_gid=parent_gid)
 
     def _set_game_group_internal(self, gid, name, use_subgroup, admin_gid):
-        """
-        Internal helper to set game group and handle config/messaging.
-        """
+        """Set the PRIMARY game group (replaces current primary)."""
         global GAME_GROUP_ID, ADMIN_GROUP_ID, USE_SUBGROUP, last_game_since_id
-        
+
         old_gid = GAME_GROUP_ID
         GAME_GROUP_ID = gid
-        USE_SUBGROUP = use_subgroup
+        USE_SUBGROUP  = use_subgroup
         ADMIN_GROUP_ID = admin_gid
-        
+
         cfg = load_config()
-        cfg["game_group_id"] = gid
-        cfg["use_subgroup_mode"] = use_subgroup
+        cfg["game_group_id"]      = gid
+        cfg["use_subgroup_mode"]  = use_subgroup
         if use_subgroup and admin_gid:
             cfg["admin_group_id"] = admin_gid
         save_config(cfg)
-        
+
+        # Register in the multi-group registry and start poll thread
+        rec = get_or_create_group_record(gid)
+        latest = get_latest_message_id(gid)
+        rec["since_id"] = str(int(latest) + 1) if latest else "0"
+        last_game_since_id = rec["since_id"]
+        _ensure_group_thread(gid)
+
         def notify():
             if old_gid and old_gid != gid:
-                send_message(old_gid, "Connect Four bot has been removed from this group.")
-            send_message(gid, "Connect Four bot has been added to this group.")
-            send_message(gid, "Admins: use #state all true/false to enable or disable the bot.")
-            global last_game_since_id
-            last_game_since_id = get_latest_message_id(gid) or "0"
-        
+                try:
+                    send_message(old_gid, "Porta-GMBOT has been removed from this group.")
+                except Exception:
+                    pass
+            send_message(gid, "🤖 Porta-GMBOT has been set as the primary game group.")
+            send_message(gid, "Admins: use #state true / #state false to enable or disable.")
+
         threading.Thread(target=notify, daemon=True).start()
-        
+        self.root.after(300, self._refresh_active_groups_list)
+
         if use_subgroup and admin_gid:
-            self._set_status(f"✅ Game group set to: {name}\n"
-                            f"    Admin/Settings from: {admin_gid}")
+            self._set_status(f"✅ Primary group: {name}\n    Admin data from: {admin_gid}")
         else:
-            self._set_status(f"✅ Game group set to: {name}")
-    
+            self._set_status(f"✅ Primary group set: {name} ({gid})")
+
+    def _add_extra_group(self):
+        """Add the selected group/topic as an ADDITIONAL game group (non-destructive)."""
+        global EXTRA_GROUP_IDS, GAME_GROUP_ID
+
+        # Prefer topic selection if one is chosen, otherwise use main group
+        topic_sel = self._topics_listbox.curselection()
+        main_sel  = self._group_listbox.curselection()
+
+        if topic_sel:
+            name, gid = self._topics_data[topic_sel[0]]
+        elif main_sel:
+            name, gid = self._group_data[main_sel[0]]
+        else:
+            self._set_status("Select a group or topic first.")
+            return
+
+        current = all_active_group_ids()
+        if gid in current:
+            self._set_status(f"ℹ️ Already active: {name}")
+            return
+
+        if GAME_GROUP_ID is None:
+            # No primary yet — make this the primary
+            self._set_game_group_internal(gid, name, False, None)
+            return
+
+        if gid not in EXTRA_GROUP_IDS:
+            EXTRA_GROUP_IDS.append(gid)
+        cfg = load_config()
+        cfg["extra_group_ids"] = EXTRA_GROUP_IDS
+        save_config(cfg)
+
+        rec = get_or_create_group_record(gid)
+        latest = get_latest_message_id(gid)
+        rec["since_id"] = str(int(latest) + 1) if latest else "0"
+        _ensure_group_thread(gid)
+
+        def notify():
+            send_message(gid, "🤖 Porta-GMBOT has been added to this group!")
+            send_message(gid, "Admins: use #state true / #state false to enable or disable.")
+
+        threading.Thread(target=notify, daemon=True).start()
+        self.root.after(300, self._refresh_active_groups_list)
+        self._set_status(f"✅ Added: {name} ({gid})")
+
+    def _refresh_active_groups_list(self):
+        """Rebuild the active-groups listbox and the send-target dropdown."""
+        self._active_groups_listbox.delete(0, "end")
+        self._active_groups_data = []
+
+        active = all_active_group_ids()
+        dropdown_labels = []
+
+        for gid in active:
+            tag  = " [primary]" if gid == str(GAME_GROUP_ID) else ""
+            rec  = _group_registry.get(gid, {})
+            enab = "✅" if rec.get("GAME_ENABLED", True) else "❌"
+            display = f"{enab}  {gid}{tag}"
+            self._active_groups_listbox.insert("end", display)
+            self._active_groups_data.append((display, gid))
+            dropdown_labels.append(f"{gid}{tag}")
+
+        if not active:
+            self._active_groups_listbox.insert("end", "  (no active groups)")
+            dropdown_labels = ["(no groups active)"]
+
+        self._send_target_menu["values"] = dropdown_labels
+        if dropdown_labels and self._send_target_var.get() not in dropdown_labels:
+            self._send_target_var.set(dropdown_labels[0])
+
+    def _remove_active_group(self):
+        """Remove the selected group from the active list."""
+        from tkinter import messagebox
+        global GAME_GROUP_ID, EXTRA_GROUP_IDS, last_game_since_id
+
+        sel = self._active_groups_listbox.curselection()
+        if not sel:
+            self._set_status("Select a group from the active list first.")
+            return
+
+        _, rm_gid = self._active_groups_data[sel[0]]
+
+        if not messagebox.askyesno(
+            "Remove Group",
+            f"Remove group {rm_gid} from the bot?\n\n"
+            "The bot will send a goodbye message there and stop polling it.",
+        ):
+            return
+
+        if rm_gid == str(GAME_GROUP_ID):
+            if EXTRA_GROUP_IDS:
+                GAME_GROUP_ID = EXTRA_GROUP_IDS.pop(0)
+            else:
+                GAME_GROUP_ID = None
+                last_game_since_id = None
+        elif rm_gid in EXTRA_GROUP_IDS:
+            EXTRA_GROUP_IDS.remove(rm_gid)
+
+        cfg = load_config()
+        cfg["game_group_id"]    = GAME_GROUP_ID
+        cfg["extra_group_ids"]  = EXTRA_GROUP_IDS
+        save_config(cfg)
+
+        with _group_registry_lock:
+            _group_registry.pop(rm_gid, None)
+
+        def notify():
+            try:
+                send_message(rm_gid, "🤖 Porta-GMBOT has been removed from this group.")
+            except Exception:
+                pass
+
+        threading.Thread(target=notify, daemon=True).start()
+        self.root.after(300, self._refresh_active_groups_list)
+        self._set_status(f"✅ Removed group {rm_gid}.")
+
+    def _broadcast_message(self):
+        """Send the message in the send box to ALL active groups."""
+        msg = self._send_msg_var.get().strip()
+        if not msg:
+            self._set_status("Type a message first.")
+            return
+        active = all_active_group_ids()
+        if not active:
+            self._set_status("No active groups to broadcast to.")
+            return
+
+        def do_send():
+            for gid in active:
+                try:
+                    send_message(gid, msg)
+                except Exception:
+                    pass
+            self.root.after(0, lambda: self._send_msg_var.set(""))
+            self.root.after(0, lambda: self._set_status(f"Broadcast sent to {len(active)} group(s)."))
+
+        threading.Thread(target=do_send, daemon=True).start()
+
     # ── Tab: Points Dashboard ─────────────────────────────────────────────────
 
     def _build_tab_points(self, nb):
@@ -7302,8 +7481,12 @@ class ControlPanel:
                                 text="●")
 
         # Info labels
-        self._info_labels["game_group"].config(
-            text=GAME_GROUP_ID or "(not set)")
+        active = all_active_group_ids()
+        if active:
+            groups_str = f"{active[0]} (primary)" if len(active) == 1 else f"{active[0]} +{len(active)-1} more"
+        else:
+            groups_str = "(not set)"
+        self._info_labels["game_group"].config(text=groups_str)
         self._info_labels["dev_group"].config(
             text=DEV_GROUP_ID or "(not set)")
         self._info_labels["model"].config(
@@ -7320,10 +7503,6 @@ class ControlPanel:
             self._mem_label.config(
                 text=f"Shared memory: {turns} turn(s) stored  ({len(_ai_memory)} messages)")
 
-        # Game group entry
-        if hasattr(self, "_game_group_var"):
-            self._game_group_var.set(GAME_GROUP_ID or "(not set)")
-
     # ── Feature toggle callbacks ──────────────────────────────────────────────
 
     def _toggle_feature(self, key, var):
@@ -7333,12 +7512,10 @@ class ControlPanel:
         val = var.get()
         if key == "master":
             GAME_ENABLED = val
-            # When toggling the master switch from the UI, also set all sub-features
             AI_ENABLED        = val
             EIGHTBALL_ENABLED = val
             SCRIPTURE_ENABLED = val
             CONNECT4_ENABLED  = val
-            # Update all checkbox vars to reflect the new unified state
             for k, v in self._feature_vars.items():
                 v.set(val)
         elif key == "ai":
@@ -7350,10 +7527,29 @@ class ControlPanel:
         elif key == "connect4":
             CONNECT4_ENABLED = val
 
-        snapshot_group_config(GAME_GROUP_ID)
+        # Propagate to every active group's per-group record
+        for gid in all_active_group_ids():
+            rec = _group_registry.get(gid)
+            if rec is None:
+                continue
+            if key == "master":
+                rec["GAME_ENABLED"]      = val
+                rec["AI_ENABLED"]        = val
+                rec["EIGHTBALL_ENABLED"] = val
+                rec["SCRIPTURE_ENABLED"] = val
+                rec["CONNECT4_ENABLED"]  = val
+            elif key == "ai":
+                rec["AI_ENABLED"] = val
+            elif key == "8ball":
+                rec["EIGHTBALL_ENABLED"] = val
+            elif key == "scripture":
+                rec["SCRIPTURE_ENABLED"] = val
+            elif key == "connect4":
+                rec["CONNECT4_ENABLED"] = val
+            snapshot_group_record(gid)
 
         label_map = {
-            "master":    "All features (master)",
+            "master":    "All features",
             "ai":        "AI Chat",
             "8ball":     "Magic 8-Ball",
             "scripture": "Scripture",
@@ -7362,12 +7558,16 @@ class ControlPanel:
         feature_label = label_map.get(key, key)
         state_word = "enabled ✅" if val else "disabled ❌"
         status_msg = f"[Control Panel] {feature_label} {state_word}."
-        self._set_status(f"{'Enabled' if val else 'Disabled'}: {key}")
+        self._set_status(f"{'Enabled' if val else 'Disabled'}: {feature_label}")
 
-        # Send chat notification if game group is set
-        if GAME_GROUP_ID:
+        active = all_active_group_ids()
+        if active:
             def do_send():
-                send_message(GAME_GROUP_ID, status_msg)
+                for gid in active:
+                    try:
+                        send_message(gid, status_msg)
+                    except Exception:
+                        pass
             threading.Thread(target=do_send, daemon=True).start()
 
     # ── Group tab callbacks ───────────────────────────────────────────────────
@@ -7396,21 +7596,26 @@ class ControlPanel:
             self._group_data.append((name, gid))
             self._group_listbox.insert("end", f"  {name}  —  {gid}")
         self._set_status(f"Found {len(groups)} group(s).")
+        self._refresh_active_groups_list()
 
     def _send_group_message(self):
-        global GAME_GROUP_ID
         msg = self._send_msg_var.get().strip()
         if not msg:
             return
-        if not GAME_GROUP_ID:
-            self._set_status("No game group set.")
+
+        # Resolve target from dropdown
+        target_str = self._send_target_var.get()
+        # Extract just the group ID (strip the [primary] tag if present)
+        gid = target_str.replace(" [primary]", "").strip()
+
+        if not gid or gid.startswith("("):
+            self._set_status("Select a target group from the dropdown first.")
             return
-        gid = GAME_GROUP_ID
 
         def do_send():
             send_message(gid, msg)
             self.root.after(0, lambda: self._send_msg_var.set(""))
-            self.root.after(0, lambda: self._set_status("Message sent."))
+            self.root.after(0, lambda: self._set_status(f"Message sent to {gid}."))
 
         threading.Thread(target=do_send, daemon=True).start()
 

@@ -2664,78 +2664,155 @@ def _ollama_chat_nonstream(messages: list, model: str, tools: list) -> dict:
     Send one non-streaming /api/chat request to Ollama and return the
     parsed JSON response dict.  Raises on HTTP / parse errors.
 
-    We use non-streaming here because we need to inspect the full message
-    object (including tool_calls) before deciding what to do next.
+    Automatically detects whether the model supports tool-calling:
+    - First call with tools probes by actually sending; if Ollama returns
+      400 it retries without tools and caches the result per model.
+    - Subsequent calls skip tools immediately for known-unsupported models.
     """
+    payload = {
+        "model":   model,
+        "messages": messages,
+        "stream":  False,
+    }
+
+    use_tools = bool(tools) and _model_supports_tools(model)
+    if use_tools:
+        payload["tools"] = tools
+
     resp = requests.post(
         "http://localhost:11434/api/chat",
-        json={
-            "model":   model,
-            "messages": messages,
-            "tools":   tools,
-            "stream":  False,
-        },
+        json=payload,
         timeout=180,
     )
+
+    # If the model rejected tools, cache that and retry without them
+    if resp.status_code == 400 and use_tools:
+        _set_model_tools_support(model, False)
+        payload.pop("tools", None)
+        resp = requests.post(
+            "http://localhost:11434/api/chat",
+            json=payload,
+            timeout=180,
+        )
+
     resp.raise_for_status()
     return resp.json()
+
+
+# Per-model tool-support cache.  None = untested, True/False = known.
+_model_tool_support_cache: dict = {}
+_model_tool_support_lock = threading.Lock()
+
+# Known families that don't support tool-calling
+_NO_TOOL_MODEL_PREFIXES = (
+    "tinyllama", "phi3:mini", "gemma:2b", "gemma2:2b",
+    "qwen:0.5b", "qwen:1.8b", "smollm",
+)
+
+
+def _model_supports_tools(model: str) -> bool:
+    """
+    Return True if *model* is believed to support Ollama tool-calling.
+    Uses a cache; also fast-path rejects known-unsupported model families.
+    """
+    name_lower = model.lower()
+    for prefix in _NO_TOOL_MODEL_PREFIXES:
+        if name_lower.startswith(prefix):
+            return False
+    with _model_tool_support_lock:
+        cached = _model_tool_support_cache.get(model)
+    # None means "not tested yet" → optimistically try tools
+    return cached is not False
+
+
+def _set_model_tools_support(model: str, supported: bool):
+    with _model_tool_support_lock:
+        _model_tool_support_cache[model] = supported
+    if not supported:
+        print(f"[ai] Model '{model}' does not support tool-calling — "
+              "falling back to plain chat for all future requests.")
+
+
+def _get_fallback_system_prompt() -> str:
+    """
+    Return a compact system prompt for use with raw base models that don't
+    have the full Modelfile baked in (e.g. tinyllama, phi3, etc.).
+    Strips the Modelfile syntax and merges all SYSTEM blocks into plain text.
+    """
+    import re as _re
+    raw = DEFAULT_MODELFILE_CONTENT
+    # Extract all SYSTEM """...""" blocks
+    blocks = _re.findall(r'SYSTEM\s+"""(.*?)"""', raw, _re.DOTALL)
+    return "\n\n".join(b.strip() for b in blocks)
+
+
+# Cached merged system prompt (built once)
+_FALLBACK_SYSTEM_PROMPT: str = ""
+
+
+def _ensure_fallback_system_prompt():
+    global _FALLBACK_SYSTEM_PROMPT
+    if not _FALLBACK_SYSTEM_PROMPT:
+        _FALLBACK_SYSTEM_PROMPT = _get_fallback_system_prompt()
 
 
 def run_ollama(prompt_text, model=AI_MODEL_NAME, user_id=None, sender_name=None):
     """
     Agentic Ollama loop with scripture tool-calling support.
 
-    Flow:
-      1. Append the user's message to shared group memory.
-      2. Send the full history + tool definitions to Ollama.
-      3. If the model returns tool_calls, execute each tool, append
-         the results as tool messages, and loop back to step 2.
-      4. Repeat up to _AI_MAX_TOOL_ROUNDS times.
-      5. When the model returns a plain text reply (no tool_calls),
-         store it in memory and return it to the caller.
+    Works with any Ollama model:
+    - connect4-ai: custom model with system prompt baked into the Modelfile.
+    - Any other model (tinyllama, phi3, llama3, etc.): system prompt is
+      injected as a system role message at the start of every request.
 
-    user_id     — GroupMe user ID (for name lookup only).
-    sender_name — Sanitized display name prefixed to the message so the
-                  model knows who in the group is speaking.
+    Tool-calling is attempted automatically; if the model rejects it (400),
+    the call is retried without tools and the model is flagged as no-tool
+    for the rest of the session.
     """
     global _ai_memory
+
+    # Decide whether this model has the system prompt baked in already
+    is_custom_model = (model == AI_MODEL_NAME)
 
     # ── 1. Build and append the user message ────────────────────────────────
     user_content = f"[{sender_name}]: {prompt_text}" if sender_name else prompt_text
     _ai_memory.append({"role": "user", "content": user_content})
 
     # Trim shared history to the configured window.
-    # Each "turn" = 1 user + 1 assistant message = 2 entries.
     max_entries = AI_MEMORY_MAX_TURNS * 2
     if len(_ai_memory) > max_entries:
         _ai_memory = _ai_memory[-max_entries:]
 
-    # We work on a local copy during the tool-call loop so that if
-    # something goes wrong we can cleanly roll back the shared memory.
-    working_messages = list(_ai_memory)
+    # ── 2. Build the messages list for this request ──────────────────────────
+    # For raw/base models we prepend a system message so the model has context.
+    if is_custom_model:
+        working_messages = list(_ai_memory)
+    else:
+        _ensure_fallback_system_prompt()
+        working_messages = [
+            {"role": "system", "content": _FALLBACK_SYSTEM_PROMPT},
+        ] + list(_ai_memory)
 
     try:
         for _round in range(_AI_MAX_TOOL_ROUNDS):
 
-            # ── 2. Call Ollama ───────────────────────────────────────────────
+            # ── 3. Call Ollama ───────────────────────────────────────────────
             data = _ollama_chat_nonstream(working_messages, model, _ALL_TOOLS)
 
             assistant_msg = data.get("message", {})
             tool_calls    = assistant_msg.get("tool_calls") or []
             text_content  = (assistant_msg.get("content") or "").strip()
 
-            # ── 3. No tool calls → final reply ──────────────────────────────
+            # ── 4. No tool calls → final reply ──────────────────────────────
             if not tool_calls:
                 reply = text_content or "(No response from model)"
-                # Commit to shared memory
                 _ai_memory.append({"role": "assistant", "content": reply})
                 return reply
 
-            # ── 4. Execute each tool call and collect results ────────────────
-            # Append the assistant's tool-calling message first
+            # ── 5. Execute each tool call and collect results ────────────────
             working_messages.append({
                 "role":       "assistant",
-                "content":    text_content,   # may be empty string — that is fine
+                "content":    text_content,
                 "tool_calls": tool_calls,
             })
 
@@ -2744,7 +2821,6 @@ def run_ollama(prompt_text, model=AI_MODEL_NAME, user_id=None, sender_name=None)
                 tool_name = fn.get("name", "")
                 raw_args  = fn.get("arguments", {})
 
-                # Ollama may give arguments as a JSON string or already a dict
                 if isinstance(raw_args, str):
                     try:
                         tool_args = json.loads(raw_args)
@@ -2755,20 +2831,17 @@ def run_ollama(prompt_text, model=AI_MODEL_NAME, user_id=None, sender_name=None)
 
                 tool_result = _dispatch_tool_call(tool_name, tool_args)
 
-                # Append the tool result as a "tool" role message
                 working_messages.append({
                     "role":    "tool",
                     "content": tool_result,
                 })
 
-            # Loop: model will now see tool results and (hopefully) give a final answer
-
-        # ── 5. Safety cap reached — ask for a plain reply ───────────────────
+        # ── 6. Safety cap reached — ask for a plain reply ───────────────────
         working_messages.append({
             "role":    "user",
             "content": "Please give your final answer now based on the tool results above.",
         })
-        data  = _ollama_chat_nonstream(working_messages, model, [])  # no tools this time
+        data  = _ollama_chat_nonstream(working_messages, model, [])
         reply = (data.get("message", {}).get("content") or "").strip()
         reply = reply or "(No response from model)"
 
@@ -2776,7 +2849,6 @@ def run_ollama(prompt_text, model=AI_MODEL_NAME, user_id=None, sender_name=None)
         return reply
 
     except Exception as e:
-        # Roll back: remove the user message we appended at the start
         if _ai_memory and _ai_memory[-1]["role"] == "user":
             _ai_memory.pop()
         return f"AI error: {e}"

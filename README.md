@@ -1,22 +1,22 @@
-# AI-FSY — GroupMe Connect Four Bot with AI Chat
+# Porta-GMBOT — GroupMe Bot with AI Chat
 
-A GroupMe bot that lets your group play **Connect Four**, look up **scriptures**, chat with a **local AI** (via Ollama), earn and gamble **points**, and more. Built in Python, runs on Windows, Mac, or Linux. (Made for my FSY group so I can play with them while away from my own PC, but leave it running.)
+A portable GroupMe bot that lets your group play **Connect Four**, look up **scriptures**, chat with a **local AI** (via Ollama), earn **points**, and more. Built in Python, runs on Windows, Mac, or Linux.
 
 ---
 
 ## Features
 
-- 🎮 **Connect Four** — two-player PvP or vs AI (minimax engine, easy/medium/hard with depths 2/5/8)
+- 🎮 **Connect Four** — two-player PvP or vs AI (minimax engine, easy/medium/hard)
 - 💰 **Points system** — earn points by fishing (`!fih`), stealing (`!steal`), and coin flipping (`!coin`); give points to others (`!give`); wager them on Connect Four games
-- 🤖 **AI Chat** — powered by a local Ollama model with a shared group memory (last 10 exchanges)
-- 🌐 **Web search** — the AI automatically searches the web via DuckDuckGo when asked about current events, recent news, live scores, or anything beyond its training data
+- 🤖 **AI Chat** — powered by a local Ollama model with a shared group memory
+- 🌐 **Web search** — the AI automatically searches DuckDuckGo when asked about current events, recent news, live scores, or anything beyond its training data
 - 🎱 **Magic 8-Ball** — `?` + any question
-- 📖 **Scripture lookup** — Bible (KJV) and Book of Mormon verse search (files included)
-- 🖼️ **Profile picture swap** — the bot brightens its GroupMe avatar and stamps "BOT" on it while the game is active, then reverts it automatically
+- 📖 **Scripture lookup** — Bible (KJV) and Book of Mormon verse search
+- 🖼️ **Profile picture swap** — the bot stamps "BOT" on its GroupMe avatar while active, then reverts automatically
 - 🔒 **Safe by default** — hardened AI safety rules, English-only responses, spam cooldowns
 - 🛠️ **Admin controls** — enable/disable individual features from inside the group
 - 🖥️ **Control panel** — desktop GUI for managing groups, AI settings, points tuning, and auto-updates
-- 🧙 **First-run setup wizard** — GUI on desktop, terminal fallback on servers
+- 🧙 **First-run setup wizard** — GUI on desktop (with live group picker), terminal fallback on servers
 
 ---
 
@@ -37,8 +37,8 @@ The Python dependencies (`requests`, `ddgs`, `Pillow`) are installed automatical
 ### 1. Clone the repo
 
 ```
-git clone https://github.com/YOUR_USERNAME/AI-FSY.git
-cd AI-FSY
+git clone https://github.com/KingFifer40/Portable-GM_BOT.git
+cd Portable-GM_BOT
 ```
 
 ### 2. Install Ollama
@@ -48,7 +48,7 @@ Download and install from [ollama.com](https://ollama.com). You don't need to do
 ### 3. Run the bot
 
 ```
-python AI-FSY.py
+python Porta-GMBOT.py
 ```
 
 On first run, a **setup wizard** opens automatically:
@@ -61,7 +61,7 @@ The wizard asks for:
 | Field | Where to find it |
 |---|---|
 | **GroupMe Access Token** | [dev.groupme.com](https://dev.groupme.com) → log in → click your avatar → *Access Token* |
-| **Dev Group ID** | Open your private dev group at [web.groupme.com](https://web.groupme.com) — the ID is in the URL: `.../groups/XXXXXXXX` |
+| **Dev Group** | Enter your token and click **Fetch My Groups** — pick your dev group from the list |
 | **Ollama Model** | Pick from the scrollable list, or type any model name from [ollama.com/library](https://ollama.com/library) |
 
 Settings are saved to `config.json` — the wizard won't run again unless that file is missing or incomplete.
@@ -85,7 +85,7 @@ Once the bot is running, go to your **dev group** and send:
 
 The bot joins the game group and announces itself.
 
-If you don't know your game group's ID, type `!listgroups` in the dev group and it will list all your groups with their IDs. To find it manually: open the group at [web.groupme.com](https://web.groupme.com) and copy the number from the URL.
+If you don't know your game group's ID, type `!listgroups` in the dev group and it will list all your groups with their IDs.
 
 ### Subgroup / Topic mode
 
@@ -112,7 +112,7 @@ You can also browse and set topics from the **Groups tab** of the control panel 
 | `#help 8ball` | Magic 8-Ball info |
 | `#help scripture` | Scripture commands |
 | `#help ai` | AI chat commands |
-| `#help points` | Points & gambling commands |
+| `#help points` | Points commands |
 | `#help gamepoints` | Connect Four betting & AI rewards |
 | `#help admin` | Admin feature controls |
 | `?<question>` | Magic 8-Ball |
@@ -121,7 +121,7 @@ You can also browse and set topics from the **Groups tab** of the control panel 
 
 | Command | Description |
 |---|---|
-| `#start [easy\|medium\|hard]` | Start a new game (default difficulty: medium) |
+| `#start [easy\|medium\|hard]` | Start a new game (default: medium) |
 | `#join` | Join as Player 2 (triggers PvP betting phase) |
 | `#addai [easy\|medium\|hard]` | Add AI engine as Player 2 |
 | `#A` – `#G` | Drop your piece in that column |
@@ -138,19 +138,19 @@ After both players join, a betting phase starts before play begins:
 | `#pvpbet <amount>` | Wager points on yourself |
 | `#pvpbet 0` | Skip betting |
 
-Both players must bet (or skip) before moves are accepted. Wagered points are held during the game — the **winner gets their own stake back plus the loser's stake**. If the game ends early or draws, all bets are fully refunded.
+Both players must bet (or skip) before moves are accepted. The **winner gets their own stake back plus the loser's stake**. If the game ends early or draws, all bets are fully refunded.
 
 #### Spectator Betting
 
-Anyone who is not a player can bet on who they think will win using a **pari-mutuel (pool) system**:
+Anyone not playing can bet on a player using a **pari-mutuel (pool) system**:
 
 | Command | Description |
 |---|---|
 | `#bet <amount> @player` | Bet on a player to win |
 
-All bets form a single shared pool. Winners receive their stake back **plus a proportional share of the losers' pot** — a bigger bet earns a bigger share. Losers forfeit their stake. If nobody bet on the losing side, winners are simply refunded (no profit with no opposition). Use `#quit` to cancel an active spectator bet and get it back.
+All bets form a single shared pool. Winners receive their stake back **plus a proportional share of the losers' pot**. Losers forfeit their stake. Use `#quit` to cancel and get your bet back.
 
-#### Points & Gambling
+#### Points
 
 | Command | Description |
 |---|---|
@@ -161,6 +161,16 @@ All bets form a single shared pool. Winners receive their stake back **plus a pr
 | `!give @username <amount>` | Give points to another player |
 | `#leaderboard` | Show the top points rankings |
 
+#### Inventory
+
+| Command | Description |
+|---|---|
+| `!create "Name" <worth>` | Create a named item (you pay the worth in points) |
+| `!items` | View your inventory |
+| `!items @user` | View someone else's inventory |
+| `!sellitem i<slot>` | Sell a creation back to the bot for its worth |
+| `!give @user i<slot>` | Gift one of your creations to another user |
+
 #### AI Chat
 
 | Command | Description |
@@ -169,7 +179,7 @@ All bets form a single shared pool. Winners receive their stake back **plus a pr
 | `!aiset <text>` | Set the AI personality (60 s cooldown; clears memory) |
 | `!aiforget` | Clear the group's shared AI conversation history (admins only) |
 
-The AI can **search the web automatically** — just ask it about current events, recent news, live scores, or anything that may have changed since its training cutoff and it will run a DuckDuckGo search before responding. It can also look up scriptures using the same tool the `#findverse` command uses.
+The AI can **search the web automatically** — just ask about current events, scores, or anything recent and it will run a DuckDuckGo search before responding. It can also look up scriptures using the same engine as `#findverse`.
 
 #### Scripture
 
@@ -183,7 +193,7 @@ The AI can **search the web automatically** — just ask it about current events
 | `#findverse bible "keyword"` | Keyword search — Bible only |
 | `#findverse bom "keyword"` | Keyword search — Book of Mormon only |
 
-#### Feature status (anyone can view)
+#### Feature status
 
 | Command | Description |
 |---|---|
@@ -203,7 +213,6 @@ The AI can **search the web automatically** — just ask it about current events
 | `#state connect4 true/false` | Enable or disable Connect Four |
 | `!aiswitch true/false` | Enable or disable AI (same as `#state ai`) |
 | `!aiforget` | Clear the shared AI conversation history |
-| `!aiforgetall` | Alias for `!aiforget` |
 
 ---
 
@@ -215,7 +224,7 @@ The AI can **search the web automatically** — just ask it about current events
 | `!listgroups` | List all groups your token is in (with IDs) |
 | `!listgroups MAIN_GROUP_ID` | List topics/subgroups for a specific group |
 | `!add GROUPID` | Set the active game group |
-| `!add MAIN_ID,SUB_ID` | Set bot to a topic/subgroup (admin data from main group) |
+| `!add MAIN_ID,SUB_ID` | Set bot to a topic/subgroup |
 | `!reload` | Restart the bot script |
 | `!state true/false` | Enable or disable game responses |
 | `!aiswitch true/false` | Enable or disable AI responses |
@@ -239,24 +248,34 @@ The AI can **search the web automatically** — just ask it about current events
 | Beat Hard AI | +200 pts |
 | Win PvP game (with bets) | +loser's wagered points |
 
-Losing to the AI costs no points. PvP games without bets award no points either. Betting your full balance on `!coin` or `#pvpbet` counts as **All In**.
+Losing to the AI costs no points. PvP games without bets award no points.
+
+### Spending points
+
+| Activity | Cost |
+|---|---|
+| `#pvpbet <amount>` | Wager on yourself in a PvP game |
+| `#bet <amount> @player` | Wager as a spectator |
+| `!coin <h/t> <amount>` | Risk it on a coin flip |
+| `!create "Name" <worth>` | Mint a named item (min 20 pts) |
+| `!give @user <amount>` | Gift points to someone |
 
 ### PvP betting in detail
 
 1. Player 1 uses `#start`, Player 2 uses `#join`
 2. Both players use `#pvpbet <amount>` to wager (or `#pvpbet 0` to skip)
 3. Both bets are deducted and held immediately
-4. When a player wins: they receive **the full pot** (their own stake back + the loser's stake)
-5. If the game is abandoned with `#quit` or times out: both bets are fully refunded
+4. Winner receives **the full pot** (their stake + the loser's stake)
+5. If the game is abandoned or times out: both bets are fully refunded
 
 ### Spectator betting in detail
 
-Spectator bets use a **pari-mutuel (pool) system** — the same model used in real-life horse racing:
+Spectator bets use a **pari-mutuel (pool) system** — the same model used in horse racing:
 
 1. All spectator bets go into a single shared pool
-2. Those who bet on the **winner** share the entire pool proportionally to their stake — a bigger bet earns a bigger cut of the losers' money
+2. Those who bet on the **winner** share the entire pool proportionally to their stake
 3. Those who bet on the **loser** forfeit their stake
-4. If nobody bet on the losing side, winners are simply refunded their stake (no profit when there's no opposition)
+4. If nobody bet on the losing side, winners are simply refunded (no profit when unopposed)
 
 ---
 
@@ -264,10 +283,10 @@ Spectator bets use a **pari-mutuel (pool) system** — the same model used in re
 
 ### Web search
 
-The AI is connected to DuckDuckGo search and will automatically search the web when you ask about:
+The AI is connected to DuckDuckGo and will automatically search the web when you ask about:
 - Current events or breaking news
 - Scores, prices, or any rapidly-changing information
-- Anything that may have changed since the AI's training cutoff (early 2023 for most models)
+- Anything that may have changed since the AI's training cutoff
 
 Examples:
 ```
@@ -278,7 +297,7 @@ Examples:
 
 ### Scripture tool
 
-The AI can also search the scripture files directly:
+The AI can search the scripture files directly when you explicitly ask:
 ```
 !ai Find me a verse about faith
 !ai What does John 3:16 say?
@@ -303,18 +322,18 @@ The AI has hardened safety rules that **cannot be overridden** by any personalit
 
 Setting a new personality wipes all conversation history so no old context carries over.
 
-The AI uses a **single shared group memory** — all `!ai` messages are in one conversation, so the AI sees the full group's context rather than isolated per-user threads.
+The AI uses a **single shared group memory** — all `!ai` messages are in one conversation, so the whole group's context is visible to the AI rather than isolated per-user threads.
 
 ---
 
 ## Profile Picture Swap
 
 When the bot sends an AI response, it automatically:
-1. Uploads a brightened version of your GroupMe avatar with a **"BOT"** banner stamped across it
-2. Switches its GroupMe profile picture to that image before sending the message
-3. Reverts to your original avatar immediately after
+1. Uploads a brightened version of your GroupMe avatar with a **"BOT"** banner stamped on it
+2. Switches its GroupMe profile picture to that image before sending
+3. Reverts to the original avatar immediately after
 
-The two avatar files (`pfp_original.jpg` and `pfp_bot.jpg`) are saved in the `AI-BOT/` folder on first run. This feature is skipped gracefully if the avatar can't be downloaded.
+The two avatar files (`pfp_original.jpg` and `pfp_bot.jpg`) are saved in the `Porta-GMBOT/` folder on first run. This feature is skipped gracefully if the avatar can't be downloaded.
 
 ---
 
@@ -333,6 +352,18 @@ When run on a desktop, the bot opens a graphical control panel with five tabs:
 All tabs are scrollable if content exceeds the window height.
 
 On a headless server the control panel is skipped and the bot runs in the background — use dev group commands instead.
+
+---
+
+## Restarting the bot
+
+Use `restart_bot.py` to safely stop and restart the bot without double-running:
+
+```
+python restart_bot.py
+```
+
+This sends a clean stop signal to the running instance, waits for it to exit, then starts a fresh one.
 
 ---
 
@@ -389,22 +420,40 @@ OLLAMA_BASE_MODEL
 | File / Folder | Description |
 |---|---|
 | `config.json` | Saved credentials, group IDs, model choice, and all tuning values |
-| `AI-BOT/Modelfile` | Auto-generated Ollama Modelfile (safe to delete to reset) |
-| `AI-BOT/pfp_original.jpg` | Your original GroupMe avatar (downloaded on first run) |
-| `AI-BOT/pfp_bot.jpg` | Brightened "BOT" avatar used while the bot is active |
-| `AI-BOT/resources/` | Scripture text files — included in the repo |
+| `Porta-GMBOT/Modelfile` | Auto-generated Ollama Modelfile (safe to delete to reset) |
+| `Porta-GMBOT/pfp_original.jpg` | Your original GroupMe avatar (downloaded on first run) |
+| `Porta-GMBOT/pfp_bot.jpg` | Brightened "BOT" avatar used while the bot is active |
+| `Porta-GMBOT/resources/` | Scripture text files — included in the repo |
 | `groups/<id>.json` | Per-group feature toggle state |
 | `groups/<id>/users/<uid>.json` | Per-user points records |
 | `.bot.lock` | Single-instance lock file — deleted automatically on exit |
 
 ---
 
+## Renaming the GitHub file
+
+If you are renaming from the old `AI-FSY.py` filename in your GitHub repo, the easiest way is:
+
+1. Go to your repo on GitHub
+2. Open `AI-FSY.py` and click the pencil (edit) icon
+3. At the top, click the filename field and change it to `Porta-GMBOT.py`
+4. Commit the change directly on the main branch
+
+Alternatively, do it locally:
+```
+git mv AI-FSY.py Porta-GMBOT.py
+git commit -m "Rename AI-FSY.py to Porta-GMBOT.py"
+git push
+```
+
+---
+
 ## .gitignore
 
-`config.json` is already ignored so your token is never committed. The `AI-BOT/` folder is **not** ignored because the scripture files live there and are part of the repo.
+`config.json` and `.bot.lock` are already ignored so your token and runtime lock file are never committed. The `Porta-GMBOT/` folder is **not** ignored because the scripture files live there and are part of the repo.
 
 ---
 
 ## License
 
-No License...
+No License.

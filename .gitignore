@@ -1,6 +1,9 @@
 # Bot credentials — never commit these
 config.json
 
+# Single-instance lock file — created and deleted at runtime
+.bot.lock
+
 # Python
 __pycache__/
 *.pyc

@@ -223,8 +223,11 @@ The AI can **search the web automatically** — just ask about current events, s
 | `!help` | Show dev commands |
 | `!listgroups` | List all groups your token is in (with IDs) |
 | `!listgroups MAIN_GROUP_ID` | List topics/subgroups for a specific group |
-| `!add GROUPID` | Set the active game group |
+| `!add GROUPID` | Set the **primary** game group (replaces current primary) |
 | `!add MAIN_ID,SUB_ID` | Set bot to a topic/subgroup |
+| `!addgroup GROUPID` | **Add an additional group** — bot now serves both groups simultaneously. Persists across restarts. |
+| `!removegroup GROUPID` | Remove a group from the active list |
+| `!groups` | List all currently active game groups |
 | `!reload` | Restart the bot script |
 | `!state true/false` | Enable or disable game responses |
 | `!aiswitch true/false` | Enable or disable AI responses |

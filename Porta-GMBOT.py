@@ -608,6 +608,22 @@ ADMIN_GROUP_ID = None   # Linked main group (for admin/feature data) — used wh
 USE_SUBGROUP   = False  # If True, bot operates in GAME_GROUP_ID but gets admin data from ADMIN_GROUP_ID
 OLLAMA_BASE_MODEL = "llama3.1:8b"   # overwritten from config
 
+# ── Multi-group support ────────────────────────────────────────────────────────
+# EXTRA_GROUP_IDS: additional game groups beyond the primary GAME_GROUP_ID.
+# Use !addgroup <ID> / !removegroup <ID> from the dev group to manage this list.
+# All groups are polled in parallel; each gets its own isolated state.
+# Persisted in config.json as "extra_group_ids".
+EXTRA_GROUP_IDS: list = []   # list of str group IDs
+
+# Per-group state registry — populated lazily as groups come online.
+# Maps group_id (str) → dict with keys:
+#   game_state, GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED,
+#   SCRIPTURE_ENABLED, CONNECT4_ENABLED, GAME_TIMEOUT_SECONDS,
+#   since_id, _ai_last_used, _aiset_last_used, _fih_last_used,
+#   _steal_last_used, _coin_last_used
+_group_registry: dict = {}
+_group_registry_lock = threading.Lock()
+
 DEV_POLL_INTERVAL = 10  # seconds
 GAME_POLL_INTERVAL = 3  # seconds
 
@@ -1018,9 +1034,10 @@ def handle_shutdown(sig, frame):
     except:
         pass
 
-    if GAME_GROUP_ID:
+    # Notify all active game groups
+    for gid in all_active_group_ids():
         try:
-            send_message(GAME_GROUP_ID, "Connect Four bot is shutting down.")
+            send_message(gid, "Connect Four bot is shutting down.")
         except:
             pass
 
@@ -1531,6 +1548,102 @@ def snapshot_group_config(group_id):
     })
     save_group_config(group_id, existing)
 
+
+# =============================================================================
+# MULTI-GROUP REGISTRY
+# Each active game group gets its own isolated state so they never interfere.
+# =============================================================================
+
+def _fresh_group_state():
+    """Return a brand-new game_state dict for a group."""
+    return {
+        "active": False,
+        "board": None,
+        "players": {},
+        "turn_order": [],
+        "current_turn": 0,
+        "last_move_time": None,
+        "timeout_seconds": 300,
+        "ai_difficulty": "medium",
+        "pvp_bets": {},
+        "pvp_bet_locked": False,
+        "spectator_bets": {},
+    }
+
+
+def _fresh_group_record(group_id):
+    """Build the per-group state record, pre-loading saved config."""
+    cfg = load_group_config(group_id)
+    return {
+        # Game state (mutated in-place by game logic)
+        "game_state": _fresh_group_state(),
+        # Feature toggles (restored from disk)
+        "GAME_ENABLED":      cfg.get("game_enabled",     True),
+        "AI_ENABLED":        cfg.get("ai_enabled",        True),
+        "EIGHTBALL_ENABLED": cfg.get("eightball_enabled", True),
+        "SCRIPTURE_ENABLED": cfg.get("scripture_enabled", True),
+        "CONNECT4_ENABLED":  cfg.get("connect4_enabled",  True),
+        "GAME_TIMEOUT_SECONDS": cfg.get("game_timeout",   300),
+        # Polling cursor
+        "since_id": None,
+        # Per-group cooldown dicts (keyed by user_id)
+        "_ai_last_used":    {},
+        "_aiset_last_used": {},
+        "_fih_last_used":   {},
+        "_steal_last_used": {},
+        "_coin_last_used":  {},
+        # Per-group AI shared memory
+        "_ai_memory": [],
+    }
+
+
+def get_or_create_group_record(group_id: str) -> dict:
+    """
+    Thread-safe fetch (or creation) of the per-group state record.
+    Always returns a valid dict — never None.
+    """
+    gid = str(group_id)
+    with _group_registry_lock:
+        if gid not in _group_registry:
+            _group_registry[gid] = _fresh_group_record(gid)
+        return _group_registry[gid]
+
+
+def snapshot_group_record(group_id: str):
+    """
+    Persist the per-group feature toggles for a specific group.
+    """
+    gid = str(group_id)
+    with _group_registry_lock:
+        rec = _group_registry.get(gid)
+    if rec is None:
+        return
+    existing = load_group_config(gid)
+    existing.update({
+        "game_enabled":      rec["GAME_ENABLED"],
+        "ai_enabled":        rec["AI_ENABLED"],
+        "eightball_enabled": rec["EIGHTBALL_ENABLED"],
+        "scripture_enabled": rec["SCRIPTURE_ENABLED"],
+        "connect4_enabled":  rec["CONNECT4_ENABLED"],
+        "game_timeout":      rec["GAME_TIMEOUT_SECONDS"],
+    })
+    save_group_config(gid, existing)
+
+
+def all_active_group_ids() -> list:
+    """
+    Returns the full list of active game group IDs (primary + extras),
+    de-duplicated, skipping None.
+    """
+    seen = set()
+    result = []
+    for gid in ([GAME_GROUP_ID] + list(EXTRA_GROUP_IDS)):
+        if gid and str(gid) not in seen:
+            seen.add(str(gid))
+            result.append(str(gid))
+    return result
+
+
 def load_config():
     if not os.path.exists(CONFIG_FILE):
         return {}
@@ -1617,6 +1730,14 @@ def apply_settings_from_config():
     STEAL_SUCCESS_MESSAGES = _strlist("steal_ok",   STEAL_SUCCESS_MESSAGES)
     STEAL_EMPTY_MESSAGE    = cfg.get("steal_none",  STEAL_EMPTY_MESSAGE) or STEAL_EMPTY_MESSAGE
     STEAL_COOLDOWN_MESSAGE = cfg.get("steal_cd_m",  STEAL_COOLDOWN_MESSAGE) or STEAL_COOLDOWN_MESSAGE
+
+    # Extra game groups (multi-group support)
+    global EXTRA_GROUP_IDS
+    raw_extras = cfg.get("extra_group_ids", [])
+    if isinstance(raw_extras, list):
+        EXTRA_GROUP_IDS = [str(g) for g in raw_extras if g]
+    else:
+        EXTRA_GROUP_IDS = []
 
 # ---------------------------------------------------------
 # GroupMe API helpers
@@ -2890,8 +3011,11 @@ def handle_dev_command(message):
             "!help — Show this help menu\n"
             "!listgroups — List all groups\n"
             "!listgroups MAIN_GROUP_ID — Show topics/subgroups\n"
-            "!add GROUPID — Set active game group\n"
+            "!add GROUPID — Set primary game group (replaces current)\n"
             "!add MAIN_GROUP_ID,SUB_GROUP_ID — Subgroup mode\n"
+            "!addgroup GROUPID — Add extra group (bot serves multiple)\n"
+            "!removegroup GROUPID — Remove a group from the active list\n"
+            "!groups — List all currently active game groups\n"
             "!reload — Restart the bot\n"
             "!state true/false — Master on/off switch\n"
             "!toggle ai/8ball/scripture/connect4 true/false — Toggle feature\n"
@@ -2996,10 +3120,120 @@ def handle_dev_command(message):
 
         apply_group_config(game_gid)
 
+        # Register in multi-group registry and start poll thread
+        rec = get_or_create_group_record(game_gid)
+        rec["since_id"] = last_game_since_id
+        _ensure_group_thread(game_gid)
+
         if USE_SUBGROUP:
             send_message(DEV_GROUP_ID, f"Game group set to {game_gid} (subgroup mode, admin group: {admin_gid})", reply_to_id=msg_id)
         else:
             send_message(DEV_GROUP_ID, f"Game group set to {game_gid}", reply_to_id=msg_id)
+        return
+
+    # ── MULTI-GROUP COMMANDS ───────────────────────────────────────────────────
+
+    # !addgroup GROUPID — add a group without removing the existing one
+    if cmd == "!addgroup":
+        global GAME_GROUP_ID, EXTRA_GROUP_IDS
+        if len(parts) < 2:
+            send_message(DEV_GROUP_ID,
+                "Usage: !addgroup GROUPID\n"
+                "Adds a new game group alongside the existing one(s).\n"
+                "Use !listgroups to find group IDs.",
+                reply_to_id=msg_id)
+            return
+        new_gid = parts[1].strip()
+        current_ids = all_active_group_ids()
+        if new_gid in current_ids:
+            send_message(DEV_GROUP_ID, f"ℹ️ Group {new_gid} is already active.", reply_to_id=msg_id)
+            return
+        # If there's no primary group yet, set it as primary
+        if GAME_GROUP_ID is None:
+            GAME_GROUP_ID = new_gid
+            cfg = load_config()
+            cfg["game_group_id"] = GAME_GROUP_ID
+            save_config(cfg)
+        else:
+            if new_gid not in EXTRA_GROUP_IDS:
+                EXTRA_GROUP_IDS.append(new_gid)
+            cfg = load_config()
+            cfg["extra_group_ids"] = EXTRA_GROUP_IDS
+            save_config(cfg)
+        # Initialize the group record and start its poll thread
+        rec = get_or_create_group_record(new_gid)
+        latest = get_latest_message_id(new_gid)
+        rec["since_id"] = latest if latest else "0"
+        _ensure_group_thread(new_gid)
+        send_message(new_gid, "🤖 Porta-GMBOT has been added to this group!")
+        send_message(new_gid, "Admins: enable/disable the bot with #state true or #state false.")
+        active = all_active_group_ids()
+        send_message(DEV_GROUP_ID,
+            f"✅ Group {new_gid} added.\nNow active in {len(active)} group(s): {', '.join(active)}",
+            reply_to_id=msg_id)
+        return
+
+    # !removegroup GROUPID — remove a group from the active list
+    if cmd == "!removegroup":
+        global GAME_GROUP_ID, EXTRA_GROUP_IDS, last_game_since_id
+        if len(parts) < 2:
+            send_message(DEV_GROUP_ID,
+                "Usage: !removegroup GROUPID\nUse !groups to see active groups.",
+                reply_to_id=msg_id)
+            return
+        rm_gid = parts[1].strip()
+        removed = False
+        if rm_gid == str(GAME_GROUP_ID):
+            # Retiring the primary — promote first extra if possible
+            if EXTRA_GROUP_IDS:
+                new_primary = EXTRA_GROUP_IDS.pop(0)
+                GAME_GROUP_ID = new_primary
+            else:
+                GAME_GROUP_ID = None
+                last_game_since_id = None
+            cfg = load_config()
+            cfg["game_group_id"] = GAME_GROUP_ID
+            cfg["extra_group_ids"] = EXTRA_GROUP_IDS
+            save_config(cfg)
+            removed = True
+        elif rm_gid in EXTRA_GROUP_IDS:
+            EXTRA_GROUP_IDS.remove(rm_gid)
+            cfg = load_config()
+            cfg["extra_group_ids"] = EXTRA_GROUP_IDS
+            save_config(cfg)
+            removed = True
+        if removed:
+            # Signal the poll thread to stop by removing from registry
+            with _group_registry_lock:
+                _group_registry.pop(rm_gid, None)
+            try:
+                send_message(rm_gid, "🤖 Porta-GMBOT has been removed from this group.")
+            except Exception:
+                pass
+            active = all_active_group_ids()
+            active_str = ", ".join(active) if active else "(none)"
+            send_message(DEV_GROUP_ID,
+                f"✅ Group {rm_gid} removed.\nStill active in: {active_str}",
+                reply_to_id=msg_id)
+        else:
+            send_message(DEV_GROUP_ID,
+                f"❌ Group {rm_gid} is not in the active list. Use !groups to see active groups.",
+                reply_to_id=msg_id)
+        return
+
+    # !groups — list all currently active game groups
+    if cmd == "!groups":
+        active = all_active_group_ids()
+        if not active:
+            send_message(DEV_GROUP_ID, "No game groups are currently active. Use !add or !addgroup to add one.", reply_to_id=msg_id)
+            return
+        lines = [f"🤖 Active game groups ({len(active)}):"]
+        for gid in active:
+            tag = " (primary)" if gid == str(GAME_GROUP_ID) else ""
+            rec = _group_registry.get(gid, {})
+            enabled = rec.get("GAME_ENABLED", "?")
+            lines.append(f"  {gid}{tag} — enabled: {enabled}")
+        send_message(DEV_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
         return
 
     # !reload
@@ -3567,6 +3801,98 @@ def check_ai_cooldown(user_id, cooldown_dict, cooldown_seconds):
 
 def set_ai_cooldown(user_id, cooldown_dict):
     cooldown_dict[user_id] = time.time()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-group dispatch shim
+# Each group poll thread calls handle_game_command_for(gid, rec, msg).
+# This swaps in the per-group state globals, calls handle_game_command(),
+# then restores the original values — keeping everything thread-safe by design
+# because each group has its own thread (no two groups run concurrently here).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_group_dispatch_lock = threading.Lock()   # serialises group context swaps
+
+def handle_game_command_for(group_id: str, rec: dict, message: dict):
+    """
+    Dispatch a game command for a specific group by temporarily making
+    its per-group state visible through the module globals that
+    handle_game_command() reads and writes.
+    """
+    global GAME_GROUP_ID, game_state
+    global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED, SCRIPTURE_ENABLED
+    global CONNECT4_ENABLED, GAME_TIMEOUT_SECONDS
+    global _ai_last_used, _aiset_last_used
+    global _fih_last_used, _steal_last_used, _coin_last_used
+    global _ai_memory
+
+    with _group_dispatch_lock:
+        # ── 1. Save current globals ──────────────────────────────────────────
+        old_gid        = GAME_GROUP_ID
+        old_gs         = game_state
+        old_ge         = GAME_ENABLED
+        old_ai         = AI_ENABLED
+        old_8b         = EIGHTBALL_ENABLED
+        old_sc         = SCRIPTURE_ENABLED
+        old_c4         = CONNECT4_ENABLED
+        old_to         = GAME_TIMEOUT_SECONDS
+        old_ai_lu      = _ai_last_used
+        old_aiset_lu   = _aiset_last_used
+        old_fih_lu     = _fih_last_used
+        old_steal_lu   = _steal_last_used
+        old_coin_lu    = _coin_last_used
+        old_ai_mem     = _ai_memory
+
+        # ── 2. Install per-group values ──────────────────────────────────────
+        GAME_GROUP_ID        = group_id
+        game_state           = rec["game_state"]
+        GAME_ENABLED         = rec["GAME_ENABLED"]
+        AI_ENABLED           = rec["AI_ENABLED"]
+        EIGHTBALL_ENABLED    = rec["EIGHTBALL_ENABLED"]
+        SCRIPTURE_ENABLED    = rec["SCRIPTURE_ENABLED"]
+        CONNECT4_ENABLED     = rec["CONNECT4_ENABLED"]
+        GAME_TIMEOUT_SECONDS = rec["GAME_TIMEOUT_SECONDS"]
+        _ai_last_used        = rec["_ai_last_used"]
+        _aiset_last_used     = rec["_aiset_last_used"]
+        _fih_last_used       = rec["_fih_last_used"]
+        _steal_last_used     = rec["_steal_last_used"]
+        _coin_last_used      = rec["_coin_last_used"]
+        _ai_memory           = rec["_ai_memory"]
+
+        try:
+            # ── 3. Run the command handler ───────────────────────────────────
+            handle_game_command(message)
+        finally:
+            # ── 4. Write back any mutations ──────────────────────────────────
+            rec["game_state"]           = game_state
+            rec["GAME_ENABLED"]         = GAME_ENABLED
+            rec["AI_ENABLED"]           = AI_ENABLED
+            rec["EIGHTBALL_ENABLED"]    = EIGHTBALL_ENABLED
+            rec["SCRIPTURE_ENABLED"]    = SCRIPTURE_ENABLED
+            rec["CONNECT4_ENABLED"]     = CONNECT4_ENABLED
+            rec["GAME_TIMEOUT_SECONDS"] = GAME_TIMEOUT_SECONDS
+            rec["_ai_last_used"]        = _ai_last_used
+            rec["_aiset_last_used"]     = _aiset_last_used
+            rec["_fih_last_used"]       = _fih_last_used
+            rec["_steal_last_used"]     = _steal_last_used
+            rec["_coin_last_used"]      = _coin_last_used
+            rec["_ai_memory"]           = _ai_memory
+
+            # ── 5. Restore original globals ──────────────────────────────────
+            GAME_GROUP_ID        = old_gid
+            game_state           = old_gs
+            GAME_ENABLED         = old_ge
+            AI_ENABLED           = old_ai
+            EIGHTBALL_ENABLED    = old_8b
+            SCRIPTURE_ENABLED    = old_sc
+            CONNECT4_ENABLED     = old_c4
+            GAME_TIMEOUT_SECONDS = old_to
+            _ai_last_used        = old_ai_lu
+            _aiset_last_used     = old_aiset_lu
+            _fih_last_used       = old_fih_lu
+            _steal_last_used     = old_steal_lu
+            _coin_last_used      = old_coin_lu
+            _ai_memory           = old_ai_mem
 
 
 def handle_game_command(message):
@@ -5649,8 +5975,106 @@ def handle_game_command(message):
 
 
 # ---------------------------------------------------------
-# Polling loops
+# Polling loops — multi-group aware
 # ---------------------------------------------------------
+
+# Registry of running poll threads so we never start duplicates
+_poll_threads: dict = {}   # group_id (str) → threading.Thread
+_poll_threads_lock = threading.Lock()
+
+
+def _ensure_group_thread(group_id: str):
+    """
+    Start a polling thread for group_id if one isn't already running.
+    Safe to call from any thread; idempotent.
+    """
+    gid = str(group_id)
+    with _poll_threads_lock:
+        existing = _poll_threads.get(gid)
+        if existing and existing.is_alive():
+            return  # already running
+        t = threading.Thread(
+            target=_group_poll_loop,
+            args=(gid,),
+            daemon=True,
+            name=f"poll-{gid}",
+        )
+        _poll_threads[gid] = t
+        t.start()
+        print(f"[poll] Started poll thread for group {gid}")
+
+
+def _group_poll_loop(group_id: str):
+    """
+    Per-group polling loop.  Runs in its own daemon thread.
+    Exits cleanly when the group is removed from the registry.
+    """
+    gid = str(group_id)
+    print(f"[poll] Group {gid}: poll loop started.")
+    while True:
+        # Stop if this group was removed
+        with _group_registry_lock:
+            if gid not in _group_registry:
+                print(f"[poll] Group {gid}: removed from registry — stopping thread.")
+                return
+
+        rec = get_or_create_group_record(gid)
+
+        try:
+            # ── Timeout check ────────────────────────────────────────────────
+            gs = rec["game_state"]
+            if gs["active"] and gs["last_move_time"] is not None:
+                elapsed = time.time() - gs["last_move_time"]
+                if elapsed > gs["timeout_seconds"]:
+                    # Reset game state
+                    rec["game_state"] = _fresh_group_state()
+                    refund_lines = _refund_all_bets_for(gid, gs)
+                    timeout_msg = "⏰ Game timed out due to inactivity."
+                    if refund_lines:
+                        timeout_msg += "\n💰 Bets refunded:\n" + "\n".join(refund_lines)
+                    send_message(gid, timeout_msg)
+                    time.sleep(GAME_POLL_INTERVAL)
+                    continue
+
+            # ── Fetch new messages ───────────────────────────────────────────
+            msgs, new_since_id = fetch_new_messages(gid, since_id=rec["since_id"])
+            rec["since_id"] = new_since_id
+
+            for msg in msgs:
+                if msg.get("user_id") is None:
+                    continue
+                handle_game_command_for(gid, rec, msg)
+
+        except Exception:
+            print(f"[poll] Error in poll loop for group {gid}:")
+            traceback.print_exc()
+
+        time.sleep(GAME_POLL_INTERVAL)
+
+
+def _refund_all_bets_for(group_id: str, gs: dict) -> list:
+    """
+    Refund all outstanding PvP and spectator bets for a given game state dict.
+    Returns list of refund description lines.
+    Mirrors the logic of _refund_all_bets() but takes explicit group_id and gs.
+    """
+    lines = []
+    # PvP bets
+    for uid, amount in list(gs.get("pvp_bets", {}).items()):
+        if amount and amount > 0:
+            pdata = gs.get("players", {}).get(uid, {})
+            name = pdata.get("name", uid)
+            new_bal = _add_pts(group_id, uid, name, amount)
+            lines.append(f"  {name} +{amount} pts (now {new_bal})")
+    # Spectator bets
+    for uid, bdata in list(gs.get("spectator_bets", {}).items()):
+        amount = bdata.get("amount", 0)
+        bettor_name = bdata.get("bettor_name", uid)
+        if amount > 0:
+            new_bal = _add_pts(group_id, uid, bettor_name, amount)
+            lines.append(f"  {bettor_name} +{amount} pts (spectator, now {new_bal})")
+    return lines
+
 
 def dev_poll_loop():
     global last_dev_since_id
@@ -5674,38 +6098,15 @@ def dev_poll_loop():
         time.sleep(DEV_POLL_INTERVAL)
 
 def game_poll_loop():
-    global last_game_since_id
-    while True:
-        if GAME_GROUP_ID is None:
-            time.sleep(GAME_POLL_INTERVAL)
-            continue
+    """
+    Legacy entry point — now just ensures a poll thread is running for the
+    primary game group (if set) and exits immediately.  Extra groups get their
+    own threads started by !addgroup or by main() on startup.
+    """
+    # Threads are started from main() for all groups known at startup.
+    # This function is kept so that any existing call sites don't break.
+    pass
 
-        try:
-            # NEW: timeout check even without messages
-            if ensure_timeout():
-                refund_lines = _refund_all_bets(GAME_GROUP_ID)
-                timeout_msg = "⏰ Game timed out due to inactivity."
-                if refund_lines:
-                    timeout_msg += "\n💰 Bets refunded:\n" + "\n".join(refund_lines)
-                send_message(GAME_GROUP_ID, timeout_msg)
-                time.sleep(GAME_POLL_INTERVAL)
-                continue
-
-            msgs, last_game_since_id_new = fetch_new_messages(
-                GAME_GROUP_ID, since_id=last_game_since_id
-            )
-            last_game_since_id = last_game_since_id_new
-
-            for msg in msgs:
-                if msg.get("user_id") is None:
-                    continue
-                handle_game_command(msg)
-
-        except Exception:
-            print("Error in game_poll_loop:")
-            traceback.print_exc()
-
-        time.sleep(GAME_POLL_INTERVAL)
 
 # ---------------------------------------------------------
 # Main
@@ -7376,7 +7777,7 @@ def main():
     # This must happen before anything else so all globals are populated.
     _load_or_run_setup()
 
-    # Apply all saved settings (points, messages, etc.) from config.json.
+    # Apply all saved settings (points, messages, extra group IDs, etc.) from config.json.
     apply_settings_from_config()
 
     ensure_ai_directories()
@@ -7392,47 +7793,51 @@ def main():
 
     # Load config
     cfg = load_config()
-    GAME_GROUP_ID = cfg.get("game_group_id")
-    USE_SUBGROUP = cfg.get("use_subgroup_mode", False)
+    GAME_GROUP_ID  = cfg.get("game_group_id")
+    USE_SUBGROUP   = cfg.get("use_subgroup_mode", False)
     ADMIN_GROUP_ID = cfg.get("admin_group_id") if USE_SUBGROUP else None
-    
+
     if USE_SUBGROUP and ADMIN_GROUP_ID:
         print(f"Subgroup mode: bot operates in {GAME_GROUP_ID}, admin data from {ADMIN_GROUP_ID}")
     elif GAME_GROUP_ID:
-        print(f"Standard mode: bot operates in {GAME_GROUP_ID}")
+        print(f"Standard mode: primary group is {GAME_GROUP_ID}")
 
     # Initialize dev since_id
     last_dev_since_id = get_latest_message_id(DEV_GROUP_ID)
     if last_dev_since_id is None:
         last_dev_since_id = "0"
 
-    # Initialize game group
-    if GAME_GROUP_ID:
-        print(f"Restored game group: {GAME_GROUP_ID}")
+    # ── Collect all groups to activate at startup ─────────────────────────────
+    startup_groups = all_active_group_ids()
 
-        latest = get_latest_message_id(GAME_GROUP_ID)
-        if latest is None:
-            last_game_since_id = "0"
-        else:
-            last_game_since_id = str(int(latest) + 1)
-
-        apply_group_config(GAME_GROUP_ID)
-        send_message(GAME_GROUP_ID, "Connect Four bot is now online.")
-        send_message(
-            GAME_GROUP_ID,
-            "By the way admins, if you want to disable or enable this bot, "
-            "you can say '#state false' or '#state true'."
-        )
+    if startup_groups:
+        print(f"Active game groups at startup: {startup_groups}")
     else:
-        print("Waiting for !add GROUPID to set the game group.")
+        print("No game groups configured. Use !add or !addgroup from the dev group.")
+
+    for gid in startup_groups:
+        rec = get_or_create_group_record(gid)
+        latest = get_latest_message_id(gid)
+        # Start just after the last existing message so we don't replay history
+        rec["since_id"] = str(int(latest) + 1) if latest else "0"
+        _ensure_group_thread(gid)
+        send_message(gid, "🤖 Porta-GMBOT is now online.")
+        send_message(
+            gid,
+            "Admins: enable/disable the bot with '#state false' or '#state true'.",
+        )
+        print(f"[startup] Group {gid} ready.")
+
+    # Keep the legacy global in sync for the control panel
+    if GAME_GROUP_ID:
+        rec = get_or_create_group_record(GAME_GROUP_ID)
+        last_game_since_id = rec["since_id"]
+    else:
         last_game_since_id = None
 
-    # Start bot threads (daemon=True so they die if the process exits)
+    # Start the dev group poll thread
     dev_thread = threading.Thread(target=dev_poll_loop, daemon=True)
-    game_thread = threading.Thread(target=game_poll_loop, daemon=True)
-
     dev_thread.start()
-    game_thread.start()
 
     # Launch the control panel GUI on the main thread.
     # If tkinter is unavailable (headless server), fall back to a simple

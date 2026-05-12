@@ -12,7 +12,7 @@ import time
 import signal
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-MAIN_SCRIPT = os.path.join(SCRIPT_DIR, "AI-FSY.py")
+MAIN_SCRIPT = os.path.join(SCRIPT_DIR, "Porta-GMBOT.py")
 LOCK_FILE = os.path.join(SCRIPT_DIR, ".bot.lock")
 PYTHON_EXE = sys.executable
 

@@ -624,6 +624,21 @@ EXTRA_GROUP_IDS: list = []   # list of str group IDs
 _group_registry: dict = {}
 _group_registry_lock = threading.Lock()
 
+# Human-readable name cache: gid (str) → display label (str)
+# Populated by the control panel when groups are fetched/added.
+# Labels are "GroupName" for plain groups or "GroupName / TopicName" for topics.
+# Falls back to the raw gid if no name is known yet.
+_group_name_cache: dict = {}   # {gid: str}
+
+def _group_label(gid: str) -> str:
+    """Return the human-readable label for a group ID, or the ID itself if unknown."""
+    return _group_name_cache.get(str(gid), str(gid))
+
+def _register_group_name(gid: str, label: str):
+    """Store a human-readable label for a group ID."""
+    if gid and label:
+        _group_name_cache[str(gid)] = label
+
 DEV_POLL_INTERVAL = 10  # seconds
 GAME_POLL_INTERVAL = 3  # seconds
 
@@ -6204,8 +6219,20 @@ class ControlPanel:
 
         tk.Label(tab, text="Feature Toggles",
                  font=("Helvetica", 12, "bold")).pack(anchor="w")
-        tk.Label(tab, text="Changes take effect immediately.",
-                 font=("Helvetica", 9), fg="#888888").pack(anchor="w", pady=(0, 10))
+        tk.Label(tab, text="Select a group to view and change its feature states.",
+                 font=("Helvetica", 9), fg="#888888").pack(anchor="w", pady=(0, 4))
+
+        # ── Per-group selector ────────────────────────────────────────────────
+        status_grp_bar = tk.Frame(tab)
+        status_grp_bar.pack(fill="x", pady=(0, 8))
+        tk.Label(status_grp_bar, text="Group:", font=("Helvetica", 9)).pack(side="left")
+        self._status_group_var = tk.StringVar(value="")
+        self._status_group_menu = ttk.Combobox(
+            status_grp_bar, textvariable=self._status_group_var,
+            state="readonly", font=("Helvetica", 9), width=34)
+        self._status_group_menu.pack(side="left", padx=(4, 0))
+        # When the group changes, refresh the checkboxes immediately
+        self._status_group_menu.bind("<<ComboboxSelected>>", lambda e: self._refresh_ui())
 
         self._feature_vars = {}
 
@@ -6454,16 +6481,22 @@ class ControlPanel:
         """Populate the topics listbox with the fetched topics."""
         self._topics_listbox.delete(0, "end")
         self._topics_data = []
-        
+
         if not topics:
             self._topic_status.config(text="No topics found for this group.",
                                      fg="#666666")
             return
-        
+
+        # Build "GroupName / TopicName" labels and register them
+        parent_name = None
+        if self._selected_group_id:
+            parent_name = _group_label(self._selected_group_id)
         for topic_name, topic_id in topics:
-            self._topics_data.append((topic_name, topic_id))
+            self._topics_data.append((topic_name, str(topic_id)))
+            label = f"{parent_name} / {topic_name}" if parent_name else topic_name
+            _register_group_name(str(topic_id), label)
             self._topics_listbox.insert("end", f"  {topic_name}  —  {topic_id}")
-        
+
         self._topic_status.config(text=f"Found {len(topics)} topic(s)",
                                  fg="#34c759")
 
@@ -6520,6 +6553,9 @@ class ControlPanel:
         # Make sure the new primary isn't also listed as an extra
         if gid in EXTRA_GROUP_IDS:
             EXTRA_GROUP_IDS.remove(gid)
+
+        # Register the human-readable label so dropdowns show names
+        _register_group_name(gid, name)
 
         cfg = load_config()
         cfg["game_group_id"]      = gid
@@ -6579,6 +6615,7 @@ class ControlPanel:
         cfg = load_config()
         cfg["extra_group_ids"] = EXTRA_GROUP_IDS
         save_config(cfg)
+        _register_group_name(gid, name)
 
         rec = get_or_create_group_record(gid)
         latest = get_latest_message_id(gid)
@@ -6602,14 +6639,15 @@ class ControlPanel:
         dropdown_labels = []
 
         for gid in active:
-            tag  = " [primary]" if gid == str(GAME_GROUP_ID) else ""
-            rec  = _group_registry.get(gid, {})
-            enab = "✅" if rec.get("GAME_ENABLED", True) else "❌"
-            display = f"{enab}  {gid}{tag}"
+            tag   = " [primary]" if gid == str(GAME_GROUP_ID) else ""
+            rec   = _group_registry.get(gid, {})
+            enab  = "✅" if rec.get("GAME_ENABLED", True) else "❌"
+            label = _group_label(gid)          # "GroupName" or "GroupName / Topic"
+            display = f"{enab}  {label}{tag}"
             self._active_groups_listbox.insert("end", display)
             self._active_groups_data.append((display, gid))
-            # Dropdown label is just gid + tag so we can reverse-map it cleanly
-            dropdown_labels.append(f"{gid}{tag}")
+            # Dropdown value carries the gid so we can reverse-map it unambiguously
+            dropdown_labels.append(f"{label}{tag}||{gid}")
 
         if not active:
             self._active_groups_listbox.insert("end", "  (no active groups)")
@@ -6618,8 +6656,9 @@ class ControlPanel:
         self._send_target_menu["values"] = dropdown_labels
         # Only reset the selection if the current value is no longer valid
         current = self._send_target_var.get()
+        current_gid = current.split("||")[-1] if "||" in current else ""
         valid_ids = [gid for _, gid in self._active_groups_data]
-        if not any(current.startswith(gid) for gid in valid_ids):
+        if current_gid not in valid_ids:
             self._send_target_var.set(dropdown_labels[0] if dropdown_labels else "")
 
     def _remove_active_group(self):
@@ -6636,7 +6675,7 @@ class ControlPanel:
 
         if not messagebox.askyesno(
             "Remove Group",
-            f"Remove group {rm_gid} from the bot?\n\n"
+            f"Remove {_group_label(rm_gid)} from the bot?\n\n"
             "The bot will send a goodbye message there and stop polling it.",
         ):
             return
@@ -6666,7 +6705,7 @@ class ControlPanel:
 
         threading.Thread(target=notify, daemon=True).start()
         self.root.after(300, self._refresh_active_groups_list)
-        self._set_status(f"✅ Removed group {rm_gid}.")
+        self._set_status(f"✅ Removed {_group_label(rm_gid)}.")
 
     def _broadcast_message(self):
         """Send the message in the send box to ALL active groups."""
@@ -6721,11 +6760,13 @@ class ControlPanel:
         grp_bar = tk.Frame(outer, padx=8, pady=2)
         grp_bar.pack(fill="x")
         tk.Label(grp_bar, text="Group:", font=("Helvetica", 9)).pack(side="left")
-        self._pts_group_var = tk.StringVar(value=str(GAME_GROUP_ID) if GAME_GROUP_ID else "")
+        initial_label = _group_label(str(GAME_GROUP_ID)) if GAME_GROUP_ID else ""
+        initial_dv    = self._dropdown_value(initial_label, str(GAME_GROUP_ID)) if GAME_GROUP_ID else ""
+        self._pts_group_var = tk.StringVar(value=initial_dv)
         self._pts_group_menu = ttk.Combobox(grp_bar, textvariable=self._pts_group_var,
-                                             state="readonly", font=("Helvetica", 9), width=24)
+                                             state="readonly", font=("Helvetica", 9), width=34)
         self._pts_group_menu.pack(side="left", padx=(4, 0))
-        self._pts_group_menu.bind("<<ComboboxSelected>>", lambda e: self._pts_refresh())
+        self._pts_group_menu.bind("<<ComboboxSelected>>", lambda e: (self._pts_refresh(), self._pts_clear_selection()))
         self._pts_group_ids = []   # parallel list of raw IDs matching dropdown entries
 
         # ── Summary bar ───────────────────────────────────────────────────────
@@ -6917,15 +6958,21 @@ class ControlPanel:
             self._pts_refresh()
         self.root.after(1000, self._pts_live_loop)
 
+    def _pts_clear_selection(self):
+        """Clear the currently-selected user (called when the group dropdown changes)."""
+        self._pts_selected_uid  = None
+        self._pts_selected_name = None
+        self._pts_detail_name.config(text="← Select a user above")
+        self._pts_detail_pts.config(text="")
+        self._pts_inv_list.delete(0, "end")
+        self._pts_adj_status.config(text="")
+
     def _pts_selected_group_id(self):
         """Return the group ID currently selected in the Points tab dropdown."""
         sel = self._pts_group_var.get()
-        for gid in self._pts_group_ids:
-            if sel.startswith(gid):
-                return gid
-        # Fallback: if it looks like a raw ID
-        if sel and not sel.startswith("("):
-            return sel
+        gid = self._gid_from_dropdown(sel)
+        if gid and gid in self._pts_group_ids:
+            return gid
         return GAME_GROUP_ID
 
     def _pts_load_data(self):
@@ -7171,6 +7218,24 @@ class ControlPanel:
         tab = tk.Frame(nb, padx=16, pady=12)
         nb.add(tab, text="  AI  ")
 
+        # ── Group selector ────────────────────────────────────────────────────
+        tk.Label(tab, text="AI Settings",
+                 font=("Helvetica", 12, "bold")).pack(anchor="w")
+        tk.Label(tab, text="Select a group to view or change its AI settings.",
+                 font=("Helvetica", 9), fg="#888888").pack(anchor="w", pady=(0, 4))
+
+        ai_grp_bar = tk.Frame(tab)
+        ai_grp_bar.pack(fill="x", pady=(0, 10))
+        tk.Label(ai_grp_bar, text="Group:", font=("Helvetica", 9)).pack(side="left")
+        self._ai_group_var = tk.StringVar(value="")
+        self._ai_group_menu = ttk.Combobox(
+            ai_grp_bar, textvariable=self._ai_group_var,
+            state="readonly", font=("Helvetica", 9), width=34)
+        self._ai_group_menu.pack(side="left", padx=(4, 0))
+        self._ai_group_menu.bind("<<ComboboxSelected>>", lambda e: self._refresh_ui())
+
+        ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=(4, 10))
+
         tk.Label(tab, text="AI Personality",
                  font=("Helvetica", 12, "bold")).pack(anchor="w")
         tk.Label(tab, text="Setting a new personality wipes all conversation memory.",
@@ -7191,16 +7256,16 @@ class ControlPanel:
         tk.Label(tab, text="Conversation Memory",
                  font=("Helvetica", 12, "bold")).pack(anchor="w")
         tk.Label(tab,
-                 text="The AI uses a single shared group memory — all !ai messages\n"
-                      "are in one conversation so the AI sees the full group context.",
+                 text="Each group has its own shared memory — all !ai messages in a group\n"
+                      "go into one conversation so the AI sees the full group context.",
                  font=("Helvetica", 9), fg="#888888", justify="left").pack(anchor="w", pady=(2, 6))
-        self._mem_label = tk.Label(tab, text="Shared memory: — turns stored",
+        self._mem_label = tk.Label(tab, text="Memory: — turns stored",
                                    font=("Helvetica", 10), anchor="w")
         self._mem_label.pack(anchor="w", pady=(4, 8))
 
         btn_row = tk.Frame(tab)
         btn_row.pack(anchor="w")
-        tk.Button(btn_row, text="🧹 Clear All Memory",
+        tk.Button(btn_row, text="🧹 Clear Memory",
                   font=("Helvetica", 10),
                   command=self._clear_all_memory,
                   bg="#ff3b30", fg="white", relief="flat",
@@ -7210,6 +7275,8 @@ class ControlPanel:
 
         tk.Label(tab, text="Cooldown Settings",
                  font=("Helvetica", 12, "bold")).pack(anchor="w")
+        tk.Label(tab, text="These settings apply globally to all groups.",
+                 font=("Helvetica", 9), fg="#888888").pack(anchor="w", pady=(0, 4))
 
         _ai_cfg = load_config()
         grid = tk.Frame(tab)
@@ -7227,7 +7294,7 @@ class ControlPanel:
         tk.Entry(grid, textvariable=self._aiset_cd_var, width=8,
                  font=("Helvetica", 10)).grid(row=1, column=1, sticky="w")
 
-        tk.Label(grid, text="Memory turns (group):", font=("Helvetica", 10),
+        tk.Label(grid, text="Memory turns (per group):", font=("Helvetica", 10),
                  width=22, anchor="w").grid(row=2, column=0, sticky="w", pady=4)
         self._mem_turns_var = tk.StringVar(value=str(_ai_cfg.get("ai_memory_max_turns", AI_MEMORY_MAX_TURNS)))
         tk.Entry(grid, textvariable=self._mem_turns_var, width=8,
@@ -7565,20 +7632,59 @@ class ControlPanel:
         self._refresh_ui()
         self.root.after(self.REFRESH_MS, self._schedule_refresh)
 
+    def _active_group_dropdown_entries(self):
+        """
+        Build parallel (label, gid) pairs for every active group.
+        Labels use _group_label() so names show instead of raw IDs.
+        Dropdown values are 'Label||gid' to allow unambiguous ID extraction.
+        """
+        entries = []
+        for gid in all_active_group_ids():
+            tag   = " [primary]" if gid == str(GAME_GROUP_ID) else ""
+            label = _group_label(gid)
+            entries.append((f"{label}{tag}", gid))
+        return entries  # list of (display_label, gid)
+
+    @staticmethod
+    def _dropdown_value(label: str, gid: str) -> str:
+        return f"{label}||{gid}"
+
+    @staticmethod
+    def _gid_from_dropdown(value: str) -> str:
+        """Extract group ID from a 'label||gid' dropdown value."""
+        return value.split("||")[-1] if "||" in value else value
+
     def _refresh_ui(self):
         global GAME_GROUP_ID, GAME_ENABLED, AI_ENABLED
         global EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED
 
-        # Read feature states from the primary group's record when available,
-        # so the checkboxes reflect per-group state rather than stale globals.
-        primary_rec = _group_registry.get(str(GAME_GROUP_ID)) if GAME_GROUP_ID else None
-        if primary_rec:
+        # Build the shared group entry list used by all group dropdowns
+        entries = self._active_group_dropdown_entries()
+        dv_list = [self._dropdown_value(lbl, gid) for lbl, gid in entries]
+        gid_list = [gid for _, gid in entries]
+
+        # ── Feature checkboxes: show state for the currently-selected group ───
+        # The Status tab has its own group selector (_status_group_var).
+        sel_gid = None
+        if hasattr(self, "_status_group_var"):
+            sel_gid = self._gid_from_dropdown(self._status_group_var.get())
+            # Keep the selector values in sync
+            self._status_group_menu["values"] = dv_list
+            if sel_gid not in gid_list and dv_list:
+                self._status_group_var.set(dv_list[0])
+                sel_gid = gid_list[0] if gid_list else None
+
+        viewed_rec = _group_registry.get(str(sel_gid)) if sel_gid else None
+        if viewed_rec is None and GAME_GROUP_ID:
+            viewed_rec = _group_registry.get(str(GAME_GROUP_ID))
+
+        if viewed_rec:
             state_map = {
-                "master":    primary_rec.get("GAME_ENABLED",      GAME_ENABLED),
-                "connect4":  primary_rec.get("CONNECT4_ENABLED",  CONNECT4_ENABLED),
-                "8ball":     primary_rec.get("EIGHTBALL_ENABLED", EIGHTBALL_ENABLED),
-                "scripture": primary_rec.get("SCRIPTURE_ENABLED", SCRIPTURE_ENABLED),
-                "ai":        primary_rec.get("AI_ENABLED",        AI_ENABLED),
+                "master":    viewed_rec.get("GAME_ENABLED",      GAME_ENABLED),
+                "connect4":  viewed_rec.get("CONNECT4_ENABLED",  CONNECT4_ENABLED),
+                "8ball":     viewed_rec.get("EIGHTBALL_ENABLED", EIGHTBALL_ENABLED),
+                "scripture": viewed_rec.get("SCRIPTURE_ENABLED", SCRIPTURE_ENABLED),
+                "ai":        viewed_rec.get("AI_ENABLED",        AI_ENABLED),
             }
         else:
             state_map = {
@@ -7592,47 +7698,52 @@ class ControlPanel:
             var = self._feature_vars.get(key)
             if var:
                 var.set(val)
-                var._dot.config(fg="#34c759" if val else "#ff3b30",
-                                text="●")
+                var._dot.config(fg="#34c759" if val else "#ff3b30", text="●")
 
-        # Info labels
+        # ── Info labels ───────────────────────────────────────────────────────
         active = all_active_group_ids()
         if active:
-            groups_str = f"{active[0]} (primary)" if len(active) == 1 else f"{active[0]} +{len(active)-1} more"
+            primary_label = _group_label(str(GAME_GROUP_ID)) if GAME_GROUP_ID else active[0]
+            groups_str = primary_label if len(active) == 1 else f"{primary_label} +{len(active)-1} more"
         else:
             groups_str = "(not set)"
         self._info_labels["game_group"].config(text=groups_str)
-        self._info_labels["dev_group"].config(
-            text=DEV_GROUP_ID or "(not set)")
-        self._info_labels["model"].config(
-            text=OLLAMA_BASE_MODEL or "—")
+        self._info_labels["dev_group"].config(text=DEV_GROUP_ID or "(not set)")
+        self._info_labels["model"].config(text=OLLAMA_BASE_MODEL or "—")
 
         uptime_s = int(time.time() - self._start_time)
         h, r = divmod(uptime_s, 3600)
         m, s = divmod(r, 60)
         self._info_labels["uptime"].config(text=f"{h}h {m}m {s}s")
 
-        # Shared memory turn count (each pair = user + assistant = 2 entries)
+        # ── AI tab memory counter (per-group if selector exists) ──────────────
         if hasattr(self, "_mem_label"):
-            turns = len(_ai_memory) // 2
+            ai_gid = None
+            if hasattr(self, "_ai_group_var"):
+                ai_gid = self._gid_from_dropdown(self._ai_group_var.get())
+                self._ai_group_menu["values"] = dv_list
+                if ai_gid not in gid_list and dv_list:
+                    self._ai_group_var.set(dv_list[0])
+                    ai_gid = gid_list[0] if gid_list else None
+            ai_mem = []
+            if ai_gid:
+                ai_rec = _group_registry.get(str(ai_gid))
+                if ai_rec:
+                    ai_mem = ai_rec.get("_ai_memory", [])
+            else:
+                ai_mem = _ai_memory
+            turns = len(ai_mem) // 2
             self._mem_label.config(
-                text=f"Shared memory: {turns} turn(s) stored  ({len(_ai_memory)} messages)")
+                text=f"Memory: {turns} turn(s) stored  ({len(ai_mem)} messages)")
 
-        # Keep the Points tab group dropdown in sync with the current active group list
+        # ── Points tab group dropdown ─────────────────────────────────────────
         if hasattr(self, "_pts_group_menu"):
-            current_active = all_active_group_ids()
-            labels = []
-            ids    = []
-            for gid in current_active:
-                tag = " [primary]" if gid == str(GAME_GROUP_ID) else ""
-                labels.append(f"{gid}{tag}")
-                ids.append(gid)
-            self._pts_group_ids = ids
-            self._pts_group_menu["values"] = labels
-            # Keep selection valid
+            self._pts_group_ids = gid_list
+            self._pts_group_menu["values"] = dv_list
             current_sel = self._pts_group_var.get()
-            if labels and not any(current_sel.startswith(gid) for gid in ids):
-                self._pts_group_var.set(labels[0])
+            current_gid = self._gid_from_dropdown(current_sel)
+            if current_gid not in gid_list and dv_list:
+                self._pts_group_var.set(dv_list[0])
 
     # ── Feature toggle callbacks ──────────────────────────────────────────────
 
@@ -7641,28 +7752,16 @@ class ControlPanel:
         global SCRIPTURE_ENABLED, CONNECT4_ENABLED
 
         val = var.get()
-        if key == "master":
-            GAME_ENABLED = val
-            AI_ENABLED        = val
-            EIGHTBALL_ENABLED = val
-            SCRIPTURE_ENABLED = val
-            CONNECT4_ENABLED  = val
-            for k, v in self._feature_vars.items():
-                v.set(val)
-        elif key == "ai":
-            AI_ENABLED = val
-        elif key == "8ball":
-            EIGHTBALL_ENABLED = val
-        elif key == "scripture":
-            SCRIPTURE_ENABLED = val
-        elif key == "connect4":
-            CONNECT4_ENABLED = val
 
-        # Propagate to every active group's per-group record
-        for gid in all_active_group_ids():
-            rec = _group_registry.get(gid)
-            if rec is None:
-                continue
+        # Determine which group(s) this toggle applies to.
+        # If a specific group is selected in the Status tab, only touch that group.
+        # Otherwise fall back to all active groups (legacy behaviour).
+        target_gid = None
+        if hasattr(self, "_status_group_var"):
+            target_gid = self._gid_from_dropdown(self._status_group_var.get())
+        target_gids = [target_gid] if target_gid else all_active_group_ids()
+
+        def _apply_to_rec(rec):
             if key == "master":
                 rec["GAME_ENABLED"]      = val
                 rec["AI_ENABLED"]        = val
@@ -7677,22 +7776,32 @@ class ControlPanel:
                 rec["SCRIPTURE_ENABLED"] = val
             elif key == "connect4":
                 rec["CONNECT4_ENABLED"] = val
+
+        # Update per-group records and persist each one
+        for gid in target_gids:
+            rec = _group_registry.get(gid)
+            if rec is None:
+                continue
+            _apply_to_rec(rec)
             try:
                 snapshot_group_record(gid)
             except Exception:
                 pass
 
-        # Persist feature defaults to config.json so they survive restarts
-        try:
-            cfg = load_config()
-            cfg["default_game_enabled"]      = GAME_ENABLED
-            cfg["default_ai_enabled"]        = AI_ENABLED
-            cfg["default_eightball_enabled"] = EIGHTBALL_ENABLED
-            cfg["default_scripture_enabled"] = SCRIPTURE_ENABLED
-            cfg["default_connect4_enabled"]  = CONNECT4_ENABLED
-            save_config(cfg)
-        except Exception:
-            pass
+        # Only update globals when the toggle covers ALL groups (no specific selection)
+        if not target_gid:
+            if key == "master":
+                GAME_ENABLED      = val
+                AI_ENABLED        = val
+                EIGHTBALL_ENABLED = val
+                SCRIPTURE_ENABLED = val
+                CONNECT4_ENABLED  = val
+                for k, v in self._feature_vars.items():
+                    v.set(val)
+            elif key == "ai":        AI_ENABLED        = val
+            elif key == "8ball":     EIGHTBALL_ENABLED = val
+            elif key == "scripture": SCRIPTURE_ENABLED = val
+            elif key == "connect4":  CONNECT4_ENABLED  = val
 
         label_map = {
             "master":    "All features",
@@ -7702,19 +7811,18 @@ class ControlPanel:
             "connect4":  "Connect Four",
         }
         feature_label = label_map.get(key, key)
-        state_word = "enabled ✅" if val else "disabled ❌"
-        status_msg = f"[Control Panel] {feature_label} {state_word}."
-        self._set_status(f"{'Enabled' if val else 'Disabled'}: {feature_label}")
+        state_word    = "enabled ✅" if val else "disabled ❌"
+        group_hint    = f" in {_group_label(target_gid)}" if target_gid else ""
+        status_msg    = f"[Control Panel] {feature_label} {state_word}{group_hint}."
+        self._set_status(f"{'Enabled' if val else 'Disabled'}: {feature_label}{group_hint}")
 
-        active = all_active_group_ids()
-        if active:
-            def do_send():
-                for gid in active:
-                    try:
-                        send_message(gid, status_msg)
-                    except Exception:
-                        pass
-            threading.Thread(target=do_send, daemon=True).start()
+        def do_send():
+            for gid in target_gids:
+                try:
+                    send_message(gid, status_msg)
+                except Exception:
+                    pass
+        threading.Thread(target=do_send, daemon=True).start()
 
     # ── Group tab callbacks ───────────────────────────────────────────────────
 
@@ -7738,8 +7846,9 @@ class ControlPanel:
         self._group_data = []
         for g in groups:
             name = g.get("name", "(no name)")
-            gid  = g.get("id", "")
+            gid  = str(g.get("id", ""))
             self._group_data.append((name, gid))
+            _register_group_name(gid, name)
             self._group_listbox.insert("end", f"  {name}  —  {gid}")
         self._set_status(f"Found {len(groups)} group(s).")
         self._refresh_active_groups_list()
@@ -7749,14 +7858,9 @@ class ControlPanel:
         if not msg:
             return
 
-        # Resolve target group ID from the dropdown selection via the parallel data list
+        # Resolve target group ID — dropdown values are "Label||gid"
         target_str = self._send_target_var.get()
-        gid = None
-        for display, dgid in self._active_groups_data:
-            # The dropdown stores "gid[tag]" labels matching what we built in _refresh_active_groups_list
-            if target_str == dgid or target_str.startswith(dgid):
-                gid = dgid
-                break
+        gid = target_str.split("||")[-1] if "||" in target_str else None
 
         if not gid or gid.startswith("("):
             self._set_status("Select a target group from the dropdown first.")
@@ -7786,8 +7890,21 @@ class ControlPanel:
 
     def _clear_all_memory(self):
         global _ai_memory
+        # Clear the selected group's per-group memory when a group is chosen,
+        # otherwise fall back to clearing the legacy global memory.
+        ai_gid = None
+        if hasattr(self, "_ai_group_var"):
+            ai_gid = self._gid_from_dropdown(self._ai_group_var.get())
+        if ai_gid:
+            rec = _group_registry.get(str(ai_gid))
+            if rec is not None:
+                rec["_ai_memory"] = []
+                label = _group_label(ai_gid)
+                self._set_status(f"AI memory cleared for {label}.")
+                return
+        # Fallback: clear global memory
         _ai_memory.clear()
-        self._set_status("Shared AI conversation memory cleared.")
+        self._set_status("AI conversation memory cleared.")
 
     def _apply_cooldowns(self):
         global AI_COOLDOWN_SECONDS, AISET_COOLDOWN_SECONDS, AI_MEMORY_MAX_TURNS

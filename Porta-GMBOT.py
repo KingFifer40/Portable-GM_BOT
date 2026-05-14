@@ -6608,6 +6608,7 @@ class ControlPanel:
             display = f"{enab}  {gid}{tag}"
             self._active_groups_listbox.insert("end", display)
             self._active_groups_data.append((display, gid))
+            # Dropdown label is just gid + tag so we can reverse-map it cleanly
             dropdown_labels.append(f"{gid}{tag}")
 
         if not active:
@@ -6615,8 +6616,11 @@ class ControlPanel:
             dropdown_labels = ["(no groups active)"]
 
         self._send_target_menu["values"] = dropdown_labels
-        if dropdown_labels and self._send_target_var.get() not in dropdown_labels:
-            self._send_target_var.set(dropdown_labels[0])
+        # Only reset the selection if the current value is no longer valid
+        current = self._send_target_var.get()
+        valid_ids = [gid for _, gid in self._active_groups_data]
+        if not any(current.startswith(gid) for gid in valid_ids):
+            self._send_target_var.set(dropdown_labels[0] if dropdown_labels else "")
 
     def _remove_active_group(self):
         """Remove the selected group from the active list."""
@@ -6712,6 +6716,17 @@ class ControlPanel:
         self._pts_updated_var = tk.StringVar(value="")
         tk.Label(toolbar, textvariable=self._pts_updated_var,
                  font=("Helvetica", 8), fg="#888888").pack(side="right", padx=(0, 8))
+
+        # ── Group selector ────────────────────────────────────────────────────
+        grp_bar = tk.Frame(outer, padx=8, pady=2)
+        grp_bar.pack(fill="x")
+        tk.Label(grp_bar, text="Group:", font=("Helvetica", 9)).pack(side="left")
+        self._pts_group_var = tk.StringVar(value=str(GAME_GROUP_ID) if GAME_GROUP_ID else "")
+        self._pts_group_menu = ttk.Combobox(grp_bar, textvariable=self._pts_group_var,
+                                             state="readonly", font=("Helvetica", 9), width=24)
+        self._pts_group_menu.pack(side="left", padx=(4, 0))
+        self._pts_group_menu.bind("<<ComboboxSelected>>", lambda e: self._pts_refresh())
+        self._pts_group_ids = []   # parallel list of raw IDs matching dropdown entries
 
         # ── Summary bar ───────────────────────────────────────────────────────
         summary_frame = tk.Frame(outer, bg="#f0f0f5", pady=5, padx=10)
@@ -6902,9 +6917,20 @@ class ControlPanel:
             self._pts_refresh()
         self.root.after(1000, self._pts_live_loop)
 
+    def _pts_selected_group_id(self):
+        """Return the group ID currently selected in the Points tab dropdown."""
+        sel = self._pts_group_var.get()
+        for gid in self._pts_group_ids:
+            if sel.startswith(gid):
+                return gid
+        # Fallback: if it looks like a raw ID
+        if sel and not sel.startswith("("):
+            return sel
+        return GAME_GROUP_ID
+
     def _pts_load_data(self):
-        """Load all user records + inventories for the current game group. Returns list of dicts."""
-        gid = GAME_GROUP_ID
+        """Load all user records + inventories for the selected group. Returns list of dicts."""
+        gid = self._pts_selected_group_id()
         if not gid:
             return []
         ledger = load_points(gid)
@@ -7017,7 +7043,8 @@ class ControlPanel:
     def _pts_adjust(self, action):
         """Quick adjust points for the selected user."""
         import tkinter.messagebox as mb
-        if not self._pts_selected_uid or not GAME_GROUP_ID:
+        gid = self._pts_selected_group_id()
+        if not self._pts_selected_uid or not gid:
             self._pts_adj_status.config(text="No user selected.", fg="#ff3b30")
             return
 
@@ -7027,9 +7054,9 @@ class ControlPanel:
         if action == "reset":
             if not mb.askyesno("Confirm Reset", f"Reset {uname}'s points to 0?"):
                 return
-            record = _load_user_record(GAME_GROUP_ID, uid)
+            record = _load_user_record(gid, uid)
             record["points"] = 0
-            _save_user_record(GAME_GROUP_ID, uid, record)
+            _save_user_record(gid, uid, record)
             self._pts_adj_status.config(text=f"✅ Reset {uname} to 0.", fg="#34c759")
             self._pts_refresh()
             return
@@ -7044,16 +7071,16 @@ class ControlPanel:
             return
 
         if action == "add":
-            new_bal, capped = add_points(GAME_GROUP_ID, uid, uname, amount)
+            new_bal, capped = add_points(gid, uid, uname, amount)
             note = " (capped)" if capped else ""
             self._pts_adj_status.config(text=f"✅ +{amount:,} → {new_bal:,}{note}", fg="#34c759")
         elif action == "remove":
-            new_bal, _ = add_points(GAME_GROUP_ID, uid, uname, -amount)
+            new_bal, _ = add_points(gid, uid, uname, -amount)
             self._pts_adj_status.config(text=f"✅ −{amount:,} → {new_bal:,}", fg="#34c759")
         elif action == "set":
-            record = _load_user_record(GAME_GROUP_ID, uid)
+            record = _load_user_record(gid, uid)
             record["points"] = amount
-            _save_user_record(GAME_GROUP_ID, uid, record)
+            _save_user_record(gid, uid, record)
             self._pts_adj_status.config(text=f"✅ Set to {amount:,}", fg="#34c759")
 
         self._pts_refresh()
@@ -7061,7 +7088,8 @@ class ControlPanel:
     def _pts_inv_remove(self):
         """Remove the selected item from the selected user's inventory."""
         import tkinter.messagebox as mb
-        if not self._pts_selected_uid or not GAME_GROUP_ID:
+        gid = self._pts_selected_group_id()
+        if not self._pts_selected_uid or not gid:
             self._pts_adj_status.config(text="No user selected.", fg="#ff3b30")
             return
 
@@ -7072,35 +7100,24 @@ class ControlPanel:
 
         uid   = self._pts_selected_uid
         uname = self._pts_selected_name
-        inv   = _load_inventory(GAME_GROUP_ID, uid)
+        inv   = _load_inventory(gid, uid)
 
-        # Map listbox index → actual item
-        items_in_order = []
-        for item in inv.get("point_items", []):
-            items_in_order.append(("point_items", item))
-        for creation in inv.get("creations", []):
-            items_in_order.append(("creations", creation))
-
+        # The listbox only shows creations (matching _pts_render_detail), so
+        # map the listbox index directly to inv["creations"].
+        creations = inv.get("creations", [])
         idx = sel[0]
-        if idx >= len(items_in_order):
+        if idx >= len(creations):
             self._pts_adj_status.config(text="Item not found.", fg="#ff3b30")
             return
 
-        section, item = items_in_order[idx]
-        if section == "point_items":
-            label = f"point item"
-        else:
-            label = f'"{item.get("name", "?")}" (worth {item.get("worth", 0)} pts)'
+        item = creations[idx]
+        label = f'"{item.get("name", "?")}" (worth {item.get("worth", 0)} pts)'
 
         if not mb.askyesno("Confirm Remove", f"Remove {label} from {uname}'s inventory?"):
             return
 
-        if section == "point_items":
-            inv["point_items"].remove(item)
-        else:
-            inv["creations"].remove(item)
-
-        _save_inventory(GAME_GROUP_ID, uid, inv)
+        inv["creations"].pop(idx)
+        _save_inventory(gid, uid, inv)
         self._pts_adj_status.config(text=f"✅ Removed {label} from {uname}.", fg="#34c759")
         self._pts_refresh()
 
@@ -7109,7 +7126,8 @@ class ControlPanel:
         """Inject an arbitrary creation item (name + worth) into the selected user's inventory.
         Worth can be zero or negative for prank items."""
         import tkinter.messagebox as mb
-        if not self._pts_selected_uid or not GAME_GROUP_ID:
+        gid = self._pts_selected_group_id()
+        if not self._pts_selected_uid or not gid:
             self._pts_adj_status.config(text="No user selected.", fg="#ff3b30")
             return
 
@@ -7132,9 +7150,9 @@ class ControlPanel:
 
         uid   = self._pts_selected_uid
         uname = self._pts_selected_name
-        inv   = _load_inventory(GAME_GROUP_ID, uid)
+        inv   = _load_inventory(gid, uid)
         inv["creations"].append({"name": name_raw, "worth": worth})
-        _save_inventory(GAME_GROUP_ID, uid, inv)
+        _save_inventory(gid, uid, inv)
 
         worth_str = f"{worth:+,} pts" if worth != 0 else "worthless"
         self._pts_adj_status.config(
@@ -7551,14 +7569,25 @@ class ControlPanel:
         global GAME_GROUP_ID, GAME_ENABLED, AI_ENABLED
         global EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED
 
-        # Feature checkboxes + dots
-        state_map = {
-            "master":   GAME_ENABLED,
-            "connect4": CONNECT4_ENABLED,
-            "8ball":    EIGHTBALL_ENABLED,
-            "scripture":SCRIPTURE_ENABLED,
-            "ai":       AI_ENABLED,
-        }
+        # Read feature states from the primary group's record when available,
+        # so the checkboxes reflect per-group state rather than stale globals.
+        primary_rec = _group_registry.get(str(GAME_GROUP_ID)) if GAME_GROUP_ID else None
+        if primary_rec:
+            state_map = {
+                "master":    primary_rec.get("GAME_ENABLED",      GAME_ENABLED),
+                "connect4":  primary_rec.get("CONNECT4_ENABLED",  CONNECT4_ENABLED),
+                "8ball":     primary_rec.get("EIGHTBALL_ENABLED", EIGHTBALL_ENABLED),
+                "scripture": primary_rec.get("SCRIPTURE_ENABLED", SCRIPTURE_ENABLED),
+                "ai":        primary_rec.get("AI_ENABLED",        AI_ENABLED),
+            }
+        else:
+            state_map = {
+                "master":    GAME_ENABLED,
+                "connect4":  CONNECT4_ENABLED,
+                "8ball":     EIGHTBALL_ENABLED,
+                "scripture": SCRIPTURE_ENABLED,
+                "ai":        AI_ENABLED,
+            }
         for key, val in state_map.items():
             var = self._feature_vars.get(key)
             if var:
@@ -7588,6 +7617,22 @@ class ControlPanel:
             turns = len(_ai_memory) // 2
             self._mem_label.config(
                 text=f"Shared memory: {turns} turn(s) stored  ({len(_ai_memory)} messages)")
+
+        # Keep the Points tab group dropdown in sync with the current active group list
+        if hasattr(self, "_pts_group_menu"):
+            current_active = all_active_group_ids()
+            labels = []
+            ids    = []
+            for gid in current_active:
+                tag = " [primary]" if gid == str(GAME_GROUP_ID) else ""
+                labels.append(f"{gid}{tag}")
+                ids.append(gid)
+            self._pts_group_ids = ids
+            self._pts_group_menu["values"] = labels
+            # Keep selection valid
+            current_sel = self._pts_group_var.get()
+            if labels and not any(current_sel.startswith(gid) for gid in ids):
+                self._pts_group_var.set(labels[0])
 
     # ── Feature toggle callbacks ──────────────────────────────────────────────
 
@@ -7632,7 +7677,22 @@ class ControlPanel:
                 rec["SCRIPTURE_ENABLED"] = val
             elif key == "connect4":
                 rec["CONNECT4_ENABLED"] = val
-            snapshot_group_record(gid)
+            try:
+                snapshot_group_record(gid)
+            except Exception:
+                pass
+
+        # Persist feature defaults to config.json so they survive restarts
+        try:
+            cfg = load_config()
+            cfg["default_game_enabled"]      = GAME_ENABLED
+            cfg["default_ai_enabled"]        = AI_ENABLED
+            cfg["default_eightball_enabled"] = EIGHTBALL_ENABLED
+            cfg["default_scripture_enabled"] = SCRIPTURE_ENABLED
+            cfg["default_connect4_enabled"]  = CONNECT4_ENABLED
+            save_config(cfg)
+        except Exception:
+            pass
 
         label_map = {
             "master":    "All features",
@@ -7689,10 +7749,14 @@ class ControlPanel:
         if not msg:
             return
 
-        # Resolve target from dropdown
+        # Resolve target group ID from the dropdown selection via the parallel data list
         target_str = self._send_target_var.get()
-        # Extract just the group ID (strip the [primary] tag if present)
-        gid = target_str.replace(" [primary]", "").strip()
+        gid = None
+        for display, dgid in self._active_groups_data:
+            # The dropdown stores "gid[tag]" labels matching what we built in _refresh_active_groups_list
+            if target_str == dgid or target_str.startswith(dgid):
+                gid = dgid
+                break
 
         if not gid or gid.startswith("("):
             self._set_status("Select a target group from the dropdown first.")

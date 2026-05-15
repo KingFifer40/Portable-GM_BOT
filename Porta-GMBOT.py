@@ -634,6 +634,26 @@ def _group_label(gid: str) -> str:
     """Return the human-readable label for a group ID, or the ID itself if unknown."""
     return _group_name_cache.get(str(gid), str(gid))
 
+def _fetch_and_cache_group_name(gid: str) -> str:
+    """
+    Tries to resolve a group name from the API and caches it.
+    Falls back to the raw gid if the request fails or returns nothing.
+    For subgroup/topic IDs the /groups/{id} endpoint may not exist;
+    in that case the raw ID is kept so the UI still shows something.
+    """
+    try:
+        resp = gm_get(f"/groups/{gid}")
+        if isinstance(resp, dict):
+            name = resp.get("name", "").strip()
+            topic = resp.get("topic", "").strip()
+            label = f"{name} / {topic}" if topic else name
+            if label:
+                _group_name_cache[str(gid)] = label
+                return label
+    except Exception:
+        pass
+    return str(gid)
+
 def _register_group_name(gid: str, label: str):
     """Store a human-readable label for a group ID."""
     if gid and label:
@@ -3124,7 +3144,10 @@ def handle_dev_command(message):
             tag = " (primary)" if gid == str(GAME_GROUP_ID) else ""
             rec = _group_registry.get(gid, {})
             enabled = rec.get("GAME_ENABLED", "?")
-            lines.append(f"  {gid}{tag} — enabled: {enabled}")
+            label = _group_label(gid)
+            # If no name is cached yet, fall back to just the ID
+            name_part = label if label != gid else gid
+            lines.append(f"  {name_part}{tag} [{gid}] — enabled: {enabled}")
         send_message(DEV_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
         return
 
@@ -6044,7 +6067,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "a8df03d"
+BOT_COMMIT_SHA = "910072c"
 
 _control_panel_instance = None  # set when panel launches
 
@@ -6637,6 +6660,20 @@ class ControlPanel:
 
         active = all_active_group_ids()
         dropdown_labels = []
+
+        # Resolve names for any group that isn't in the cache yet (non-blocking
+        # fetch happens on a background thread so we don't freeze the UI).
+        uncached = [gid for gid in active if _group_name_cache.get(str(gid)) is None]
+        if uncached:
+            def _resolve_names(ids):
+                for g in ids:
+                    _fetch_and_cache_group_name(g)
+                self.root.after(0, self._refresh_active_groups_list)
+            import threading as _threading
+            _threading.Thread(target=_resolve_names, args=(uncached,), daemon=True).start()
+            # Show a placeholder while fetching
+            self._active_groups_listbox.insert("end", "  ⏳ Fetching group names…")
+            return
 
         for gid in active:
             tag   = " [primary]" if gid == str(GAME_GROUP_ID) else ""

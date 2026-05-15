@@ -637,9 +637,10 @@ def _group_label(gid: str) -> str:
 def _fetch_and_cache_group_name(gid: str) -> str:
     """
     Tries to resolve a group name from the API and caches it.
-    Falls back to the raw gid if the request fails or returns nothing.
-    For subgroup/topic IDs the /groups/{id} endpoint may not exist;
-    in that case the raw ID is kept so the UI still shows something.
+    Always writes something to _group_name_cache so the caller never
+    retries the same ID again (important for subgroup/topic IDs that
+    return 404 from /groups/{id} — without this the background thread
+    would loop forever spamming 404 warnings).
     """
     try:
         resp = gm_get(f"/groups/{gid}")
@@ -652,6 +653,8 @@ def _fetch_and_cache_group_name(gid: str) -> str:
                 return label
     except Exception:
         pass
+    # 404, network error, or empty name — cache the raw ID so we never retry
+    _group_name_cache[str(gid)] = str(gid)
     return str(gid)
 
 def _register_group_name(gid: str, label: str):
@@ -3039,6 +3042,9 @@ def handle_dev_command(message):
         rec["since_id"] = last_game_since_id
         _ensure_group_thread(game_gid)
 
+        # Cache the group name so the UI shows it instead of the raw ID
+        _fetch_and_cache_group_name(game_gid)
+
         if USE_SUBGROUP:
             send_message(DEV_GROUP_ID, f"Game group set to {game_gid} (subgroup mode, admin group: {admin_gid})", reply_to_id=msg_id)
         else:
@@ -3078,6 +3084,8 @@ def handle_dev_command(message):
         latest = get_latest_message_id(new_gid)
         rec["since_id"] = latest if latest else "0"
         _ensure_group_thread(new_gid)
+        # Cache the group name so the UI shows it instead of the raw ID
+        _fetch_and_cache_group_name(new_gid)
         send_message(new_gid, "🤖 Porta-GMBOT has been added to this group! All features are disabled by default.")
         send_message(new_gid, "Enable features from the dev group (!toggle) or control panel.")
         active = all_active_group_ids()
@@ -8116,6 +8124,25 @@ def main():
         print(f"Active game groups at startup: {startup_groups}")
     else:
         print("No game groups configured. Use !add or !addgroup from the dev group.")
+
+    # Pre-populate the name cache from the full group list (one API call).
+    # This covers regular groups; subtopic IDs won't appear here (they 404
+    # on /groups/{id}), so they stay as raw IDs in the cache — that's fine.
+    try:
+        all_gm_groups = list_groups()
+        gm_by_id = {str(g.get("id", "")): g for g in all_gm_groups}
+        for gid in startup_groups:
+            g = gm_by_id.get(str(gid))
+            if g:
+                name = g.get("name", "").strip()
+                if name:
+                    _register_group_name(str(gid), name)
+            if str(gid) not in _group_name_cache:
+                # Subtopic or unknown — cache raw ID so UI never spins on it
+                _group_name_cache[str(gid)] = str(gid)
+    except Exception:
+        # Non-fatal: UI will fall back to raw IDs
+        pass
 
     for gid in startup_groups:
         rec = get_or_create_group_record(gid)

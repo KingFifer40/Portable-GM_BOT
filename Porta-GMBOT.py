@@ -6661,29 +6661,15 @@ class ControlPanel:
         active = all_active_group_ids()
         dropdown_labels = []
 
-        # Resolve names for any group that isn't in the cache yet (non-blocking
-        # fetch happens on a background thread so we don't freeze the UI).
-        uncached = [gid for gid in active if _group_name_cache.get(str(gid)) is None]
-        if uncached:
-            def _resolve_names(ids):
-                for g in ids:
-                    _fetch_and_cache_group_name(g)
-                self.root.after(0, self._refresh_active_groups_list)
-            import threading as _threading
-            _threading.Thread(target=_resolve_names, args=(uncached,), daemon=True).start()
-            # Show a placeholder while fetching
-            self._active_groups_listbox.insert("end", "  ⏳ Fetching group names…")
-            return
-
         for gid in active:
             tag   = " [primary]" if gid == str(GAME_GROUP_ID) else ""
             rec   = _group_registry.get(gid, {})
             enab  = "✅" if rec.get("GAME_ENABLED", True) else "❌"
-            label = _group_label(gid)          # "GroupName" or "GroupName / Topic"
+            # Show cached name if available, otherwise fall back to raw ID for now
+            label = _group_name_cache.get(str(gid)) or str(gid)
             display = f"{enab}  {label}{tag}"
             self._active_groups_listbox.insert("end", display)
             self._active_groups_data.append((display, gid))
-            # Dropdown value carries the gid so we can reverse-map it unambiguously
             dropdown_labels.append(f"{label}{tag}||{gid}")
 
         if not active:
@@ -6697,6 +6683,16 @@ class ControlPanel:
         valid_ids = [gid for _, gid in self._active_groups_data]
         if current_gid not in valid_ids:
             self._send_target_var.set(dropdown_labels[0] if dropdown_labels else "")
+
+        # If any group names are still unknown, fetch them in the background
+        # and refresh the list once they come in — no blocking, no spinner.
+        uncached = [gid for gid in active if str(gid) not in _group_name_cache]
+        if uncached:
+            def _resolve_names(ids):
+                for g in ids:
+                    _fetch_and_cache_group_name(g)
+                self.root.after(0, self._refresh_active_groups_list)
+            threading.Thread(target=_resolve_names, args=(uncached,), daemon=True).start()
 
     def _remove_active_group(self):
         """Remove the selected group from the active list."""

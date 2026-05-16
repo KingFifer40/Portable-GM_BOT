@@ -4012,7 +4012,11 @@ def handle_game_command(message):
             lines.append("Admins can re-enable any feature using the command shown above.")
             send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
         return
-
+    # mispells
+    if cmd == "!dih":
+        send_message(GAME_GROUP_ID, "Freaky misspell 🙏", reply_to_id=msg_id)
+        return
+    
     # !fih  — fish for points (win or lose!)
     if cmd == "!fih":
         allowed, remaining = check_ai_cooldown(sender_id, _fih_last_used, POINTS_FIH_CD)

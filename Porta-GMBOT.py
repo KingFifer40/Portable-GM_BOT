@@ -617,7 +617,7 @@ EXTRA_GROUP_IDS: list = []   # list of str group IDs
 
 # Per-group state registry — populated lazily as groups come online.
 # Maps group_id (str) → dict with keys:
-#   game_state, GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED,
+#   game_session, GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED,
 #   SCRIPTURE_ENABLED, CONNECT4_ENABLED, GAME_TIMEOUT_SECONDS,
 #   since_id, _ai_last_used, _aiset_last_used, _fih_last_used,
 #   _steal_last_used, _coin_last_used
@@ -673,6 +673,7 @@ AI_ENABLED         = False  # !ai, !aiset, !aiforget, etc.
 EIGHTBALL_ENABLED  = False  # ? magic 8-ball
 SCRIPTURE_ENABLED  = False  # #randverse, #findverse
 CONNECT4_ENABLED   = False  # #start, #join, #addai, #quit, column moves
+TICTACTOE_ENABLED  = False  # #ttt, ttt moves
 
 # Human-readable names used in status messages
 FEATURE_NAMES = {
@@ -680,6 +681,7 @@ FEATURE_NAMES = {
     "8ball":     ("Magic 8-Ball",    lambda: EIGHTBALL_ENABLED),
     "scripture": ("Scripture",       lambda: SCRIPTURE_ENABLED),
     "connect4":  ("Connect Four",    lambda: CONNECT4_ENABLED),
+    "tictactoe": ("Tic-Tac-Toe",    lambda: TICTACTOE_ENABLED),
 }
 
 # Default game timeout in seconds (controlled by #timeout)
@@ -1055,7 +1057,6 @@ def update_personality(text):
 
     # Clear the shared conversation history so the group starts fresh
     # with the new personality.
-    global _ai_memory
     _ai_memory.clear()
 
 # ---------------------------------------------------------
@@ -1167,40 +1168,12 @@ def ensure_ollama_running():
     return True
 
 # ---------------------------------------------------------
-# Global game state (per game group)
+# Game session state — managed by Porta-Games module
+# The per-group dispatch shim swaps game_session in/out for each group.
 # ---------------------------------------------------------
-game_state = {
-    "active": False,
-    "board": None,
-    "players": {},           # {user_id: {"name": str, "symbol": str}}
-    "turn_order": [],        # [user_id1, user_id2]
-    "current_turn": 0,       # index into turn_order
-    "last_move_time": None,
-    "timeout_seconds": GAME_TIMEOUT_SECONDS,
-    # AI difficulty: "easy" | "medium" | "hard"
-    "ai_difficulty": "medium",
-    # PvP bet pool: {user_id: amount_bet}  — only populated in PvP games
-    "pvp_bets": {},
-    # Whether both players have confirmed/skipped their bets (game can start)
-    "pvp_bet_locked": False,
-    # Spectator bets: {spectator_uid: {"amount": int, "on": player_uid, "on_name": str, "bettor_name": str}}
-    "spectator_bets": {},
-}
+import Porta_Games as games   # all game logic lives here
 
-# Emoji pieces
-EMPTY    = "⚫"
-P1       = "🔴"
-P2       = "🟡"
-AI_PIECE = "🟢"
-
-# Column indicator emojis — one per column A-G
-# These replace the full-width letter header so the grid aligns in GroupMe
-COL_EMOJIS = ["🔵", "🟠", "🟤", "🟣", "🔶", "🔷", "🟥"]
-# Map from emoji → column index (mirrors COL_EMOJIS)
-EMOJI_TO_COL = {e: i for i, e in enumerate(COL_EMOJIS)}
-# Key shown to players
-COL_KEY = "  ".join(f"{e}={chr(65+i)}" for i, e in enumerate(COL_EMOJIS))
-
+game_session = games.fresh_game_session()   # current-group slot
 
 # ---------------------------------------------------------
 # Per-group persistent config
@@ -1558,13 +1531,14 @@ def apply_group_config(group_id):
     Called whenever the active group changes.
     """
     global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED
-    global SCRIPTURE_ENABLED, CONNECT4_ENABLED, GAME_TIMEOUT_SECONDS
+    global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, GAME_TIMEOUT_SECONDS
     cfg = load_group_config(group_id)
     GAME_ENABLED      = cfg.get("game_enabled",      False)
     AI_ENABLED        = cfg.get("ai_enabled",         False)
     EIGHTBALL_ENABLED = cfg.get("eightball_enabled",  False)
     SCRIPTURE_ENABLED = cfg.get("scripture_enabled",  False)
     CONNECT4_ENABLED  = cfg.get("connect4_enabled",   False)
+    TICTACTOE_ENABLED = cfg.get("tictactoe_enabled",  False)
     GAME_TIMEOUT_SECONDS = cfg.get("game_timeout",    300)
 
 
@@ -1582,6 +1556,7 @@ def snapshot_group_config(group_id):
         "eightball_enabled": EIGHTBALL_ENABLED,
         "scripture_enabled": SCRIPTURE_ENABLED,
         "connect4_enabled":  CONNECT4_ENABLED,
+        "tictactoe_enabled": TICTACTOE_ENABLED,
         "game_timeout":      GAME_TIMEOUT_SECONDS,
     })
     save_group_config(group_id, existing)
@@ -1593,20 +1568,8 @@ def snapshot_group_config(group_id):
 # =============================================================================
 
 def _fresh_group_state():
-    """Return a brand-new game_state dict for a group."""
-    return {
-        "active": False,
-        "board": None,
-        "players": {},
-        "turn_order": [],
-        "current_turn": 0,
-        "last_move_time": None,
-        "timeout_seconds": 300,
-        "ai_difficulty": "medium",
-        "pvp_bets": {},
-        "pvp_bet_locked": False,
-        "spectator_bets": {},
-    }
+    """Return a brand-new game session dict for a group (via Porta-Games)."""
+    return games.fresh_game_session()
 
 
 def _fresh_group_record(group_id):
@@ -1614,7 +1577,7 @@ def _fresh_group_record(group_id):
     cfg = load_group_config(group_id)
     return {
         # Game state (mutated in-place by game logic)
-        "game_state": _fresh_group_state(),
+        "game_session": _fresh_group_state(),
         # Feature toggles (restored from disk)
         # Feature toggles — all off by default; enable via dev group or control panel
         "GAME_ENABLED":      cfg.get("game_enabled",     False),
@@ -1622,6 +1585,7 @@ def _fresh_group_record(group_id):
         "EIGHTBALL_ENABLED": cfg.get("eightball_enabled", False),
         "SCRIPTURE_ENABLED": cfg.get("scripture_enabled", False),
         "CONNECT4_ENABLED":  cfg.get("connect4_enabled",  False),
+        "TICTACTOE_ENABLED": cfg.get("tictactoe_enabled", False),
         "GAME_TIMEOUT_SECONDS": cfg.get("game_timeout",   300),
         # Polling cursor
         "since_id": None,
@@ -1664,6 +1628,7 @@ def snapshot_group_record(group_id: str):
         "eightball_enabled": rec["EIGHTBALL_ENABLED"],
         "scripture_enabled": rec["SCRIPTURE_ENABLED"],
         "connect4_enabled":  rec["CONNECT4_ENABLED"],
+        "tictactoe_enabled": rec["TICTACTOE_ENABLED"],
         "game_timeout":      rec["GAME_TIMEOUT_SECONDS"],
     })
     save_group_config(gid, existing)
@@ -1752,6 +1717,11 @@ def apply_settings_from_config():
     POINTS_STEAL_CD        = _int("steal_cd",  POINTS_STEAL_CD)
     POINTS_C4_WIN          = _int("c4_win",    POINTS_C4_WIN)
     POINTS_C4_WIN_AI       = _int("c4_win_ai", POINTS_C4_WIN_AI)
+    # Sync C4 rewards into the game engine (if already registered)
+    try:
+        games.set_c4_rewards(POINTS_C4_WIN_AI_EASY, POINTS_C4_WIN_AI_MED, POINTS_C4_WIN_AI_HARD)
+    except Exception:
+        pass
     LEADERBOARD_SIZE       = _int("lb_size",   LEADERBOARD_SIZE)
     POINTS_COIN_CD         = _int("coin_cd",   POINTS_COIN_CD)
     POINTS_MAX_CAP         = _int("points_max_cap", POINTS_MAX_CAP)
@@ -2030,333 +2000,6 @@ def fetch_new_messages(group_id, since_id=None, limit=20):
             new_since_id = mid
 
     return messages, new_since_id
-
-# ---------------------------------------------------------
-# Board rendering
-# ---------------------------------------------------------
-
-def init_board():
-    return [[EMPTY for _ in range(7)] for _ in range(6)]
-
-
-def cf_board_to_text(board):
-    """
-    Renders the board with colored-circle column headers instead of letters.
-    Emoji headers align correctly in GroupMe regardless of font settings.
-    A color key is appended so players know which emoji = which column.
-    """
-    header = "".join(COL_EMOJIS)
-    rows = [header]
-    for r in range(6):
-        rows.append("".join(board[r]))
-    rows.append(COL_KEY)
-    return "\n".join(rows)
-
-
-def column_letter_to_index(letter):
-    """Accepts a letter (A-G) or a column emoji (🔵🟠🟤🟣🔶🔷🟥)."""
-    # Try emoji first
-    if letter in EMOJI_TO_COL:
-        return EMOJI_TO_COL[letter]
-    mapping = {"A": 0, "B": 1, "C": 2, "D": 3, "E": 4, "F": 5, "G": 6}
-    return mapping.get(letter.upper())
-
-
-def drop_piece(board, col_idx, symbol):
-    # Drop from bottom row upwards
-    for row in range(5, -1, -1):
-        if board[row][col_idx] == EMPTY:
-            board[row][col_idx] = symbol
-            return row, col_idx
-    return None, None
-
-
-def check_winner(board, symbol):
-    rows = 6
-    cols = 7
-
-    # Horizontal
-    for r in range(rows):
-        for c in range(cols - 3):
-            if all(board[r][c + i] == symbol for i in range(4)):
-                return True
-
-    # Vertical
-    for c in range(cols):
-        for r in range(rows - 3):
-            if all(board[r + i][c] == symbol for i in range(4)):
-                return True
-
-    # Diagonal down-right
-    for r in range(rows - 3):
-        for c in range(cols - 3):
-            if all(board[r + i][c + i] == symbol for i in range(4)):
-                return True
-
-    # Diagonal up-right
-    for r in range(3, rows):
-        for c in range(cols - 3):
-            if all(board[r - i][c + i] == symbol for i in range(4)):
-                return True
-
-    return False
-
-def board_full(board):
-    for r in range(6):
-        for c in range(7):
-            if board[r][c] == EMPTY:
-                return False
-    return True
-
-# ---------------------------------------------------------
-# Connect Four AI Engine (Expert, depth 9)
-# ---------------------------------------------------------
-
-def ai_valid_moves(board):
-    return [c for c in range(7) if board[0][c] == EMPTY]
-
-def ai_make_temp_move(board, col, piece):
-    temp = [row[:] for row in board]
-    for r in range(5, -1, -1):
-        if temp[r][col] == EMPTY:
-            temp[r][col] = piece
-            return temp
-    return None
-
-def ai_count_window(window, piece, opp_piece):
-    score = 0
-    if window.count(piece) == 4:
-        score += 100000
-    elif window.count(piece) == 3 and window.count(EMPTY) == 1:
-        score += 1000
-    elif window.count(piece) == 2 and window.count(EMPTY) == 2:
-        score += 50
-
-    if window.count(opp_piece) == 3 and window.count(EMPTY) == 1:
-        score -= 1200  # prioritize blocking
-
-    return score
-
-def ai_score_position(board, piece):
-    opp_piece = P1 if piece != P1 else AI_PIECE
-    score = 0
-
-    # Center column preference
-    center_col = 3
-    center = [board[r][center_col] for r in range(6)]
-    score += center.count(piece) * 6
-
-    # Horizontal
-    for r in range(6):
-        row_array = board[r]
-        for c in range(7 - 3):
-            window = row_array[c:c+4]
-            score += ai_count_window(window, piece, opp_piece)
-
-    # Vertical
-    for c in range(7):
-        col_array = [board[r][c] for r in range(6)]
-        for r in range(6 - 3):
-            window = col_array[r:r+4]
-            score += ai_count_window(window, piece, opp_piece)
-
-    # Diagonal down-right
-    for r in range(6 - 3):
-        for c in range(7 - 3):
-            window = [board[r+i][c+i] for i in range(4)]
-            score += ai_count_window(window, piece, opp_piece)
-
-    # Diagonal up-right
-    for r in range(3, 6):
-        for c in range(7 - 3):
-            window = [board[r-i][c+i] for i in range(4)]
-            score += ai_count_window(window, piece, opp_piece)
-
-    return score
-
-def ai_is_terminal(board, ai_piece, human_piece):
-    if check_winner(board, ai_piece):
-        return True
-    if check_winner(board, human_piece):
-        return True
-    if board_full(board):
-        return True
-    return False
-
-def ai_minimax(board, depth, alpha, beta, maximizing, ai_piece, human_piece):
-    valid = ai_valid_moves(board)
-
-    if depth == 0 or ai_is_terminal(board, ai_piece, human_piece):
-        if check_winner(board, ai_piece):
-            return None, 100000000
-        elif check_winner(board, human_piece):
-            return None, -100000000
-        elif board_full(board):
-            return None, 0
-        else:
-            return None, ai_score_position(board, ai_piece)
-
-    # Move ordering: center first
-    valid_sorted = sorted(valid, key=lambda c: abs(3 - c))
-
-    if maximizing:
-        best_score = -10**12
-        best_col = random.choice(valid_sorted)
-
-        for col in valid_sorted:
-            temp = ai_make_temp_move(board, col, ai_piece)
-            _, score = ai_minimax(temp, depth - 1, alpha, beta, False, ai_piece, human_piece)
-
-            if score > best_score:
-                best_score = score
-                best_col = col
-
-            alpha = max(alpha, score)
-            if alpha >= beta:
-                break
-
-        return best_col, best_score
-
-    else:
-        best_score = 10**12
-        best_col = random.choice(valid_sorted)
-
-        for col in valid_sorted:
-            temp = ai_make_temp_move(board, col, human_piece)
-            _, score = ai_minimax(temp, depth - 1, alpha, beta, True, ai_piece, human_piece)
-
-            if score < best_score:
-                best_score = score
-                best_col = col
-
-            beta = min(beta, score)
-            if alpha >= beta:
-                break
-
-        return best_col, best_score
-
-def ai_choose_move(board, ai_piece, human_piece, difficulty="medium"):
-    depth_map = {"easy": 2, "medium": 5, "hard": 8}
-    depth = depth_map.get(difficulty, 5)
-    # Easy mode: 40% chance of a random valid move so it's beatable
-    if difficulty == "easy" and random.random() < 0.40:
-        valid = ai_valid_moves(board)
-        return random.choice(valid) if valid else 0
-    col, _ = ai_minimax(
-        board,
-        depth=depth,
-        alpha=-10**12,
-        beta=10**12,
-        maximizing=True,
-        ai_piece=ai_piece,
-        human_piece=human_piece,
-    )
-    return col
-
-def _refund_all_bets(group_id):
-    """
-    Refund all PvP player bets and spectator bets back to their owners.
-    Returns a list of human-readable lines describing what was refunded.
-    """
-    lines = []
-    # Refund player PvP bets (only those who wagered, i.e. bet > 0)
-    for uid, amt in game_state["pvp_bets"].items():
-        if amt > 0:
-            pdata = game_state["players"].get(uid, {})
-            name = pdata.get("name") or uid
-            new_bal = _add_pts(group_id, uid, name, amt)
-            lines.append(f"  {name}: +{amt} pts refunded ({new_bal} pts)")
-    # Refund spectator bets
-    for uid, bdata in game_state["spectator_bets"].items():
-        amt = bdata["amount"]
-        name = bdata["bettor_name"]
-        new_bal = _add_pts(group_id, uid, name, amt)
-        lines.append(f"  {name}: +{amt} pts refunded ({new_bal} pts)")
-    return lines
-
-
-def _settle_spectator_bets(group_id, winner_id):
-    """
-    Pay out spectator bets using proportional pool betting (pari-mutuel style),
-    which matches how real-life betting pools work:
-      - All bets form a single pool.
-      - Those who bet on the winner share the ENTIRE pool proportionally to
-        their stake. (Bigger bet = bigger share of losers' money.)
-      - Those who bet on the loser forfeit their stake.
-      - If nobody bet on the loser, winners just get their stake refunded
-        (no profit to pay out — can't win if no one bet against you).
-    Returns a list of human-readable result lines.
-    """
-    lines = []
-    if not game_state["spectator_bets"]:
-        return lines
-
-    winning_bets = {}   # {uid: bdata}
-    losing_bets  = {}   # {uid: bdata}
-    for uid, bdata in game_state["spectator_bets"].items():
-        if str(bdata["on"]) == str(winner_id):
-            winning_bets[uid] = bdata
-        else:
-            losing_bets[uid] = bdata
-
-    if not winning_bets and not losing_bets:
-        return lines
-
-    lines.append("👥 Spectator Results:")
-
-    total_winning_stake = sum(b["amount"] for b in winning_bets.values())
-    total_losing_stake  = sum(b["amount"] for b in losing_bets.values())
-    total_pool = total_winning_stake + total_losing_stake
-
-    if not winning_bets:
-        # Nobody bet on the winner — refund all losers (no opposing pool)
-        for uid, bdata in losing_bets.items():
-            payout = bdata["amount"]
-            new_bal = _add_pts(group_id, uid, bdata["bettor_name"], payout)
-            lines.append(f"  🔄 {bdata['bettor_name']} bet on {bdata['on_name']} (lost), but no one bet on the winner — refunded {payout} pts. ({new_bal} pts)")
-        return lines
-
-    if not losing_bets:
-        # Nobody bet on the loser — winners just get their stake back, no profit
-        for uid, bdata in winning_bets.items():
-            payout = bdata["amount"]
-            new_bal = _add_pts(group_id, uid, bdata["bettor_name"], payout)
-            lines.append(f"  🔄 {bdata['bettor_name']} bet on the winner, but no one bet against them — refunded {payout} pts. ({new_bal} pts)")
-        return lines
-
-    # Both sides had bettors — distribute the full pool to winners proportionally
-    # Each winner gets: their_stake + (their_stake / total_winning_stake) * total_losing_stake
-    for uid, bdata in winning_bets.items():
-        stake = bdata["amount"]
-        # Proportional share of the loser pool
-        losers_share = round(stake / total_winning_stake * total_losing_stake)
-        payout = stake + losers_share
-        new_bal = _add_pts(group_id, uid, bdata["bettor_name"], payout)
-        profit = payout - stake
-        lines.append(
-            f"  🎉 {bdata['bettor_name']} bet {stake} pts on {bdata['on_name']} and wins {profit} pts profit! "
-            f"(Total payout: {payout} pts, balance: {new_bal} pts)"
-        )
-
-    for uid, bdata in losing_bets.items():
-        lines.append(f"  😔 {bdata['bettor_name']} bet {bdata['amount']} pts on {bdata['on_name']} and loses their bet.")
-
-    return lines
-
-
-def reset_game_state():
-    global game_state
-    game_state["active"] = False
-    game_state["board"] = None
-    game_state["players"] = {}
-    game_state["turn_order"] = []
-    game_state["current_turn"] = 0
-    game_state["last_move_time"] = None
-    game_state["timeout_seconds"] = GAME_TIMEOUT_SECONDS
-    game_state["ai_difficulty"] = "medium"
-    game_state["pvp_bets"] = {}
-    game_state["pvp_bet_locked"] = False
-    game_state["spectator_bets"] = {}
 
 # ---------------------------------------------------------
 # Scripture cache — loaded once, reused by AI tools and #commands
@@ -3643,17 +3286,7 @@ def is_group_admin(group_id, user_id):
 
 
 def ensure_timeout():
-    if not game_state["active"]:
-        return False
-
-    if game_state["last_move_time"] is None:
-        return False
-
-    elapsed = time.time() - game_state["last_move_time"]
-    if elapsed > game_state["timeout_seconds"]:
-        reset_game_state()
-        return True
-
+    """Legacy shim — timeout is now checked per-group in the poll loop."""
     return False
 
 def send_typing(group_id):
@@ -3742,9 +3375,9 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
     its per-group state visible through the module globals that
     handle_game_command() reads and writes.
     """
-    global GAME_GROUP_ID, game_state
+    global GAME_GROUP_ID, game_session
     global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED, SCRIPTURE_ENABLED
-    global CONNECT4_ENABLED, GAME_TIMEOUT_SECONDS
+    global CONNECT4_ENABLED, TICTACTOE_ENABLED, GAME_TIMEOUT_SECONDS
     global _ai_last_used, _aiset_last_used
     global _fih_last_used, _steal_last_used, _coin_last_used
     global _ai_memory
@@ -3752,12 +3385,13 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
     with _group_dispatch_lock:
         # ── 1. Save current globals ──────────────────────────────────────────
         old_gid        = GAME_GROUP_ID
-        old_gs         = game_state
+        old_gs         = game_session
         old_ge         = GAME_ENABLED
         old_ai         = AI_ENABLED
         old_8b         = EIGHTBALL_ENABLED
         old_sc         = SCRIPTURE_ENABLED
         old_c4         = CONNECT4_ENABLED
+        old_ttt        = TICTACTOE_ENABLED
         old_to         = GAME_TIMEOUT_SECONDS
         old_ai_lu      = _ai_last_used
         old_aiset_lu   = _aiset_last_used
@@ -3768,12 +3402,13 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
 
         # ── 2. Install per-group values ──────────────────────────────────────
         GAME_GROUP_ID        = group_id
-        game_state           = rec["game_state"]
+        game_session         = rec["game_session"]
         GAME_ENABLED         = rec["GAME_ENABLED"]
         AI_ENABLED           = rec["AI_ENABLED"]
         EIGHTBALL_ENABLED    = rec["EIGHTBALL_ENABLED"]
         SCRIPTURE_ENABLED    = rec["SCRIPTURE_ENABLED"]
         CONNECT4_ENABLED     = rec["CONNECT4_ENABLED"]
+        TICTACTOE_ENABLED    = rec["TICTACTOE_ENABLED"]
         GAME_TIMEOUT_SECONDS = rec["GAME_TIMEOUT_SECONDS"]
         _ai_last_used        = rec["_ai_last_used"]
         _aiset_last_used     = rec["_aiset_last_used"]
@@ -3787,12 +3422,13 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
             handle_game_command(message)
         finally:
             # ── 4. Write back any mutations ──────────────────────────────────
-            rec["game_state"]           = game_state
+            rec["game_session"]         = game_session
             rec["GAME_ENABLED"]         = GAME_ENABLED
             rec["AI_ENABLED"]           = AI_ENABLED
             rec["EIGHTBALL_ENABLED"]    = EIGHTBALL_ENABLED
             rec["SCRIPTURE_ENABLED"]    = SCRIPTURE_ENABLED
             rec["CONNECT4_ENABLED"]     = CONNECT4_ENABLED
+            rec["TICTACTOE_ENABLED"]    = TICTACTOE_ENABLED
             rec["GAME_TIMEOUT_SECONDS"] = GAME_TIMEOUT_SECONDS
             rec["_ai_last_used"]        = _ai_last_used
             rec["_aiset_last_used"]     = _aiset_last_used
@@ -3803,12 +3439,13 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
 
             # ── 5. Restore original globals ──────────────────────────────────
             GAME_GROUP_ID        = old_gid
-            game_state           = old_gs
+            game_session         = old_gs
             GAME_ENABLED         = old_ge
             AI_ENABLED           = old_ai
             EIGHTBALL_ENABLED    = old_8b
             SCRIPTURE_ENABLED    = old_sc
             CONNECT4_ENABLED     = old_c4
+            TICTACTOE_ENABLED    = old_ttt
             GAME_TIMEOUT_SECONDS = old_to
             _ai_last_used        = old_ai_lu
             _aiset_last_used     = old_aiset_lu
@@ -3819,7 +3456,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
 
 
 def handle_game_command(message):
-    global GAME_TIMEOUT_SECONDS, GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED
+    global GAME_TIMEOUT_SECONDS, GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED
 
     # Extract text early so we can use it safely
     text = (message.get("text") or "").strip()
@@ -4000,6 +3637,7 @@ def handle_game_command(message):
     if cmd == "!disabled":
         disabled = []
         if not CONNECT4_ENABLED:  disabled.append("🎮 Connect Four   (#state connect4 true)")
+        if not TICTACTOE_ENABLED: disabled.append("⭕ Tic-Tac-Toe   (#state tictactoe true)")
         if not EIGHTBALL_ENABLED: disabled.append("🎱 Magic 8-Ball   (#state 8ball true)")
         if not SCRIPTURE_ENABLED: disabled.append("📖 Scripture      (#state scripture true)")
         if not AI_ENABLED:        disabled.append("🤖 AI Chat        (#state ai true)")
@@ -4012,7 +3650,8 @@ def handle_game_command(message):
             lines.append("Admins can re-enable any feature using the command shown above.")
             send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
         return
-    # misspells/fun little things to find - DO NOT PUT THESE IN THE GAME GROUPS' HELP MENU AT ALL, ONLY the dev group.
+
+    # misspells/fun little things — NOT in the help menu (dev group only)
     if cmd == "!dih":
         send_message(GAME_GROUP_ID, "Freaky misspell 🙏", reply_to_id=msg_id)
         return
@@ -4028,13 +3667,13 @@ def handle_game_command(message):
     if cmd == "supercalifragilisticexpialidocious":
         send_message(GAME_GROUP_ID, "MARRY POPPINS!", reply_to_id=msg_id)
         return
-    if cmd == "yuh uh" or cmd == "yuh huh":
+    if cmd in ("yuh uh", "yuh huh"):
         send_message(GAME_GROUP_ID, "NUH UH", reply_to_id=msg_id)
         return
     if cmd == "clanker":
         send_message(GAME_GROUP_ID, "NUH UH", reply_to_id=msg_id)
         return
-    
+
     # !fih  — fish for points (win or lose!)
     if cmd == "!fih":
         allowed, remaining = check_ai_cooldown(sender_id, _fih_last_used, POINTS_FIH_CD)
@@ -4269,13 +3908,14 @@ def handle_game_command(message):
             reply_to_id=msg_id)
         return
 
-    # Catch common typo: player types =A through =G instead of #A through #G during a game
-    if game_state["active"] and len(game_state["players"]) >= 2 and len(text) >= 2 and text[0] == "=":
-        possible_col = text[1:].strip()
-        if column_letter_to_index(possible_col) is not None:
+    # Catch common typo: player types =A-G instead of #A-G (Connect Four)
+    if (game_session.get("active_game") == "connect4"
+            and len(text) >= 2 and text[0] == "="):
+        possible_col = text[1:].strip().upper()
+        if possible_col in "ABCDEFG" and len(possible_col) == 1:
             send_message(
                 GAME_GROUP_ID,
-                f"\U0001f4a1 Tip: use #{possible_col.upper()} (with a #) to drop a piece in that column.",
+                f"\U0001f4a1 Tip: use #{possible_col} (with a #) to drop a piece in that column.",
                 reply_to_id=msg_id,
             )
             return
@@ -4658,26 +4298,84 @@ def handle_game_command(message):
         if len(parts) >= 2:
             topic = parts[1].lower()
 
-            # GAME HELP
+            # GAME HELP — shows list of games, or help for a specific game
             if topic == "game":
-                if not CONNECT4_ENABLED:
-                    send_message(GAME_GROUP_ID, "🎮 Connect Four is currently disabled.\n\nRun !disabled to see all disabled features, or use #state connect4 true as an admin to enable it.", reply_to_id=msg_id)
+                # #help game <gamename>
+                if len(parts) >= 3:
+                    subgame = parts[2].lower()
+
+                    if subgame in ("connect4", "c4", "connectfour"):
+                        if not CONNECT4_ENABLED:
+                            send_message(GAME_GROUP_ID, "🎮 Connect Four is currently disabled.\nUse #state connect4 true as an admin to enable it.", reply_to_id=msg_id)
+                            return
+                        help_text = (
+                            "🎮 *Connect Four Commands:*\n"
+                            "• #start c4 [easy|medium|hard] — Begin a Connect Four game\n"
+                            "  Default difficulty is medium.\n"
+                            "• #join — Join as Player 2 (triggers PvP betting phase)\n"
+                            "• #addai [easy|medium|hard] — Add the AI engine as Player 2\n"
+                            "• #quit — End the current game (bets refunded)\n"
+                            "• #timeout <seconds> — Set inactivity timeout\n"
+                            "• #A through #G — Drop your piece in that column\n"
+                            "\n"
+                            "Player 1 = 🔴   Player 2 = 🟡 or 🟢 (AI engine)\n"
+                            "\n"
+                            "Enable/disable with: #state connect4 true/false"
+                        )
+                        send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
+                        return
+
+                    if subgame in ("tictactoe", "ttt"):
+                        if not TICTACTOE_ENABLED:
+                            send_message(GAME_GROUP_ID, "⭕ Tic-Tac-Toe is currently disabled.\nUse #state tictactoe true as an admin to enable it.", reply_to_id=msg_id)
+                            return
+                        help_text = (
+                            "⭕ *Tic-Tac-Toe Commands:*\n"
+                            "• #start ttt — Start a Tic-Tac-Toe game (you are ❌)\n"
+                            "• #join — Join as Player 2 (you are ⭕)\n"
+                            "• #addai — Play vs the perfect AI (impossible to beat)\n"
+                            "• #quit — Forfeit the current game\n"
+                            "\n"
+                            "To make a move, use a coordinate: column letter + row number\n"
+                            "     A   B   C\n"
+                            "  1  .   .   .\n"
+                            "  2  .   .   .\n"
+                            "  3  .   .   .\n"
+                            "Example: #B2 = center cell\n"
+                            "\n"
+                            "Player 1 = ❌   Player 2 = ⭕\n"
+                            "\n"
+                            "Enable/disable with: #state tictactoe true/false"
+                        )
+                        send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
+                        return
+
+                    # Unknown subgame
+                    known_games = []
+                    if CONNECT4_ENABLED:  known_games.append("connect4")
+                    if TICTACTOE_ENABLED: known_games.append("tictactoe")
+                    all_games = ["connect4", "tictactoe"]
+                    send_message(
+                        GAME_GROUP_ID,
+                        f"Unknown game '{subgame}'.\n"
+                        f"Available games: {', '.join(f'#help game {g}' for g in all_games)}",
+                        reply_to_id=msg_id,
+                    )
                     return
-                help_text = (
-                    "🎮 *Connect Four Commands:*\n"
-                    "• #start [easy|medium|hard] — Begin a new game\n"
-                    "  Default difficulty is medium.\n"
-                    "• #join — Join as Player 2 (triggers PvP betting phase)\n"
-                    "• #addai — Add the AI engine as Player 2\n"
-                    "• #quit — End the current game (bets refunded)\n"
-                    "• #timeout <seconds> — Set inactivity timeout\n"
-                    "• #A through #G — Drop your piece in that column\n"
-                    "\n"
-                    "Player 1 = 🔴   Player 2 = 🟡 or 🟢 (AI engine)\n"
-                    "\n"
-                    "Enable/disable with: #state connect4 true/false"
-                )
-                send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
+
+                # #help game — show list of available games
+                lines = ["🎮 *Games:*\n"
+                         "Use #help game <name> for commands.\n"]
+                if CONNECT4_ENABLED:
+                    lines.append("• connect4     — Connect Four (drop pieces to get 4 in a row)")
+                else:
+                    lines.append("• connect4     — Connect Four [disabled]")
+                if TICTACTOE_ENABLED:
+                    lines.append("• tictactoe    — Tic-Tac-Toe (classic 3×3 grid)")
+                else:
+                    lines.append("• tictactoe    — Tic-Tac-Toe [disabled]")
+                lines.append("\nExample: #help game connect4")
+                send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
                 return
 
             # 8-BALL HELP
@@ -4759,12 +4457,13 @@ def handle_game_command(message):
                     "🛠️ *Admin Commands:*\n"
                     "All require group admin privileges.\n"
                     "\n"
-                    "#state                      — show all feature states\n"
-                    "#state all true/false       — master on/off switch\n"
-                    "#state ai true/false        — AI chat on/off\n"
-                    "#state 8ball true/false     — Magic 8-Ball on/off\n"
-                    "#state scripture true/false — Scripture on/off\n"
-                    "#state connect4 true/false  — Connect Four on/off\n"
+                    "#state                         — show all feature states\n"
+                    "#state all true/false          — master on/off switch\n"
+                    "#state ai true/false           — AI chat on/off\n"
+                    "#state 8ball true/false        — Magic 8-Ball on/off\n"
+                    "#state scripture true/false    — Scripture on/off\n"
+                    "#state connect4 true/false     — Connect Four on/off\n"
+                    "#state tictactoe true/false    — Tic-Tac-Toe on/off\n"
                     "\n"
                     "!aiforget — Clear the shared AI conversation history\n"
                     "\n"
@@ -4889,8 +4588,7 @@ def handle_game_command(message):
                 return
 
             # Unknown topic
-            known = ["points", "points 1", "points 2", "points 3", "gamepoints", "admin"]
-            if CONNECT4_ENABLED:  known.append("game")
+            known = ["points", "points 1", "points 2", "points 3", "gamepoints", "admin", "game"]
             if EIGHTBALL_ENABLED: known.append("8ball")
             if SCRIPTURE_ENABLED: known.append("scripture")
             if AI_ENABLED:        known.append("ai")
@@ -4910,9 +4608,10 @@ def handle_game_command(message):
         lines.append("\u2022 #help points      \u2014 Points sections index")
         lines.append("\u2022 #help gamepoints  \u2014 Game betting & AI rewards")
 
+        # Games (always show the games topic; sub-games listed inside)
+        lines.append("\u2022 #help game        \u2014 List of available games")
+
         # Feature-gated topics
-        if CONNECT4_ENABLED:
-            lines.append("\u2022 #help game        \u2014 Connect Four")
         if EIGHTBALL_ENABLED:
             lines.append("\u2022 #help 8ball       \u2014 Magic 8-Ball")
         if SCRIPTURE_ENABLED:
@@ -4923,7 +4622,7 @@ def handle_game_command(message):
         lines.append("\u2022 #help admin       \u2014 Admin feature controls")
 
         # Tip about hidden features (only show if something is actually disabled)
-        any_disabled = not CONNECT4_ENABLED or not EIGHTBALL_ENABLED or not SCRIPTURE_ENABLED or not AI_ENABLED
+        any_disabled = not CONNECT4_ENABLED or not TICTACTOE_ENABLED or not EIGHTBALL_ENABLED or not SCRIPTURE_ENABLED or not AI_ENABLED
         if any_disabled:
             lines.append("")
             lines.append("\U0001f4a4 Some features are hidden. Run !disabled to see them,")
@@ -5274,6 +4973,7 @@ def handle_game_command(message):
             lines = [
                 f"{'Bot (master)':<16} {on if GAME_ENABLED else off}",
                 f"{'Connect Four':<16} {on if CONNECT4_ENABLED else off}",
+                f"{'Tic-Tac-Toe':<16} {on if TICTACTOE_ENABLED else off}",
                 f"{'Magic 8-Ball':<16} {on if EIGHTBALL_ENABLED else off}",
                 f"{'Scripture':<16} {on if SCRIPTURE_ENABLED else off}",
                 f"{'AI Chat':<16} {on if AI_ENABLED else off}",
@@ -5307,7 +5007,7 @@ def handle_game_command(message):
                 "  #state                     — show all states\n"
                 "  #state all true/false       — master switch\n"
                 "  #state <feature> true/false — toggle feature\n"
-                "Features: ai, 8ball, scripture, connect4",
+                "Features: ai, 8ball, scripture, connect4, tictactoe",
                 reply_to_id=msg_id,
             )
             return
@@ -5323,6 +5023,7 @@ def handle_game_command(message):
             EIGHTBALL_ENABLED = val
             SCRIPTURE_ENABLED = val
             CONNECT4_ENABLED  = val
+            TICTACTOE_ENABLED = val
             snapshot_group_config(GAME_GROUP_ID)
             if not val:
                 send_message(GAME_GROUP_ID, "🔴 All features disabled. Only #state commands will work.", reply_to_id=msg_id)
@@ -5349,558 +5050,30 @@ def handle_game_command(message):
             snapshot_group_config(GAME_GROUP_ID)
             send_message(GAME_GROUP_ID, f"Connect Four {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
 
+        elif feature == "tictactoe":
+            TICTACTOE_ENABLED = val
+            snapshot_group_config(GAME_GROUP_ID)
+            send_message(GAME_GROUP_ID, f"Tic-Tac-Toe {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
+
         else:
             send_message(
                 GAME_GROUP_ID,
-                f"Unknown feature '{feature}'.\nKnown features: all, ai, 8ball, scripture, connect4",
+                f"Unknown feature '{feature}'.\nKnown features: all, ai, 8ball, scripture, connect4, tictactoe",
                 reply_to_id=msg_id,
             )
         return
 
-    # #start  [easy|medium|hard]   (AI difficulty only matters when #addai is used)
-    if cmd == "#start":
-        if not CONNECT4_ENABLED:
-            send_message(GAME_GROUP_ID, "🎮 Connect Four is currently disabled.", reply_to_id=msg_id)
-            return
-        if game_state["active"]:
-            send_message(GAME_GROUP_ID, "A game is already in progress.", reply_to_id=msg_id)
-            return
-
-        # Parse optional difficulty argument
-        difficulty = "medium"
-        if len(parts) >= 2:
-            d = parts[1].lower()
-            if d in ("easy", "medium", "hard"):
-                difficulty = d
-
-        reset_game_state()
-        game_state["active"] = True
-        game_state["board"] = init_board()
-        game_state["players"][sender_id] = {"name": sender_name, "symbol": P1}
-        game_state["turn_order"] = [sender_id]
-        game_state["current_turn"] = 0
-        game_state["last_move_time"] = time.time()
-        game_state["ai_difficulty"] = difficulty
-
-        send_message(
-            GAME_GROUP_ID,
-            f"🎮 {sender_name} started a new Connect Four game! (AI difficulty: {difficulty})\n"
-            f"Waiting for a second player to #join, or use #addai to play against the AI.\n\n" +
-            cf_board_to_text(game_state["board"]),
-            reply_to_id=msg_id,
-        )
+    # ── GAME COMMANDS — delegated to Porta-Games ────────────────────────────
+    # All #start, #join, #addai, #quit, #timeout, #pvpbet, #bet, #stats,
+    # column moves (C4) and coordinate moves (TTT) are handled here.
+    if games.handle_game_command(
+        message, GAME_GROUP_ID, game_session,
+        CONNECT4_ENABLED, TICTACTOE_ENABLED,
+        GAME_TIMEOUT_SECONDS,
+    ):
         return
 
-    # #join
-    if cmd == "#join":
-        if not CONNECT4_ENABLED:
-            send_message(GAME_GROUP_ID, "🎮 Connect Four is currently disabled.", reply_to_id=msg_id)
-            return
-        if not game_state["active"]:
-            send_message(GAME_GROUP_ID, "No active game. Use #start to begin.", reply_to_id=msg_id)
-            return
-
-        if sender_id in game_state["players"]:
-            send_message(GAME_GROUP_ID, "You are already in this game.", reply_to_id=msg_id)
-            return
-
-        if len(game_state["players"]) >= 2:
-            send_message(GAME_GROUP_ID, "Game already has two players.", reply_to_id=msg_id)
-            return
-
-        game_state["players"][sender_id] = {"name": sender_name, "symbol": P2}
-        game_state["turn_order"].append(sender_id)
-        game_state["last_move_time"] = time.time()
-
-        p1_id = game_state["turn_order"][0]
-        p1_name = game_state["players"][p1_id]["name"]
-
-        send_message(
-            GAME_GROUP_ID,
-            f"⚔️ {sender_name} joined as Player 2!\n"
-            f"{p1_name} 🔴 vs {sender_name} 🟡\n\n"
-            f"💰 *PvP Betting:* Both players can bet points on themselves before play begins.\n"
-            f"Use #pvpbet <amount> to wager (e.g. #pvpbet 50).\n"
-            f"If you don't want to bet, use #pvpbet 0 to skip.\n"
-            f"Both players must bet (or skip) before the game starts.\n\n"
-            f"Spectators: use #bet <amount> @player to wager on a player!\n\n" +
-            cf_board_to_text(game_state["board"]),
-            reply_to_id=msg_id,
-        )
-        return
-
-    # #addai  [easy|medium|hard]
-    if cmd == "#addai":
-        if not CONNECT4_ENABLED:
-            send_message(GAME_GROUP_ID, "🎮 Connect Four is currently disabled.", reply_to_id=msg_id)
-            return
-        if not game_state["active"]:
-            send_message(GAME_GROUP_ID, "No active game. Use #start first.", reply_to_id=msg_id)
-            return
-
-        if len(game_state["players"]) >= 2:
-            send_message(GAME_GROUP_ID, "A second player already joined.", reply_to_id=msg_id)
-            return
-
-        # Optional difficulty argument on #addai overrides what was set at #start
-        if len(parts) >= 2:
-            d = parts[1].lower()
-            if d in ("easy", "medium", "hard"):
-                game_state["ai_difficulty"] = d
-
-        # Add AI as Player 2 — no points counter, no bets
-        game_state["players"]["AI"] = {"name": "AI", "symbol": AI_PIECE}
-        game_state["turn_order"].append("AI")
-        game_state["last_move_time"] = time.time()
-        game_state["pvp_bet_locked"] = True  # no betting needed vs AI
-
-        p1_id = game_state["turn_order"][0]
-        p1_name = game_state["players"][p1_id]["name"]
-        diff = game_state["ai_difficulty"]
-        reward_map = {"easy": POINTS_C4_WIN_AI_EASY, "medium": POINTS_C4_WIN_AI_MED, "hard": POINTS_C4_WIN_AI_HARD}
-        reward = reward_map.get(diff, POINTS_C4_WIN_AI_MED)
-
-        send_message(
-            GAME_GROUP_ID,
-            f"🟢 AI joined as Player 2 ({diff.capitalize()} difficulty).\n"
-            f"{p1_name} 🔴 vs AI 🟢\n"
-            f"Beat the AI to earn {reward} points! Lose and no points are lost.\n\n" +
-            cf_board_to_text(game_state["board"]),
-            reply_to_id=msg_id,
-        )
-        return
-
-    # #quit
-    if cmd == "#quit":
-        if not game_state["active"]:
-            send_message(GAME_GROUP_ID, "No active game to quit.", reply_to_id=msg_id)
-            return
-
-        refund_lines = _refund_all_bets(GAME_GROUP_ID)
-        reset_game_state()
-        msg_parts = [f"🚫 Game ended by {sender_name}."]
-        if refund_lines:
-            msg_parts.append("💰 Bets refunded:\n" + "\n".join(refund_lines))
-        send_message(GAME_GROUP_ID, "\n".join(msg_parts), reply_to_id=msg_id)
-        return
-
-    # #timeout
-    if cmd == "#timeout":
-        if len(parts) < 2:
-            send_message(
-                GAME_GROUP_ID,
-                f"Current timeout: {game_state['timeout_seconds']} seconds.",
-                reply_to_id=msg_id,
-            )
-            return
-
-        try:
-            val = int(parts[1])
-            if val <= 0:
-                raise ValueError()
-        except ValueError:
-            send_message(GAME_GROUP_ID, "Usage: #timeout N (N must be a positive integer)", reply_to_id=msg_id)
-            return
-
-        game_state["timeout_seconds"] = val
-        GAME_TIMEOUT_SECONDS = val
-        send_message(GAME_GROUP_ID, f"Game timeout set to {val} seconds.", reply_to_id=msg_id)
-        return
-
-    # Column moves — #A through #G  OR  #🔵 #🟠 #🟤 #🟣 #🔶 #🔷 #🟥
-    raw_col = cmd[1:] if cmd.startswith("#") else ""
-    col_idx  = column_letter_to_index(raw_col) if raw_col else None
-    if col_idx is not None:
-        col_letter = raw_col  # keep for display; could be letter or emoji
-
-        if not CONNECT4_ENABLED:
-            send_message(GAME_GROUP_ID, "🎮 Connect Four is currently disabled.", reply_to_id=msg_id)
-            return
-
-        if not game_state["active"]:
-            send_message(GAME_GROUP_ID, "No active game. Use #start to begin.", reply_to_id=msg_id)
-            return
-
-        if len(game_state["players"]) < 2:
-            send_message(GAME_GROUP_ID, "Waiting for a second player to #join.", reply_to_id=msg_id)
-            return
-
-        # PvP bet phase: both players must confirm before moves are accepted
-        is_pvp = "AI" not in game_state["players"]
-        if is_pvp and not game_state["pvp_bet_locked"]:
-            send_message(
-                GAME_GROUP_ID,
-                "⏳ Waiting for both players to set their bet.\n"
-                "Use #pvpbet <amount> to bet, or #pvpbet 0 to skip.",
-                reply_to_id=msg_id,
-            )
-            return
-
-        current_player_id = game_state["turn_order"][game_state["current_turn"]]
-        if sender_id != current_player_id:
-            current_player_name = game_state["players"][current_player_id]["name"]
-            send_message(GAME_GROUP_ID, f"It is {current_player_name}'s turn.", reply_to_id=msg_id)
-            return
-
-        symbol = game_state["players"][sender_id]["symbol"]
-        row, col = drop_piece(game_state["board"], col_idx, symbol)
-        if row is None:
-            send_message(GAME_GROUP_ID, "That column is full. Choose another.", reply_to_id=msg_id)
-            return
-
-        game_state["last_move_time"] = time.time()
-
-        if check_winner(game_state["board"], symbol):
-            board_text = cf_board_to_text(game_state["board"])
-
-            # ── PvP win ──────────────────────────────────────────────────────
-            opponent_id = None
-            for pid in game_state["turn_order"]:
-                if pid != sender_id and pid != "AI":
-                    opponent_id = pid
-
-            if opponent_id:
-                opp_name = game_state["players"][opponent_id]["name"]
-                points_lines = [f"🏆 {sender_name} wins!"]
-
-                # Settle PvP bets between the two players.
-                # Both bets were deducted upfront when each player wagered.
-                # Winner gets back their own bet + the loser's bet (the full pot).
-                w_bet = game_state["pvp_bets"].get(str(sender_id), 0)
-                l_bet = game_state["pvp_bets"].get(str(opponent_id), 0)
-                pot = w_bet + l_bet
-                if pot > 0:
-                    # Return winner's own stake + take loser's stake
-                    win_new = _add_pts(GAME_GROUP_ID, sender_id, sender_name, pot)
-                    if w_bet > 0 and l_bet > 0:
-                        points_lines.append(f"💰 Pot: {pot} pts → {sender_name} wins {l_bet} pts from {opp_name} and gets their {w_bet} pts back! ({win_new} pts)")
-                    elif w_bet > 0:
-                        # Only winner had a bet (loser skipped) — winner just gets their stake back
-                        points_lines.append(f"💰 {sender_name} gets their {w_bet} pts back (opponent didn't bet). ({win_new} pts)")
-                    else:
-                        # Only loser had a bet — winner takes it
-                        points_lines.append(f"💰 {sender_name} wins {l_bet} pts from {opp_name}! ({win_new} pts)")
-
-                # Settle spectator bets
-                spec_lines = _settle_spectator_bets(GAME_GROUP_ID, str(sender_id))
-                points_lines.extend(spec_lines)
-
-                send_message(
-                    GAME_GROUP_ID,
-                    "\n".join(points_lines) + f"\n\n{board_text}",
-                    reply_to_id=msg_id,
-                )
-
-            else:
-                # ── vs AI win ────────────────────────────────────────────────
-                diff = game_state["ai_difficulty"]
-                reward_map = {"easy": POINTS_C4_WIN_AI_EASY, "medium": POINTS_C4_WIN_AI_MED, "hard": POINTS_C4_WIN_AI_HARD}
-                reward = reward_map.get(diff, POINTS_C4_WIN_AI_MED)
-                win_new = _add_pts(GAME_GROUP_ID, sender_id, sender_name, reward)
-                send_message(
-                    GAME_GROUP_ID,
-                    f"🏆 {sender_name} beats the AI ({diff.capitalize()})!\n"
-                    f"Earned {reward} pts! ({win_new} pts)\n\n{board_text}",
-                    reply_to_id=msg_id,
-                )
-
-            reset_game_state()
-            return
-
-        if board_full(game_state["board"]):
-            board_text = cf_board_to_text(game_state["board"])
-            refund_lines = _refund_all_bets(GAME_GROUP_ID)
-            draw_msg = f"🤝 Game is a draw.\n\n{board_text}"
-            if refund_lines:
-                draw_msg += "\n💰 Bets refunded:\n" + "\n".join(refund_lines)
-            send_message(GAME_GROUP_ID, draw_msg, reply_to_id=msg_id)
-            reset_game_state()
-            return
-
-        # Switch turn
-        game_state["current_turn"] = (game_state["current_turn"] + 1) % len(game_state["turn_order"])
-        next_player_id = game_state["turn_order"][game_state["current_turn"]]
-
-        # If next player is AI, let it move
-        if next_player_id == "AI":
-
-            send_message(GAME_GROUP_ID, "🤖 AI is thinking...")
-
-            typing_stop = threading.Event()
-
-            def typing_loop():
-                while not typing_stop.is_set():
-                    send_typing(GAME_GROUP_ID)
-                    time.sleep(2)
-
-            t = threading.Thread(target=typing_loop, daemon=True)
-            t.start()
-
-            diff = game_state["ai_difficulty"]
-            ai_col = ai_choose_move(game_state["board"], AI_PIECE, P1, difficulty=diff)
-
-            typing_stop.set()
-
-            row, col = drop_piece(game_state["board"], ai_col, AI_PIECE)
-            game_state["last_move_time"] = time.time()
-
-            # AI win — player loses NO points (AI games are just for fun/earning)
-            if check_winner(game_state["board"], AI_PIECE):
-                board_text = cf_board_to_text(game_state["board"])
-                send_message(
-                    GAME_GROUP_ID,
-                    f"🟢 AI plays column {chr(ai_col + 65)}. AI wins!\n"
-                    f"Better luck next time — no points lost.\n\n{board_text}",
-                    reply_to_id=msg_id,
-                )
-                reset_game_state()
-                return
-
-            # Draw?
-            if board_full(game_state["board"]):
-                board_text = cf_board_to_text(game_state["board"])
-                send_message(
-                    GAME_GROUP_ID,
-                    f"🟢 AI plays column {chr(ai_col + 65)}. Game is a draw.\n\n{board_text}",
-                    reply_to_id=msg_id,
-                )
-                reset_game_state()
-                return
-
-            game_state["current_turn"] = 0
-            board_text = cf_board_to_text(game_state["board"])
-            send_message(
-                GAME_GROUP_ID,
-                f"🟢 AI plays column {chr(ai_col + 65)}.\n"
-                f"Your turn, {sender_name}!\n\n{board_text}",
-                reply_to_id=msg_id,
-            )
-            return
-
-        # Otherwise normal human turn
-        next_player_name = game_state["players"][next_player_id]["name"]
-        board_text = cf_board_to_text(game_state["board"])
-        send_message(
-            GAME_GROUP_ID,
-            f"{sender_name} played column {col_letter.upper()}.\n"
-            f"It is now {next_player_name}'s turn.\n\n{board_text}",
-            reply_to_id=msg_id,
-        )
-        return
-
-    # ── #pvpbet <amount>  — players set their PvP wager ──────────────────────
-    if cmd == "#pvpbet":
-        if not game_state["active"]:
-            send_message(GAME_GROUP_ID, "No active game.", reply_to_id=msg_id)
-            return
-
-        # Must be a current player
-        if sender_id not in game_state["players"] or "AI" in game_state["players"]:
-            send_message(
-                GAME_GROUP_ID,
-                "💡 #pvpbet is for PvP players only. Spectators use #bet to wager on a player.",
-                reply_to_id=msg_id,
-            )
-            return
-
-        if game_state["pvp_bet_locked"]:
-            send_message(GAME_GROUP_ID, "Betting is already locked — the game has started!", reply_to_id=msg_id)
-            return
-
-        if len(game_state["players"]) < 2:
-            send_message(GAME_GROUP_ID, "Wait for a second player to #join before betting.", reply_to_id=msg_id)
-            return
-
-        if len(parts) < 2:
-            send_message(GAME_GROUP_ID, "Usage: #pvpbet <amount>  (use 0 to skip betting)", reply_to_id=msg_id)
-            return
-
-        # Already bet?
-        if str(sender_id) in game_state["pvp_bets"]:
-            send_message(GAME_GROUP_ID, "You already set your bet for this game.", reply_to_id=msg_id)
-            return
-
-        try:
-            bet_amt = int(parts[1])
-            if bet_amt < 0:
-                raise ValueError
-        except ValueError:
-            send_message(GAME_GROUP_ID, "Bet must be a whole number (0 or more).", reply_to_id=msg_id)
-            return
-
-        bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
-        allin = False
-        if bet_amt == 0:
-            game_state["pvp_bets"][str(sender_id)] = 0
-            conf_msg = f"✅ {sender_name} skipped betting."
-        else:
-            if bet_amt >= bal:
-                bet_amt = bal
-                allin = True
-            if bet_amt == 0:
-                send_message(GAME_GROUP_ID, f"💸 {sender_name}, you have 0 points — you can't bet anything.", reply_to_id=msg_id)
-                return
-            # Reserve points immediately (held until game ends)
-            _add_pts(GAME_GROUP_ID, sender_id, sender_name, -bet_amt)
-            game_state["pvp_bets"][str(sender_id)] = bet_amt
-            conf_msg = (
-                f"{'🎰 ALL IN! ' if allin else '✅ '}{sender_name} wagered {bet_amt} pts — winner takes all!"
-            )
-
-        send_message(GAME_GROUP_ID, conf_msg, reply_to_id=msg_id)
-
-        # Check if both players have now set their bet
-        player_ids = [pid for pid in game_state["turn_order"] if pid != "AI"]
-        if all(str(pid) in game_state["pvp_bets"] for pid in player_ids):
-            game_state["pvp_bet_locked"] = True
-            total_pot = sum(game_state["pvp_bets"].values())
-            pot_str = f"Total pot: {total_pot} pts. " if total_pot > 0 else ""
-            send_message(
-                GAME_GROUP_ID,
-                f"🔒 Both players have bet. {pot_str}Game begins! 🎮\n\n" +
-                cf_board_to_text(game_state["board"]),
-            )
-        else:
-            other_name = ""
-            for pid in player_ids:
-                if str(pid) not in game_state["pvp_bets"]:
-                    other_name = game_state["players"][pid]["name"]
-            send_message(GAME_GROUP_ID, f"⏳ Waiting for {other_name} to #pvpbet.")
-        return
-
-    # ── #bet <amount> @mention  — spectators bet on a player ─────────────────
-    if cmd == "#bet":
-        if not game_state["active"]:
-            send_message(GAME_GROUP_ID, "No active game to bet on.", reply_to_id=msg_id)
-            return
-
-        # If sender is a player, give them a helpful tip
-        if sender_id in game_state["players"]:
-            send_message(
-                GAME_GROUP_ID,
-                "💡 As a player, use #pvpbet <amount> to bet on yourself, not #bet.",
-                reply_to_id=msg_id,
-            )
-            return
-
-        if len(game_state["players"]) < 2:
-            send_message(GAME_GROUP_ID, "Wait for both players to join before betting.", reply_to_id=msg_id)
-            return
-
-        if str(sender_id) in game_state["spectator_bets"]:
-            send_message(GAME_GROUP_ID, "You already have an active bet. Use #quit to cancel it.", reply_to_id=msg_id)
-            return
-
-        if len(parts) < 3:
-            send_message(GAME_GROUP_ID, "Usage: #bet <amount> @player\nExample: #bet 50 @PlayerName", reply_to_id=msg_id)
-            return
-
-        try:
-            bet_amt = int(parts[1])
-            if bet_amt <= 0:
-                raise ValueError
-        except ValueError:
-            send_message(GAME_GROUP_ID, "Bet must be a positive whole number.", reply_to_id=msg_id)
-            return
-
-        # Parse the mention — GroupMe sends mentions as attachments with user_ids,
-        # but also embeds @Name in text. We'll match against known player names.
-        mention_text = " ".join(parts[2:]).lstrip("@").strip().lower()
-        target_id = None
-        target_name = None
-        for pid, pdata in game_state["players"].items():
-            if pid == "AI":
-                continue
-            if pdata["name"].lower() == mention_text or mention_text in pdata["name"].lower():
-                target_id = pid
-                target_name = pdata["name"]
-                break
-        # Also try matching by user_id mention from attachments
-        if target_id is None:
-            for att in message.get("attachments", []):
-                if att.get("type") == "mentions":
-                    for uid in att.get("user_ids", []):
-                        if uid in game_state["players"] and uid != "AI":
-                            target_id = uid
-                            target_name = game_state["players"][uid]["name"]
-                            break
-
-        if target_id is None:
-            player_names = ", ".join(p["name"] for pid, p in game_state["players"].items() if pid != "AI")
-            send_message(GAME_GROUP_ID, f"Couldn't find that player. Current players: {player_names}", reply_to_id=msg_id)
-            return
-
-        bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
-        allin = False
-        if bet_amt >= bal:
-            bet_amt = bal
-            allin = True
-        if bet_amt == 0:
-            send_message(GAME_GROUP_ID, f"💸 {sender_name}, you have 0 points — you can't bet.", reply_to_id=msg_id)
-            return
-
-        _add_pts(GAME_GROUP_ID, sender_id, sender_name, -bet_amt)
-        game_state["spectator_bets"][str(sender_id)] = {
-            "amount": bet_amt,
-            "on": target_id,
-            "on_name": target_name,
-            "bettor_name": sender_name,
-        }
-        send_message(
-            GAME_GROUP_ID,
-            f"{'🎰 ALL IN! ' if allin else '🎲 '}{sender_name} bet {bet_amt} pts on {target_name}! Good luck!",
-            reply_to_id=msg_id,
-        )
-        return
-
-    # ── #stats  — show current game bets and status ───────────────────────────
-    if cmd == "#stats":
-        if not game_state["active"]:
-            send_message(GAME_GROUP_ID, "No active game.", reply_to_id=msg_id)
-            return
-
-        lines = ["📊 *Game Stats*"]
-
-        # Players and PvP bets
-        is_vs_ai = "AI" in game_state["players"]
-        if is_vs_ai:
-            diff = game_state["ai_difficulty"]
-            reward_map = {"easy": POINTS_C4_WIN_AI_EASY, "medium": POINTS_C4_WIN_AI_MED, "hard": POINTS_C4_WIN_AI_HARD}
-            reward = reward_map.get(diff, POINTS_C4_WIN_AI_MED)
-            p1_id = game_state["turn_order"][0]
-            p1_name = game_state["players"][p1_id]["name"]
-            lines.append(f"🔴 {p1_name} vs 🟢 AI ({diff.capitalize()})")
-            lines.append(f"Win reward: {reward} pts")
-        else:
-            for pid in game_state["turn_order"]:
-                pdata = game_state["players"][pid]
-                bet = game_state["pvp_bets"].get(str(pid))
-                sym = pdata["symbol"]
-                if bet is None:
-                    bet_str = "⏳ betting..."
-                elif bet == 0:
-                    bet_str = "no bet"
-                else:
-                    bet_str = f"{bet} pts wagered"
-                lines.append(f"{sym} {pdata['name']}: {bet_str}")
-
-        # Spectator bets
-        if game_state["spectator_bets"]:
-            lines.append("")
-            lines.append("👥 Spectator Bets:")
-            # Tally per player
-            tally = {}
-            for bdata in game_state["spectator_bets"].values():
-                on = bdata["on_name"]
-                tally[on] = tally.get(on, 0) + bdata["amount"]
-            for pname, total in tally.items():
-                lines.append(f"  {pname}: {total} pts wagered by spectators")
-        else:
-            lines.append("No spectator bets yet.")
-
-        send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
-        return
-
+    
     # ── POINTS LEADERBOARD (#leaderboard) ────────────────────────────────────
 
     # #leaderboard
@@ -5966,20 +5139,10 @@ def _group_poll_loop(group_id: str):
         rec = get_or_create_group_record(gid)
 
         try:
-            # ── Timeout check ────────────────────────────────────────────────
-            gs = rec["game_state"]
-            if gs["active"] and gs["last_move_time"] is not None:
-                elapsed = time.time() - gs["last_move_time"]
-                if elapsed > gs["timeout_seconds"]:
-                    # Reset game state
-                    rec["game_state"] = _fresh_group_state()
-                    refund_lines = _refund_all_bets_for(gid, gs)
-                    timeout_msg = "⏰ Game timed out due to inactivity."
-                    if refund_lines:
-                        timeout_msg += "\n💰 Bets refunded:\n" + "\n".join(refund_lines)
-                    send_message(gid, timeout_msg)
-                    time.sleep(GAME_POLL_INTERVAL)
-                    continue
+            # ── Timeout check (via Porta-Games) ─────────────────────────────
+            if games.check_timeout(gid, rec["game_session"]):
+                time.sleep(GAME_POLL_INTERVAL)
+                continue
 
             # ── Fetch new messages ───────────────────────────────────────────
             msgs, new_since_id = fetch_new_messages(gid, since_id=rec["since_id"])
@@ -5996,29 +5159,6 @@ def _group_poll_loop(group_id: str):
 
         time.sleep(GAME_POLL_INTERVAL)
 
-
-def _refund_all_bets_for(group_id: str, gs: dict) -> list:
-    """
-    Refund all outstanding PvP and spectator bets for a given game state dict.
-    Returns list of refund description lines.
-    Mirrors the logic of _refund_all_bets() but takes explicit group_id and gs.
-    """
-    lines = []
-    # PvP bets
-    for uid, amount in list(gs.get("pvp_bets", {}).items()):
-        if amount and amount > 0:
-            pdata = gs.get("players", {}).get(uid, {})
-            name = pdata.get("name", uid)
-            new_bal = _add_pts(group_id, uid, name, amount)
-            lines.append(f"  {name} +{amount} pts (now {new_bal})")
-    # Spectator bets
-    for uid, bdata in list(gs.get("spectator_bets", {}).items()):
-        amount = bdata.get("amount", 0)
-        bettor_name = bdata.get("bettor_name", uid)
-        if amount > 0:
-            new_bal = _add_pts(group_id, uid, bettor_name, amount)
-            lines.append(f"  {bettor_name} +{amount} pts (spectator, now {new_bal})")
-    return lines
 
 
 def dev_poll_loop():
@@ -8112,6 +7252,22 @@ def main():
 
     # Apply all saved settings (points, messages, extra group IDs, etc.) from config.json.
     apply_settings_from_config()
+
+    # Wire up Porta-Games helpers so the game engine can call back into the main module.
+    games.register_helpers(
+        send_fn         = send_message,
+        send_typing_fn  = send_typing,
+        add_pts_fn      = _add_pts,
+        get_pts_fn      = get_points,
+        transfer_pts_fn = transfer_points,
+        known_names_fn  = lambda: _known_names,
+    )
+    # Sync point reward constants from the main config into the game engine.
+    games.set_c4_rewards(
+        easy   = POINTS_C4_WIN_AI_EASY,
+        medium = POINTS_C4_WIN_AI_MED,
+        hard   = POINTS_C4_WIN_AI_HARD,
+    )
 
     ensure_ai_directories()
     global GAME_GROUP_ID, ADMIN_GROUP_ID, USE_SUBGROUP, last_dev_since_id, last_game_since_id

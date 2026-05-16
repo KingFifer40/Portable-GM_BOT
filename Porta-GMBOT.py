@@ -4012,9 +4012,27 @@ def handle_game_command(message):
             lines.append("Admins can re-enable any feature using the command shown above.")
             send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
         return
-    # mispells
+    # misspells/fun little things to find - DO NOT PUT THESE IN THE GAME GROUPS' HELP MENU AT ALL, ONLY the dev group.
     if cmd == "!dih":
         send_message(GAME_GROUP_ID, "Freaky misspell 🙏", reply_to_id=msg_id)
+        return
+    if cmd == "!fig":
+        send_message(GAME_GROUP_ID, "I like figs, those taste good 🙂‍↕️", reply_to_id=msg_id)
+        return
+    if cmd == "!fuh":
+        send_message(GAME_GROUP_ID, "😞", reply_to_id=msg_id)
+        return
+    if cmd == "marco":
+        send_message(GAME_GROUP_ID, "Polo!", reply_to_id=msg_id)
+        return
+    if cmd == "supercalifragilisticexpialidocious":
+        send_message(GAME_GROUP_ID, "MARRY POPPINS!", reply_to_id=msg_id)
+        return
+    if cmd == "yuh uh" or cmd == "yuh huh":
+        send_message(GAME_GROUP_ID, "NUH UH", reply_to_id=msg_id)
+        return
+    if cmd == "clanker":
+        send_message(GAME_GROUP_ID, "NUH UH", reply_to_id=msg_id)
         return
     
     # !fih  — fish for points (win or lose!)

@@ -665,6 +665,14 @@ def _register_group_name(gid: str, label: str):
 DEV_POLL_INTERVAL = 10  # seconds
 GAME_POLL_INTERVAL = 3  # seconds
 
+# Global rate-limiter for GroupMe API calls.
+# With many groups each polling every 3s, concurrent requests exceed GroupMe's
+# rate limit.  This lock + minimum gap between any two API polls ensures we
+# never fire multiple requests simultaneously across threads.
+_api_rate_lock  = threading.Lock()
+_api_last_poll  = 0.0          # timestamp of the most recent API poll call
+API_MIN_GAP     = 1.0          # minimum seconds between any two poll calls
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Feature toggles — all controllable at runtime via #state <feature> true/false
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1171,7 +1179,24 @@ def ensure_ollama_running():
 # Game session state — managed by Porta-Games module
 # The per-group dispatch shim swaps game_session in/out for each group.
 # ---------------------------------------------------------
-import Porta_Games as games   # all game logic lives here
+try:
+    import Porta_Games as games   # works if file is named Porta_Games.py
+except ModuleNotFoundError:
+    # The file on disk is named Porta-Games.py (hyphen), which Python cannot
+    # import with a normal `import` statement.  Load it with importlib instead.
+    import importlib.util as _ilu, os as _os
+    _games_path = _os.path.join(
+        _os.path.dirname(_os.path.abspath(__file__)), "Porta-Games.py"
+    )
+    if not _os.path.exists(_games_path):
+        raise FileNotFoundError(
+            "Could not find Porta-Games.py (or Porta_Games.py) next to Porta-GMBOT.py.\n"
+            "Make sure both files are in the same folder."
+        )
+    _spec = _ilu.spec_from_file_location("Porta_Games", _games_path)
+    games = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(games)
+    del _ilu, _os, _games_path, _spec
 
 game_session = games.fresh_game_session()   # current-group slot
 
@@ -2850,8 +2875,10 @@ def handle_dev_command(message):
             SCRIPTURE_ENABLED = val
         elif feature == "connect4":
             CONNECT4_ENABLED = val
+        elif feature in ("tictactoe", "ttt"):
+            TICTACTOE_ENABLED = val
         else:
-            send_message(DEV_GROUP_ID, "Unknown feature. Use: ai, 8ball, scripture, connect4", reply_to_id=msg_id)
+            send_message(DEV_GROUP_ID, "Unknown feature. Use: ai, 8ball, scripture, connect4, tictactoe", reply_to_id=msg_id)
             return
         snapshot_group_config(GAME_GROUP_ID)
         send_message(DEV_GROUP_ID, f"{'✅' if val else '❌'} {feature} set to {val}", reply_to_id=msg_id)
@@ -3716,42 +3743,156 @@ def handle_game_command(message):
         send_message(GAME_GROUP_ID, prefix + text, reply_to_id=msg_id)
         return
 
-    # !steal  — steal points from a random active user
+    # !steal  — steal points from a random or targeted user
+    # • No target: random victim, 100% success, random amount.
+    # • @mention or reply: 25% steal, 25% caught (victim steals 50 pts back), 50% nothing.
+    #   If the target has no points / is yourself → no big cooldown, 5-second retry window.
     if cmd == "!steal":
-        allowed, remaining = check_ai_cooldown(sender_id, _steal_last_used, POINTS_STEAL_CD)
-        if not allowed:
-            m, s = divmod(remaining, 60)
-            msg = STEAL_COOLDOWN_MESSAGE.format(m=m, s=s)
-            send_message(GAME_GROUP_ID, f"🦀 {msg}", reply_to_id=msg_id)
+        # ── Resolve target from ping or reply attachment ─────────────────────
+        target_id   = None
+        target_name = None
+
+        # Check for @mention attachment
+        for att in message.get("attachments", []):
+            if att.get("type") == "mentions":
+                loci   = att.get("loci", [])
+                uids_a = att.get("user_ids", [])
+                if uids_a:
+                    tid = str(uids_a[0])
+                    if tid != str(sender_id):
+                        target_id   = tid
+                        target_name = _known_names.get(tid, tid)
+                        break
+
+        # Check for reply attachment (reply_id → user who sent that message)
+        if target_id is None:
+            for att in message.get("attachments", []):
+                if att.get("type") == "reply":
+                    # GroupMe reply attachments carry the sender of the replied-to msg
+                    # in a "user_id" field on the attachment (not always present).
+                    # We fall back to scanning known names for a best-effort match.
+                    reply_uid = str(att.get("user_id", ""))
+                    if reply_uid and reply_uid != str(sender_id):
+                        target_id   = reply_uid
+                        target_name = _known_names.get(reply_uid, reply_uid)
+                        break
+
+        targeted = target_id is not None
+
+        # ── Cooldown check ───────────────────────────────────────────────────
+        # _steal_last_used stores either a full-CD timestamp (normal)
+        # or a "retry" timestamp with a 5-second window.
+        now = time.time()
+        last_entry = _steal_last_used.get(str(sender_id))
+        if last_entry is not None:
+            ts, cd_type = last_entry if isinstance(last_entry, (list, tuple)) else (last_entry, "full")
+            actual_cd  = 5 if cd_type == "retry" else POINTS_STEAL_CD
+            remaining  = actual_cd - (now - ts)
+            if remaining > 0:
+                if cd_type == "retry":
+                    send_message(GAME_GROUP_ID,
+                        f"🦀 {sender_name}, wait just a moment before trying again! ({int(remaining)}s)",
+                        reply_to_id=msg_id)
+                else:
+                    m, s = divmod(int(remaining), 60)
+                    msg_cd = STEAL_COOLDOWN_MESSAGE.format(m=m, s=s)
+                    send_message(GAME_GROUP_ID, f"🦀 {msg_cd}", reply_to_id=msg_id)
+                return
+
+        # ── RANDOM steal (no target specified) ───────────────────────────────
+        if not targeted:
+            ledger  = load_points(GAME_GROUP_ID)
+            victims = [
+                (uid, data) for uid, data in ledger.items()
+                if uid != str(sender_id) and data.get("points", 0) > 0
+            ]
+            if not victims:
+                send_message(GAME_GROUP_ID, f"🦀 {STEAL_EMPTY_MESSAGE}", reply_to_id=msg_id)
+                return
+            _steal_last_used[str(sender_id)] = (now, "full")
+            victim_id, victim_data = random.choice(victims)
+            amt  = random.randint(POINTS_STEAL_MIN, POINTS_STEAL_MAX)
+            taken, v_new, s_new = transfer_points(
+                GAME_GROUP_ID, victim_id, victim_data["name"],
+                sender_id, sender_name, amt,
+            )
+            if taken == 0:
+                send_message(GAME_GROUP_ID, f"🦀 {STEAL_EMPTY_MESSAGE}", reply_to_id=msg_id)
+                return
+            tmpl = random.choice(STEAL_SUCCESS_MESSAGES)
+            text = tmpl.format(
+                thief=sender_name, victim=victim_data["name"],
+                pts=taken, thief_bal=s_new, victim_bal=v_new,
+            )
+            send_message(GAME_GROUP_ID, f"🦀 {text}", reply_to_id=msg_id)
             return
-        ledger = load_points(GAME_GROUP_ID)
-        victims = [
-            (uid, data) for uid, data in ledger.items()
-            if uid != str(sender_id) and data.get("points", 0) > 0
-        ]
-        if not victims:
-            send_message(GAME_GROUP_ID, f"🦀 {STEAL_EMPTY_MESSAGE}", reply_to_id=msg_id)
+
+        # ── TARGETED steal (user @mentioned or replied-to) ───────────────────
+        # Validate target first (can't steal from yourself, target must have pts)
+        if str(target_id) == str(sender_id):
+            send_message(GAME_GROUP_ID,
+                f"🦀 {sender_name}, you can't steal from yourself!",
+                reply_to_id=msg_id)
             return
-        set_ai_cooldown(sender_id, _steal_last_used)
-        victim_id, victim_data = random.choice(victims)
-        # The random steal amount may exceed what the victim actually has;
-        # transfer_points caps it automatically and returns the real amount taken.
-        amt = random.randint(POINTS_STEAL_MIN, POINTS_STEAL_MAX)
-        taken, v_new, s_new = transfer_points(
-            GAME_GROUP_ID, victim_id, victim_data["name"],
-            sender_id, sender_name, amt,
-        )
-        # Edge case: victim's balance hit 0 between the filter check and the
-        # transfer (e.g. another command ran concurrently).
-        if taken == 0:
-            send_message(GAME_GROUP_ID, f"🦀 {STEAL_EMPTY_MESSAGE}", reply_to_id=msg_id)
+
+        target_pts = get_points(GAME_GROUP_ID, target_id, target_name)
+        if target_pts <= 0:
+            # Invalid target — give short retry window instead of full cooldown
+            _steal_last_used[str(sender_id)] = (now, "retry")
+            send_message(GAME_GROUP_ID,
+                f"🦀 {target_name} has no points to steal! Pick someone else (5s to retry).",
+                reply_to_id=msg_id)
             return
-        tmpl = random.choice(STEAL_SUCCESS_MESSAGES)
-        text = tmpl.format(
-            thief=sender_name, victim=victim_data["name"],
-            pts=taken, thief_bal=s_new, victim_bal=v_new,
-        )
-        send_message(GAME_GROUP_ID, f"🦀 {text}", reply_to_id=msg_id)
+
+        # Apply full cooldown now that we're committing to the attempt
+        _steal_last_used[str(sender_id)] = (now, "full")
+
+        roll = random.random()   # 0.0 – 1.0
+
+        if roll < 0.25:
+            # ── Success: steal random amount ─────────────────────────────────
+            amt  = random.randint(POINTS_STEAL_MIN, POINTS_STEAL_MAX)
+            taken, v_new, s_new = transfer_points(
+                GAME_GROUP_ID, target_id, target_name,
+                sender_id, sender_name, amt,
+            )
+            if taken == 0:
+                send_message(GAME_GROUP_ID,
+                    f"🦀 {sender_name} tried to pinch {target_name} but somehow got nothing!",
+                    reply_to_id=msg_id)
+                return
+            tmpl = random.choice(STEAL_SUCCESS_MESSAGES)
+            text = tmpl.format(
+                thief=sender_name, victim=target_name,
+                pts=taken, thief_bal=s_new, victim_bal=v_new,
+            )
+            send_message(GAME_GROUP_ID, f"🦀 {text}", reply_to_id=msg_id)
+
+        elif roll < 0.50:
+            # ── Caught: victim steals 50 pts (or all if thief has fewer) ─────
+            thief_pts  = get_points(GAME_GROUP_ID, sender_id, sender_name)
+            penalty    = min(50, thief_pts)
+            if penalty > 0:
+                taken, t_new, v_new = transfer_points(
+                    GAME_GROUP_ID, sender_id, sender_name,
+                    target_id, target_name, penalty,
+                )
+                send_message(GAME_GROUP_ID,
+                    f"🦀 {target_name} caught {sender_name} red-handed! "
+                    f"{target_name} snatches {taken} pts as punishment. "
+                    f"({sender_name}: {t_new} pts, {target_name}: {v_new} pts)",
+                    reply_to_id=msg_id)
+            else:
+                send_message(GAME_GROUP_ID,
+                    f"🦀 {target_name} caught {sender_name} red-handed! "
+                    f"But {sender_name} is broke, so there's nothing to take.",
+                    reply_to_id=msg_id)
+
+        else:
+            # ── Missed (remaining 50%) ────────────────────────────────────────
+            send_message(GAME_GROUP_ID,
+                f"🦀 {sender_name}'s crab missed {target_name} completely. Better luck next time!",
+                reply_to_id=msg_id)
         return
 
     # !coin <h/t> <bet>  — coin flip gamble
@@ -5144,6 +5285,14 @@ def _group_poll_loop(group_id: str):
                 time.sleep(GAME_POLL_INTERVAL)
                 continue
 
+            # ── Rate-limit gate: stagger requests across all group threads ───
+            global _api_last_poll
+            with _api_rate_lock:
+                gap = time.time() - _api_last_poll
+                if gap < API_MIN_GAP:
+                    time.sleep(API_MIN_GAP - gap)
+                _api_last_poll = time.time()
+
             # ── Fetch new messages ───────────────────────────────────────────
             msgs, new_since_id = fetch_new_messages(gid, since_id=rec["since_id"])
             rec["since_id"] = new_since_id
@@ -5157,7 +5306,11 @@ def _group_poll_loop(group_id: str):
             print(f"[poll] Error in poll loop for group {gid}:")
             traceback.print_exc()
 
-        time.sleep(GAME_POLL_INTERVAL)
+        # Scale sleep with the number of active groups so aggregate request rate
+        # stays reasonable even when many groups are registered.
+        n_groups = max(1, len(_group_registry))
+        per_group_interval = max(GAME_POLL_INTERVAL, API_MIN_GAP * n_groups)
+        time.sleep(per_group_interval)
 
 
 
@@ -5432,6 +5585,7 @@ class ControlPanel:
         features = [
             ("Bot (master)",  "master"),
             ("Connect Four",  "connect4"),
+            ("Tic-Tac-Toe",   "tictactoe"),
             ("Magic 8-Ball",  "8ball"),
             ("Scripture",     "scripture"),
             ("AI Chat",       "ai"),
@@ -6885,6 +7039,7 @@ class ControlPanel:
             state_map = {
                 "master":    viewed_rec.get("GAME_ENABLED",      GAME_ENABLED),
                 "connect4":  viewed_rec.get("CONNECT4_ENABLED",  CONNECT4_ENABLED),
+                "tictactoe": viewed_rec.get("TICTACTOE_ENABLED", TICTACTOE_ENABLED),
                 "8ball":     viewed_rec.get("EIGHTBALL_ENABLED", EIGHTBALL_ENABLED),
                 "scripture": viewed_rec.get("SCRIPTURE_ENABLED", SCRIPTURE_ENABLED),
                 "ai":        viewed_rec.get("AI_ENABLED",        AI_ENABLED),
@@ -6893,6 +7048,7 @@ class ControlPanel:
             state_map = {
                 "master":    GAME_ENABLED,
                 "connect4":  CONNECT4_ENABLED,
+                "tictactoe": TICTACTOE_ENABLED,
                 "8ball":     EIGHTBALL_ENABLED,
                 "scripture": SCRIPTURE_ENABLED,
                 "ai":        AI_ENABLED,
@@ -6952,7 +7108,7 @@ class ControlPanel:
 
     def _toggle_feature(self, key, var):
         global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED
-        global SCRIPTURE_ENABLED, CONNECT4_ENABLED
+        global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED
 
         val = var.get()
 
@@ -6971,6 +7127,7 @@ class ControlPanel:
                 rec["EIGHTBALL_ENABLED"] = val
                 rec["SCRIPTURE_ENABLED"] = val
                 rec["CONNECT4_ENABLED"]  = val
+                rec["TICTACTOE_ENABLED"] = val
             elif key == "ai":
                 rec["AI_ENABLED"] = val
             elif key == "8ball":
@@ -6979,6 +7136,8 @@ class ControlPanel:
                 rec["SCRIPTURE_ENABLED"] = val
             elif key == "connect4":
                 rec["CONNECT4_ENABLED"] = val
+            elif key == "tictactoe":
+                rec["TICTACTOE_ENABLED"] = val
 
         # Update per-group records and persist each one
         for gid in target_gids:
@@ -6999,12 +7158,14 @@ class ControlPanel:
                 EIGHTBALL_ENABLED = val
                 SCRIPTURE_ENABLED = val
                 CONNECT4_ENABLED  = val
+                TICTACTOE_ENABLED = val
                 for k, v in self._feature_vars.items():
                     v.set(val)
-            elif key == "ai":        AI_ENABLED        = val
-            elif key == "8ball":     EIGHTBALL_ENABLED = val
-            elif key == "scripture": SCRIPTURE_ENABLED = val
-            elif key == "connect4":  CONNECT4_ENABLED  = val
+            elif key == "ai":         AI_ENABLED        = val
+            elif key == "8ball":      EIGHTBALL_ENABLED = val
+            elif key == "scripture":  SCRIPTURE_ENABLED = val
+            elif key == "connect4":   CONNECT4_ENABLED  = val
+            elif key == "tictactoe":  TICTACTOE_ENABLED = val
 
         label_map = {
             "master":    "All features",
@@ -7012,6 +7173,7 @@ class ControlPanel:
             "8ball":     "Magic 8-Ball",
             "scripture": "Scripture",
             "connect4":  "Connect Four",
+            "tictactoe": "Tic-Tac-Toe",
         }
         feature_label = label_map.get(key, key)
         state_word    = "enabled ✅" if val else "disabled ❌"

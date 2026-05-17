@@ -665,13 +665,13 @@ def _register_group_name(gid: str, label: str):
 DEV_POLL_INTERVAL = 10  # seconds
 GAME_POLL_INTERVAL = 3  # seconds
 
-# Global rate-limiter for GroupMe API calls.
-# With many groups each polling every 3s, concurrent requests exceed GroupMe's
-# rate limit.  This lock + minimum gap between any two API polls ensures we
-# never fire multiple requests simultaneously across threads.
-_api_rate_lock  = threading.Lock()
-_api_last_poll  = 0.0          # timestamp of the most recent API poll call
-API_MIN_GAP     = 1.0          # minimum seconds between any two poll calls
+# Global rate-limiter — prevents multiple group threads from hammering the
+# GroupMe API simultaneously.  Every poll acquires this lock and waits until
+# at least API_MIN_GAP seconds have passed since the last poll call.
+import threading as _threading_rl
+_api_rate_lock = _threading_rl.Lock()
+_api_last_poll = 0.0
+API_MIN_GAP    = 1.0   # minimum seconds between any two group poll calls
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Feature toggles — all controllable at runtime via #state <feature> true/false
@@ -682,6 +682,7 @@ EIGHTBALL_ENABLED  = False  # ? magic 8-ball
 SCRIPTURE_ENABLED  = False  # #randverse, #findverse
 CONNECT4_ENABLED   = False  # #start, #join, #addai, #quit, column moves
 TICTACTOE_ENABLED  = False  # #ttt, ttt moves
+UNO_ENABLED        = False  # DM-based UNO game
 
 # Human-readable names used in status messages
 FEATURE_NAMES = {
@@ -690,6 +691,7 @@ FEATURE_NAMES = {
     "scripture": ("Scripture",       lambda: SCRIPTURE_ENABLED),
     "connect4":  ("Connect Four",    lambda: CONNECT4_ENABLED),
     "tictactoe": ("Tic-Tac-Toe",    lambda: TICTACTOE_ENABLED),
+    "uno":       ("UNO",            lambda: UNO_ENABLED),
 }
 
 # Default game timeout in seconds (controlled by #timeout)
@@ -1182,8 +1184,6 @@ def ensure_ollama_running():
 try:
     import Porta_Games as games   # works if file is named Porta_Games.py
 except ModuleNotFoundError:
-    # The file on disk is named Porta-Games.py (hyphen), which Python cannot
-    # import with a normal `import` statement.  Load it with importlib instead.
     import importlib.util as _ilu, os as _os
     _games_path = _os.path.join(
         _os.path.dirname(_os.path.abspath(__file__)), "Porta-Games.py"
@@ -1556,7 +1556,7 @@ def apply_group_config(group_id):
     Called whenever the active group changes.
     """
     global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED
-    global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, GAME_TIMEOUT_SECONDS
+    global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, UNO_ENABLED, GAME_TIMEOUT_SECONDS
     cfg = load_group_config(group_id)
     GAME_ENABLED      = cfg.get("game_enabled",      False)
     AI_ENABLED        = cfg.get("ai_enabled",         False)
@@ -1564,6 +1564,7 @@ def apply_group_config(group_id):
     SCRIPTURE_ENABLED = cfg.get("scripture_enabled",  False)
     CONNECT4_ENABLED  = cfg.get("connect4_enabled",   False)
     TICTACTOE_ENABLED = cfg.get("tictactoe_enabled",  False)
+    UNO_ENABLED       = cfg.get("uno_enabled",         False)
     GAME_TIMEOUT_SECONDS = cfg.get("game_timeout",    300)
 
 
@@ -1582,6 +1583,7 @@ def snapshot_group_config(group_id):
         "scripture_enabled": SCRIPTURE_ENABLED,
         "connect4_enabled":  CONNECT4_ENABLED,
         "tictactoe_enabled": TICTACTOE_ENABLED,
+        "uno_enabled":       UNO_ENABLED,
         "game_timeout":      GAME_TIMEOUT_SECONDS,
     })
     save_group_config(group_id, existing)
@@ -1611,6 +1613,7 @@ def _fresh_group_record(group_id):
         "SCRIPTURE_ENABLED": cfg.get("scripture_enabled", False),
         "CONNECT4_ENABLED":  cfg.get("connect4_enabled",  False),
         "TICTACTOE_ENABLED": cfg.get("tictactoe_enabled", False),
+        "UNO_ENABLED":       cfg.get("uno_enabled",        False),
         "GAME_TIMEOUT_SECONDS": cfg.get("game_timeout",   300),
         # Polling cursor
         "since_id": None,
@@ -1654,6 +1657,7 @@ def snapshot_group_record(group_id: str):
         "scripture_enabled": rec["SCRIPTURE_ENABLED"],
         "connect4_enabled":  rec["CONNECT4_ENABLED"],
         "tictactoe_enabled": rec["TICTACTOE_ENABLED"],
+        "uno_enabled":       rec.get("UNO_ENABLED", False),
         "game_timeout":      rec["GAME_TIMEOUT_SECONDS"],
     })
     save_group_config(gid, existing)
@@ -1952,6 +1956,47 @@ def send_message(group_id, text, reply_to_id=None):
     except Exception:
         print("Error sending message:")
         traceback.print_exc()
+
+
+def send_dm(user_id, text):
+    """Send a direct message to a GroupMe user via the /direct_messages endpoint."""
+    # GroupMe DMs require the bot owner's user_id as the "source" of the conversation
+    # The correct endpoint is POST /direct_messages with the other_id field.
+    try:
+        import time as _t
+        data = {
+            "direct_message": {
+                "source_guid": f"uno-dm-{_t.time()}-{user_id}",
+                "recipient_id": str(user_id),
+                "text": text,
+            }
+        }
+        gm_post("/direct_messages", data)
+    except Exception:
+        print(f"[DM] Error sending DM to {user_id}:")
+        traceback.print_exc()
+
+
+def fetch_dm_messages(other_id, since_id=None):
+    """
+    Fetch recent DM messages between the bot owner and other_id.
+    Returns a list of message dicts (newest last), or [].
+    """
+    try:
+        params = {"other_id": str(other_id)}
+        if since_id:
+            params["since_id"] = str(since_id)
+        resp = gm_get("/direct_messages", params=params)
+        msgs = resp.get("direct_messages", []) if isinstance(resp, dict) else []
+        return list(reversed(msgs))   # oldest first
+    except Exception:
+        return []
+
+
+# Global UNO session table  { group_id: uno_state_dict }
+# Lives here rather than in game_session so it persists across group swaps.
+_uno_sessions: dict = {}
+_uno_dm_since: dict = {}   # { uid: last_seen_dm_id } for DM polling
 
 
 def list_groups():
@@ -2877,8 +2922,10 @@ def handle_dev_command(message):
             CONNECT4_ENABLED = val
         elif feature in ("tictactoe", "ttt"):
             TICTACTOE_ENABLED = val
+        elif feature == "uno":
+            UNO_ENABLED = val
         else:
-            send_message(DEV_GROUP_ID, "Unknown feature. Use: ai, 8ball, scripture, connect4, tictactoe", reply_to_id=msg_id)
+            send_message(DEV_GROUP_ID, "Unknown feature. Use: ai, 8ball, scripture, connect4, tictactoe, uno", reply_to_id=msg_id)
             return
         snapshot_group_config(GAME_GROUP_ID)
         send_message(DEV_GROUP_ID, f"{'✅' if val else '❌'} {feature} set to {val}", reply_to_id=msg_id)
@@ -3404,7 +3451,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
     """
     global GAME_GROUP_ID, game_session
     global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED, SCRIPTURE_ENABLED
-    global CONNECT4_ENABLED, TICTACTOE_ENABLED, GAME_TIMEOUT_SECONDS
+    global CONNECT4_ENABLED, TICTACTOE_ENABLED, UNO_ENABLED, GAME_TIMEOUT_SECONDS
     global _ai_last_used, _aiset_last_used
     global _fih_last_used, _steal_last_used, _coin_last_used
     global _ai_memory
@@ -3419,6 +3466,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
         old_sc         = SCRIPTURE_ENABLED
         old_c4         = CONNECT4_ENABLED
         old_ttt        = TICTACTOE_ENABLED
+        old_uno        = UNO_ENABLED
         old_to         = GAME_TIMEOUT_SECONDS
         old_ai_lu      = _ai_last_used
         old_aiset_lu   = _aiset_last_used
@@ -3436,6 +3484,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
         SCRIPTURE_ENABLED    = rec["SCRIPTURE_ENABLED"]
         CONNECT4_ENABLED     = rec["CONNECT4_ENABLED"]
         TICTACTOE_ENABLED    = rec["TICTACTOE_ENABLED"]
+        UNO_ENABLED          = rec.get("UNO_ENABLED", False)
         GAME_TIMEOUT_SECONDS = rec["GAME_TIMEOUT_SECONDS"]
         _ai_last_used        = rec["_ai_last_used"]
         _aiset_last_used     = rec["_aiset_last_used"]
@@ -3456,6 +3505,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
             rec["SCRIPTURE_ENABLED"]    = SCRIPTURE_ENABLED
             rec["CONNECT4_ENABLED"]     = CONNECT4_ENABLED
             rec["TICTACTOE_ENABLED"]    = TICTACTOE_ENABLED
+            rec["UNO_ENABLED"]          = UNO_ENABLED
             rec["GAME_TIMEOUT_SECONDS"] = GAME_TIMEOUT_SECONDS
             rec["_ai_last_used"]        = _ai_last_used
             rec["_aiset_last_used"]     = _aiset_last_used
@@ -3473,6 +3523,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
             SCRIPTURE_ENABLED    = old_sc
             CONNECT4_ENABLED     = old_c4
             TICTACTOE_ENABLED    = old_ttt
+            UNO_ENABLED          = old_uno
             GAME_TIMEOUT_SECONDS = old_to
             _ai_last_used        = old_ai_lu
             _aiset_last_used     = old_aiset_lu
@@ -3483,7 +3534,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
 
 
 def handle_game_command(message):
-    global GAME_TIMEOUT_SECONDS, GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED
+    global GAME_TIMEOUT_SECONDS, GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, UNO_ENABLED
 
     # Extract text early so we can use it safely
     text = (message.get("text") or "").strip()
@@ -3743,63 +3794,57 @@ def handle_game_command(message):
         send_message(GAME_GROUP_ID, prefix + text, reply_to_id=msg_id)
         return
 
-    # !steal  — steal points from a random or targeted user
-    # • No target: random victim, 100% success, random amount.
-    # • @mention or reply: 25% steal, 25% caught (victim steals 50 pts back), 50% nothing.
-    #   If the target has no points / is yourself → no big cooldown, 5-second retry window.
+    # !steal  — steal points from a random active user
     if cmd == "!steal":
-        # ── Resolve target from ping or reply attachment ─────────────────────
+        # ── Resolve target from @mention or reply attachment ─────────────────
         target_id   = None
         target_name = None
 
-        # Check for @mention attachment
         for att in message.get("attachments", []):
             if att.get("type") == "mentions":
-                loci   = att.get("loci", [])
-                uids_a = att.get("user_ids", [])
-                if uids_a:
-                    tid = str(uids_a[0])
-                    if tid != str(sender_id):
-                        target_id   = tid
-                        target_name = _known_names.get(tid, tid)
+                for uid in att.get("user_ids", []):
+                    if str(uid) != str(sender_id):
+                        target_id   = str(uid)
+                        target_name = _known_names.get(target_id, target_id)
                         break
+            if target_id:
+                break
 
-        # Check for reply attachment (reply_id → user who sent that message)
         if target_id is None:
             for att in message.get("attachments", []):
                 if att.get("type") == "reply":
-                    # GroupMe reply attachments carry the sender of the replied-to msg
-                    # in a "user_id" field on the attachment (not always present).
-                    # We fall back to scanning known names for a best-effort match.
                     reply_uid = str(att.get("user_id", ""))
                     if reply_uid and reply_uid != str(sender_id):
                         target_id   = reply_uid
-                        target_name = _known_names.get(reply_uid, reply_uid)
+                        target_name = _known_names.get(target_id, target_id)
                         break
 
         targeted = target_id is not None
 
         # ── Cooldown check ───────────────────────────────────────────────────
-        # _steal_last_used stores either a full-CD timestamp (normal)
-        # or a "retry" timestamp with a 5-second window.
+        # _steal_last_used stores (timestamp, "full"|"retry") tuples.
         now = time.time()
         last_entry = _steal_last_used.get(str(sender_id))
         if last_entry is not None:
-            ts, cd_type = last_entry if isinstance(last_entry, (list, tuple)) else (last_entry, "full")
-            actual_cd  = 5 if cd_type == "retry" else POINTS_STEAL_CD
-            remaining  = actual_cd - (now - ts)
+            if isinstance(last_entry, (list, tuple)) and len(last_entry) == 2:
+                ts, cd_type = last_entry
+            else:
+                ts, cd_type = last_entry, "full"
+            actual_cd = 5 if cd_type == "retry" else POINTS_STEAL_CD
+            remaining = actual_cd - (now - ts)
             if remaining > 0:
                 if cd_type == "retry":
                     send_message(GAME_GROUP_ID,
-                        f"🦀 {sender_name}, wait just a moment before trying again! ({int(remaining)}s)",
+                        f"🦀 {sender_name}, pick someone else! ({int(remaining)}s)",
                         reply_to_id=msg_id)
                 else:
                     m, s = divmod(int(remaining), 60)
-                    msg_cd = STEAL_COOLDOWN_MESSAGE.format(m=m, s=s)
-                    send_message(GAME_GROUP_ID, f"🦀 {msg_cd}", reply_to_id=msg_id)
+                    send_message(GAME_GROUP_ID,
+                        f"🦀 {STEAL_COOLDOWN_MESSAGE.format(m=m, s=s)}",
+                        reply_to_id=msg_id)
                 return
 
-        # ── RANDOM steal (no target specified) ───────────────────────────────
+        # ── RANDOM steal (no target) — 100% success ──────────────────────────
         if not targeted:
             ledger  = load_points(GAME_GROUP_ID)
             victims = [
@@ -3811,7 +3856,7 @@ def handle_game_command(message):
                 return
             _steal_last_used[str(sender_id)] = (now, "full")
             victim_id, victim_data = random.choice(victims)
-            amt  = random.randint(POINTS_STEAL_MIN, POINTS_STEAL_MAX)
+            amt = random.randint(POINTS_STEAL_MIN, POINTS_STEAL_MAX)
             taken, v_new, s_new = transfer_points(
                 GAME_GROUP_ID, victim_id, victim_data["name"],
                 sender_id, sender_name, amt,
@@ -3827,8 +3872,7 @@ def handle_game_command(message):
             send_message(GAME_GROUP_ID, f"🦀 {text}", reply_to_id=msg_id)
             return
 
-        # ── TARGETED steal (user @mentioned or replied-to) ───────────────────
-        # Validate target first (can't steal from yourself, target must have pts)
+        # ── TARGETED steal — 25% steal / 25% caught / 50% miss ──────────────
         if str(target_id) == str(sender_id):
             send_message(GAME_GROUP_ID,
                 f"🦀 {sender_name}, you can't steal from yourself!",
@@ -3837,41 +3881,41 @@ def handle_game_command(message):
 
         target_pts = get_points(GAME_GROUP_ID, target_id, target_name)
         if target_pts <= 0:
-            # Invalid target — give short retry window instead of full cooldown
+            # Invalid target — short retry cooldown instead of full CD
             _steal_last_used[str(sender_id)] = (now, "retry")
             send_message(GAME_GROUP_ID,
                 f"🦀 {target_name} has no points to steal! Pick someone else (5s to retry).",
                 reply_to_id=msg_id)
             return
 
-        # Apply full cooldown now that we're committing to the attempt
+        # Full cooldown committed now that we're attempting the steal
         _steal_last_used[str(sender_id)] = (now, "full")
 
-        roll = random.random()   # 0.0 – 1.0
+        roll = random.random()
 
         if roll < 0.25:
-            # ── Success: steal random amount ─────────────────────────────────
-            amt  = random.randint(POINTS_STEAL_MIN, POINTS_STEAL_MAX)
+            # ── Success ──────────────────────────────────────────────────────
+            amt = random.randint(POINTS_STEAL_MIN, POINTS_STEAL_MAX)
             taken, v_new, s_new = transfer_points(
                 GAME_GROUP_ID, target_id, target_name,
                 sender_id, sender_name, amt,
             )
             if taken == 0:
                 send_message(GAME_GROUP_ID,
-                    f"🦀 {sender_name} tried to pinch {target_name} but somehow got nothing!",
+                    f"🦀 {sender_name} tried to pinch {target_name} but got nothing!",
                     reply_to_id=msg_id)
                 return
             tmpl = random.choice(STEAL_SUCCESS_MESSAGES)
-            text = tmpl.format(
-                thief=sender_name, victim=target_name,
-                pts=taken, thief_bal=s_new, victim_bal=v_new,
-            )
-            send_message(GAME_GROUP_ID, f"🦀 {text}", reply_to_id=msg_id)
+            send_message(GAME_GROUP_ID,
+                f"🦀 " + tmpl.format(
+                    thief=sender_name, victim=target_name,
+                    pts=taken, thief_bal=s_new, victim_bal=v_new,
+                ), reply_to_id=msg_id)
 
         elif roll < 0.50:
-            # ── Caught: victim steals 50 pts (or all if thief has fewer) ─────
-            thief_pts  = get_points(GAME_GROUP_ID, sender_id, sender_name)
-            penalty    = min(50, thief_pts)
+            # ── Caught — victim takes 50 pts (or all if thief has fewer) ─────
+            thief_pts = get_points(GAME_GROUP_ID, sender_id, sender_name)
+            penalty   = min(50, thief_pts)
             if penalty > 0:
                 taken, t_new, v_new = transfer_points(
                     GAME_GROUP_ID, sender_id, sender_name,
@@ -3880,16 +3924,16 @@ def handle_game_command(message):
                 send_message(GAME_GROUP_ID,
                     f"🦀 {target_name} caught {sender_name} red-handed! "
                     f"{target_name} snatches {taken} pts as punishment. "
-                    f"({sender_name}: {t_new} pts, {target_name}: {v_new} pts)",
+                    f"({sender_name}: {t_new} pts | {target_name}: {v_new} pts)",
                     reply_to_id=msg_id)
             else:
                 send_message(GAME_GROUP_ID,
                     f"🦀 {target_name} caught {sender_name} red-handed! "
-                    f"But {sender_name} is broke, so there's nothing to take.",
+                    f"But {sender_name} is broke — nothing to take.",
                     reply_to_id=msg_id)
 
         else:
-            # ── Missed (remaining 50%) ────────────────────────────────────────
+            # ── Miss (50%) ───────────────────────────────────────────────────
             send_message(GAME_GROUP_ID,
                 f"🦀 {sender_name}'s crab missed {target_name} completely. Better luck next time!",
                 reply_to_id=msg_id)
@@ -5165,6 +5209,7 @@ def handle_game_command(message):
             SCRIPTURE_ENABLED = val
             CONNECT4_ENABLED  = val
             TICTACTOE_ENABLED = val
+            UNO_ENABLED       = val
             snapshot_group_config(GAME_GROUP_ID)
             if not val:
                 send_message(GAME_GROUP_ID, "🔴 All features disabled. Only #state commands will work.", reply_to_id=msg_id)
@@ -5196,13 +5241,82 @@ def handle_game_command(message):
             snapshot_group_config(GAME_GROUP_ID)
             send_message(GAME_GROUP_ID, f"Tic-Tac-Toe {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
 
+        elif feature == "uno":
+            UNO_ENABLED = val
+            snapshot_group_config(GAME_GROUP_ID)
+            send_message(GAME_GROUP_ID, f"UNO {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
+
         else:
             send_message(
                 GAME_GROUP_ID,
-                f"Unknown feature '{feature}'.\nKnown features: all, ai, 8ball, scripture, connect4, tictactoe",
+                f"Unknown feature '{feature}'.\nKnown features: all, ai, 8ball, scripture, connect4, tictactoe, uno",
                 reply_to_id=msg_id,
             )
         return
+
+    # ── UNO COMMANDS (group side — DM handling is in the poll loop) ──────────
+    if cmd in ("#start", "#join", "#quit", "#status") or (cmd == "#help" and parts[1:2] == ["uno"]):
+        _gid = GAME_GROUP_ID
+
+        # #help uno
+        if cmd == "#help" and parts[1:2] == ["uno"]:
+            send_message(_gid, games.uno_help_text(), reply_to_id=msg_id)
+            return
+
+        # #start uno  /  #start uno go
+        if cmd == "#start" and parts[1:2] == ["uno"]:
+            sub = parts[2:3]
+            uno = _uno_sessions.get(_gid)
+            if sub == ["go"]:
+                # Host starts the actual deal
+                if uno is None or uno["state"] != "lobby":
+                    send_message(_gid, "No UNO lobby to start. Use #start uno first.", reply_to_id=msg_id)
+                    return
+                def _sg(g, t): send_message(g, t)
+                def _sdm(u, t): send_dm(u, t)
+                games.uno_begin(_gid, uno, sender_id, _sg, _sdm)
+            else:
+                # Open a lobby
+                if uno and uno["state"] in ("lobby", "playing"):
+                    send_message(_gid, "There's already an active UNO game. Use #quit to end it first.", reply_to_id=msg_id)
+                    return
+                group_name = _group_registry.get(_gid, {}).get("name", str(_gid))
+                def _sg(g, t): send_message(g, t)
+                def _sdm(u, t): send_dm(u, t)
+                state = games.uno_start(_gid, group_name, sender_id, sender_name, UNO_ENABLED, _sg, _sdm)
+                if state:
+                    _uno_sessions[_gid] = state
+            return
+
+        # #join (for UNO lobby)
+        if cmd == "#join":
+            uno = _uno_sessions.get(_gid)
+            if uno and uno["state"] == "lobby":
+                def _sg(g, t): send_message(g, t)
+                def _sdm(u, t): send_dm(u, t)
+                games.uno_join(_gid, uno, sender_id, sender_name, _sg, _sdm)
+                return
+            # Fall through to C4/TTT #join if no UNO lobby
+
+        # #quit (for UNO)
+        if cmd == "#quit":
+            uno = _uno_sessions.get(_gid)
+            if uno and uno["state"] in ("lobby","playing") and sender_id in uno["players"]:
+                def _sg(g, t): send_message(g, t)
+                def _sdm(u, t): send_dm(u, t)
+                ended = games.uno_quit_player(_gid, uno, sender_id, sender_name, _sg, _sdm)
+                if ended or uno["state"] == "done":
+                    del _uno_sessions[_gid]
+                return
+            # Fall through to C4/TTT #quit
+
+        # #status (for UNO)
+        if cmd == "#status":
+            uno = _uno_sessions.get(_gid)
+            if uno and uno["state"] == "playing":
+                def _sg(g, t): send_message(g, t)
+                games.uno_status(_gid, uno, _sg)
+                return
 
     # ── GAME COMMANDS — delegated to Porta-Games ────────────────────────────
     # All #start, #join, #addai, #quit, #timeout, #pvpbet, #bet, #stats,
@@ -5285,7 +5399,7 @@ def _group_poll_loop(group_id: str):
                 time.sleep(GAME_POLL_INTERVAL)
                 continue
 
-            # ── Rate-limit gate: stagger requests across all group threads ───
+            # ── Rate-limit gate: stagger requests across all group threads ────
             global _api_last_poll
             with _api_rate_lock:
                 gap = time.time() - _api_last_poll
@@ -5306,8 +5420,7 @@ def _group_poll_loop(group_id: str):
             print(f"[poll] Error in poll loop for group {gid}:")
             traceback.print_exc()
 
-        # Scale sleep with the number of active groups so aggregate request rate
-        # stays reasonable even when many groups are registered.
+        # Scale sleep with group count so aggregate API rate stays ~1 req/sec
         n_groups = max(1, len(_group_registry))
         per_group_interval = max(GAME_POLL_INTERVAL, API_MIN_GAP * n_groups)
         time.sleep(per_group_interval)
@@ -5344,6 +5457,82 @@ def game_poll_loop():
     # Threads are started from main() for all groups known at startup.
     # This function is kept so that any existing call sites don't break.
     pass
+
+
+UNO_DM_POLL_INTERVAL = 10   # seconds between DM checks for active players
+
+def uno_dm_poll_loop():
+    """
+    Polls DMs for the current-turn player of every active UNO game.
+    Handles: #play, #draw, #hand, #quit from DMs.
+    Also handles idle-kick and posts group status updates.
+    Runs as a single daemon thread — light-weight since UNO is turn-based.
+    """
+    while True:
+        try:
+            for gid, state in list(_uno_sessions.items()):
+                if state["state"] != "playing":
+                    continue
+
+                def _sg(g, t): send_message(g, t)
+                def _sdm(u, t): send_dm(u, t)
+
+                # ── Idle kick check ──────────────────────────────────────────
+                ended = games.uno_check_idle(gid, state, _sg, _sdm)
+                if ended or state["state"] == "done":
+                    _uno_sessions.pop(gid, None)
+                    continue
+
+                # ── Poll DMs for active player only ──────────────────────────
+                cur_uid = state["players"][state["current"]]
+                since   = _uno_dm_since.get(cur_uid)
+
+                msgs = fetch_dm_messages(cur_uid, since_id=since)
+                for msg in msgs:
+                    mid  = msg.get("id")
+                    uid  = str(msg.get("sender_id", ""))
+                    text = (msg.get("text") or "").strip()
+
+                    # Track last seen DM id
+                    if mid and (since is None or mid > since):
+                        _uno_dm_since[cur_uid] = mid
+
+                    # Only process messages FROM the player (not the bot's own)
+                    if uid != str(cur_uid):
+                        continue
+                    if not text:
+                        continue
+
+                    low = text.lower()
+                    if low.startswith("#play "):
+                        card_text = text[6:].strip()
+                        games.uno_play_card(gid, state, cur_uid, card_text, _sg, _sdm)
+                        if state["state"] == "done":
+                            _uno_sessions.pop(gid, None)
+                        break
+
+                    elif low == "#draw":
+                        games.uno_draw(gid, state, cur_uid, _sg, _sdm)
+                        break
+
+                    elif low == "#hand":
+                        games.uno_show_hand(state, cur_uid, _sdm)
+
+                    elif low == "#quit":
+                        name = state["names"].get(cur_uid, cur_uid)
+                        ended = games.uno_quit_player(gid, state, cur_uid, name, _sg, _sdm)
+                        if ended or state["state"] == "done":
+                            _uno_sessions.pop(gid, None)
+                        break
+
+                    elif low == "#status":
+                        games.uno_status(gid, state, _sg)
+
+        except Exception:
+            print("[UNO DM poll] Error:")
+            traceback.print_exc()
+
+        time.sleep(UNO_DM_POLL_INTERVAL)
 
 
 # ---------------------------------------------------------
@@ -5586,6 +5775,7 @@ class ControlPanel:
             ("Bot (master)",  "master"),
             ("Connect Four",  "connect4"),
             ("Tic-Tac-Toe",   "tictactoe"),
+            ("UNO",           "uno"),
             ("Magic 8-Ball",  "8ball"),
             ("Scripture",     "scripture"),
             ("AI Chat",       "ai"),
@@ -7040,6 +7230,7 @@ class ControlPanel:
                 "master":    viewed_rec.get("GAME_ENABLED",      GAME_ENABLED),
                 "connect4":  viewed_rec.get("CONNECT4_ENABLED",  CONNECT4_ENABLED),
                 "tictactoe": viewed_rec.get("TICTACTOE_ENABLED", TICTACTOE_ENABLED),
+                "uno":       viewed_rec.get("UNO_ENABLED",       UNO_ENABLED),
                 "8ball":     viewed_rec.get("EIGHTBALL_ENABLED", EIGHTBALL_ENABLED),
                 "scripture": viewed_rec.get("SCRIPTURE_ENABLED", SCRIPTURE_ENABLED),
                 "ai":        viewed_rec.get("AI_ENABLED",        AI_ENABLED),
@@ -7049,6 +7240,7 @@ class ControlPanel:
                 "master":    GAME_ENABLED,
                 "connect4":  CONNECT4_ENABLED,
                 "tictactoe": TICTACTOE_ENABLED,
+                "uno":       UNO_ENABLED,
                 "8ball":     EIGHTBALL_ENABLED,
                 "scripture": SCRIPTURE_ENABLED,
                 "ai":        AI_ENABLED,
@@ -7108,13 +7300,10 @@ class ControlPanel:
 
     def _toggle_feature(self, key, var):
         global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED
-        global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED
+        global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, UNO_ENABLED
 
         val = var.get()
 
-        # Determine which group(s) this toggle applies to.
-        # If a specific group is selected in the Status tab, only touch that group.
-        # Otherwise fall back to all active groups (legacy behaviour).
         target_gid = None
         if hasattr(self, "_status_group_var"):
             target_gid = self._gid_from_dropdown(self._status_group_var.get())
@@ -7128,6 +7317,7 @@ class ControlPanel:
                 rec["SCRIPTURE_ENABLED"] = val
                 rec["CONNECT4_ENABLED"]  = val
                 rec["TICTACTOE_ENABLED"] = val
+                rec["UNO_ENABLED"]       = val
             elif key == "ai":
                 rec["AI_ENABLED"] = val
             elif key == "8ball":
@@ -7138,8 +7328,9 @@ class ControlPanel:
                 rec["CONNECT4_ENABLED"] = val
             elif key == "tictactoe":
                 rec["TICTACTOE_ENABLED"] = val
+            elif key == "uno":
+                rec["UNO_ENABLED"] = val
 
-        # Update per-group records and persist each one
         for gid in target_gids:
             rec = _group_registry.get(gid)
             if rec is None:
@@ -7150,7 +7341,6 @@ class ControlPanel:
             except Exception:
                 pass
 
-        # Only update globals when the toggle covers ALL groups (no specific selection)
         if not target_gid:
             if key == "master":
                 GAME_ENABLED      = val
@@ -7159,6 +7349,7 @@ class ControlPanel:
                 SCRIPTURE_ENABLED = val
                 CONNECT4_ENABLED  = val
                 TICTACTOE_ENABLED = val
+                UNO_ENABLED       = val
                 for k, v in self._feature_vars.items():
                     v.set(val)
             elif key == "ai":         AI_ENABLED        = val
@@ -7166,6 +7357,7 @@ class ControlPanel:
             elif key == "scripture":  SCRIPTURE_ENABLED = val
             elif key == "connect4":   CONNECT4_ENABLED  = val
             elif key == "tictactoe":  TICTACTOE_ENABLED = val
+            elif key == "uno":        UNO_ENABLED       = val
 
         label_map = {
             "master":    "All features",
@@ -7174,6 +7366,7 @@ class ControlPanel:
             "scripture": "Scripture",
             "connect4":  "Connect Four",
             "tictactoe": "Tic-Tac-Toe",
+            "uno":       "UNO",
         }
         feature_label = label_map.get(key, key)
         state_word    = "enabled ✅" if val else "disabled ❌"
@@ -7507,6 +7700,10 @@ def main():
     # Start the dev group poll thread
     dev_thread = threading.Thread(target=dev_poll_loop, daemon=True)
     dev_thread.start()
+
+    uno_dm_thread = threading.Thread(target=uno_dm_poll_loop, daemon=True, name="uno-dm-poll")
+    uno_dm_thread.start()
+    print("[bot] UNO DM poll thread started.")
 
     # Launch the control panel GUI on the main thread.
     # If tkinter is unavailable (headless server), fall back to a simple

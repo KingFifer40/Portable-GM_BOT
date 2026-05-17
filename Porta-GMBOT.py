@@ -1262,12 +1262,15 @@ LEADERBOARD_SIZE = 10   # number of entries shown by #leaderboard (set in Settin
 
 def _canonical_group_id(group_id):
     """
-    Returns the canonical group ID for points storage.
-    In subgroup mode the bot operates inside a topic sub-group, but all data
-    should be stored under the main group so points persist across topics.
+    Returns the storage key for a group's data folder.
+
+    Each group ALWAYS gets its own isolated folder regardless of any subgroup
+    or admin-group settings.  There is no cross-group data sharing — points,
+    inventory, and leaderboards are strictly per-group.
+
+    The USE_SUBGROUP / ADMIN_GROUP_ID flags control which group is checked for
+    admin privileges, nothing else.  They must never affect storage paths.
     """
-    if USE_SUBGROUP and ADMIN_GROUP_ID and str(group_id) != str(ADMIN_GROUP_ID):
-        return str(ADMIN_GROUP_ID)
     return str(group_id)
 
 
@@ -4512,53 +4515,65 @@ def handle_game_command(message):
 
                     if subgame in ("tictactoe", "ttt"):
                         if not TICTACTOE_ENABLED:
-                            send_message(GAME_GROUP_ID, "⭕ Tic-Tac-Toe is currently disabled.\nUse #state tictactoe true as an admin to enable it.", reply_to_id=msg_id)
+                            send_message(GAME_GROUP_ID, "🟥 Tic-Tac-Toe is currently disabled.\nUse #state tictactoe true as an admin to enable it.", reply_to_id=msg_id)
                             return
                         help_text = (
-                            "⭕ *Tic-Tac-Toe Commands:*\n"
-                            "• #start ttt — Start a Tic-Tac-Toe game (you are ❌)\n"
-                            "• #join — Join as Player 2 (you are ⭕)\n"
-                            "• #addai — Play vs the perfect AI (impossible to beat)\n"
+                            "🟥 *Tic-Tac-Toe Commands:*\n"
+                            "• #start ttt — Start a game (you are 🔴)\n"
+                            "• #join — Join as Player 2 (you are 🟡)\n"
+                            "• #addai — Play vs the AI (you are 🔴, AI is 🟢)\n"
                             "• #quit — Forfeit the current game\n"
                             "\n"
-                            "To make a move, use a coordinate: column letter + row number\n"
-                            "     A   B   C\n"
-                            "  1  .   .   .\n"
-                            "  2  .   .   .\n"
-                            "  3  .   .   .\n"
+                            "To make a move, use column letter + row number:\n"
+                            "   🇦  🇧  🇨\n"
+                            "1️⃣ .   .   .\n"
+                            "2️⃣ .   .   .\n"
+                            "3️⃣ .   .   .\n"
                             "Example: #B2 = center cell\n"
                             "\n"
-                            "Player 1 = ❌   Player 2 = ⭕\n"
+                            "Player 1 = 🔴   Player 2 = 🟡   AI = 🟢\n"
                             "\n"
                             "Enable/disable with: #state tictactoe true/false"
                         )
                         send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
                         return
 
+                    if subgame in ("uno",):
+                        if not UNO_ENABLED:
+                            send_message(GAME_GROUP_ID, "🃏 UNO is currently disabled.\nUse #state uno true as an admin to enable it.", reply_to_id=msg_id)
+                            return
+                        send_message(GAME_GROUP_ID, games.uno_help_text(), reply_to_id=msg_id)
+                        return
+
                     # Unknown subgame
                     known_games = []
                     if CONNECT4_ENABLED:  known_games.append("connect4")
                     if TICTACTOE_ENABLED: known_games.append("tictactoe")
-                    all_games = ["connect4", "tictactoe"]
+                    if UNO_ENABLED:       known_games.append("uno")
+                    all_games = ["connect4", "tictactoe", "uno"]
                     send_message(
                         GAME_GROUP_ID,
                         f"Unknown game '{subgame}'.\n"
-                        f"Available games: {', '.join(f'#help game {g}' for g in all_games)}",
+                        f"Available: {', '.join(f'#help game {g}' for g in all_games)}",
                         reply_to_id=msg_id,
                     )
                     return
 
                 # #help game — show list of available games
                 lines = ["🎮 *Games:*\n"
-                         "Use #help game <name> for commands.\n"]
+                         "Use #help game <name> for full commands.\n"]
                 if CONNECT4_ENABLED:
-                    lines.append("• connect4     — Connect Four (drop pieces to get 4 in a row)")
+                    lines.append("• connect4     — Connect Four (drop pieces, get 4 in a row)")
                 else:
                     lines.append("• connect4     — Connect Four [disabled]")
                 if TICTACTOE_ENABLED:
                     lines.append("• tictactoe    — Tic-Tac-Toe (classic 3×3 grid)")
                 else:
                     lines.append("• tictactoe    — Tic-Tac-Toe [disabled]")
+                if UNO_ENABLED:
+                    lines.append("• uno          — UNO card game (played via DM)")
+                else:
+                    lines.append("• uno          — UNO [disabled]")
                 lines.append("\nExample: #help game connect4")
                 send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
                 return
@@ -4636,6 +4651,14 @@ def handle_game_command(message):
                 send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
                 return
 
+            # UNO HELP
+            if topic == "uno":
+                if not UNO_ENABLED:
+                    send_message(GAME_GROUP_ID, "🃏 UNO is currently disabled.\nUse #state uno true as an admin to enable it.", reply_to_id=msg_id)
+                    return
+                send_message(GAME_GROUP_ID, games.uno_help_text(), reply_to_id=msg_id)
+                return
+
             # STATE / ADMIN HELP
             if topic in ("admin", "state"):
                 help_text = (
@@ -4649,6 +4672,7 @@ def handle_game_command(message):
                     "#state scripture true/false    — Scripture on/off\n"
                     "#state connect4 true/false     — Connect Four on/off\n"
                     "#state tictactoe true/false    — Tic-Tac-Toe on/off\n"
+                    "#state uno true/false          — UNO on/off\n"
                     "\n"
                     "!aiforget — Clear the shared AI conversation history\n"
                     "\n"
@@ -5255,7 +5279,7 @@ def handle_game_command(message):
         return
 
     # ── UNO COMMANDS (group side — DM handling is in the poll loop) ──────────
-    if cmd in ("#start", "#join", "#quit", "#status") or (cmd == "#help" and parts[1:2] == ["uno"]):
+    if cmd in ("#start", "#join", "#quit", "#status", "#pass") or (cmd == "#help" and parts[1:2] == ["uno"]):
         _gid = GAME_GROUP_ID
 
         # #help uno
@@ -5316,6 +5340,15 @@ def handle_game_command(message):
             if uno and uno["state"] == "playing":
                 def _sg(g, t): send_message(g, t)
                 games.uno_status(_gid, uno, _sg)
+                return
+
+        # #pass (for UNO — after drawing)
+        if cmd == "#pass":
+            uno = _uno_sessions.get(_gid)
+            if uno and uno["state"] == "playing" and sender_id in uno["players"]:
+                def _sg(g, t): send_message(g, t)
+                def _sdm(u, t): send_dm(u, t)
+                games.uno_pass(_gid, uno, sender_id, _sg, _sdm)
                 return
 
     # ── GAME COMMANDS — delegated to Porta-Games ────────────────────────────
@@ -5513,6 +5546,10 @@ def uno_dm_poll_loop():
 
                     elif low == "#draw":
                         games.uno_draw(gid, state, cur_uid, _sg, _sdm)
+                        break
+
+                    elif low == "#pass":
+                        games.uno_pass(gid, state, cur_uid, _sg, _sdm)
                         break
 
                     elif low == "#hand":

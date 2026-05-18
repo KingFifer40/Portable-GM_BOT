@@ -1,18 +1,19 @@
 # Porta-GMBOT — GroupMe Bot with AI Chat
 
-A portable GroupMe bot that lets your group play **Connect Four**, look up **scriptures**, chat with a **local AI** (via Ollama), earn **points**, and more. Built in Python, runs on Windows, Mac, or Linux.
+A portable GroupMe bot that lets your group play **Connect Four**, **Tic-Tac-Toe**, **UNO**, look up **scriptures**, chat with a **local AI** (via Ollama), earn **points**, and more. Built in Python, runs on Windows, Mac, or Linux.
 
 ---
 
 ## Features
 
 - 🎮 **Connect Four** — two-player PvP or vs AI (minimax engine, easy/medium/hard)
-- 💰 **Points system** — earn points by fishing (`!fih`), stealing (`!steal`), and coin flipping (`!coin`); give points to others (`!give`); wager them on Connect Four games
+- ❌⭕ **Tic-Tac-Toe** — two-player PvP or vs a perfect AI that cannot be beaten
+- 🃏 **UNO** — full multiplayer UNO (2–8 players), played via DM hand management
+- 💰 **Points system** — earn points by fishing (`!fih`), stealing (`!steal`), and coin flipping (`!coin`); give points to others (`!give`); wager them on games
 - 🤖 **AI Chat** — powered by a local Ollama model with a shared group memory
 - 🌐 **Web search** — the AI automatically searches DuckDuckGo when asked about current events, recent news, live scores, or anything beyond its training data
 - 🎱 **Magic 8-Ball** — `?` + any question
 - 📖 **Scripture lookup** — Bible (KJV) and Book of Mormon verse search
-- 🖼️ **Profile picture swap** — the bot stamps "BOT" on its GroupMe avatar while active, then reverts automatically
 - 🔒 **Safe by default** — hardened AI safety rules, English-only responses, spam cooldowns
 - 🛠️ **Admin controls** — enable/disable individual features from inside the group
 - 🖥️ **Control panel** — desktop GUI for managing groups, AI settings, points tuning, and auto-updates
@@ -28,7 +29,7 @@ A portable GroupMe bot that lets your group play **Connect Four**, look up **scr
 | Ollama | [ollama.com](https://ollama.com) — install it, the bot handles the rest |
 | GroupMe account + access token | Free — see setup below |
 
-The Python dependencies (`requests`, `ddgs`, `Pillow`) are installed automatically on first run.
+The Python dependencies (`requests`, `ddgs`) are installed automatically on first run.
 
 ---
 
@@ -80,19 +81,17 @@ After setup the bot will automatically:
 Once the bot is running, go to your **dev group** and send:
 
 ```
-!add YOUR_GAME_GROUP_ID
+!addgroup YOUR_GAME_GROUP_ID
 ```
 
-The bot joins the game group and announces itself.
-
-If you don't know your game group's ID, type `!listgroups` in the dev group and it will list all your groups with their IDs.
+The bot registers the game group. Use `!listgroups` in the dev group to find your group's ID.
 
 ### Subgroup / Topic mode
 
 If your group uses GroupMe's Topics feature and you want the bot to operate inside a specific topic while still reading admin roles from the main group, use the comma syntax:
 
 ```
-!add MAIN_GROUP_ID,TOPIC_GROUP_ID
+!addgroup MAIN_GROUP_ID,TOPIC_GROUP_ID
 ```
 
 You can also browse and set topics from the **Groups tab** of the control panel GUI.
@@ -108,7 +107,10 @@ You can also browse and set topics from the **Groups tab** of the control panel 
 | Command | Description |
 |---|---|
 | `#help` | Show help categories |
-| `#help game` | Connect Four commands |
+| `#help game` | Game commands overview |
+| `#help game connect4` | Connect Four commands |
+| `#help game tictactoe` | Tic-Tac-Toe commands |
+| `#help uno` | UNO commands |
 | `#help 8ball` | Magic 8-Ball info |
 | `#help scripture` | Scripture commands |
 | `#help ai` | AI chat commands |
@@ -121,7 +123,10 @@ You can also browse and set topics from the **Groups tab** of the control panel 
 
 | Command | Description |
 |---|---|
-| `#start [easy\|medium\|hard]` | Start a new game (default: medium) |
+| `#start c4` | Start a new Connect Four game (default: medium AI) |
+| `#start c4 easy` | Start vs Easy AI |
+| `#start c4 medium` | Start vs Medium AI |
+| `#start c4 hard` | Start vs Hard AI |
 | `#join` | Join as Player 2 (triggers PvP betting phase) |
 | `#addai [easy\|medium\|hard]` | Add AI engine as Player 2 |
 | `#A` – `#G` | Drop your piece in that column |
@@ -129,7 +134,49 @@ You can also browse and set topics from the **Groups tab** of the control panel 
 | `#timeout N` | Set inactivity timeout in seconds |
 | `#stats` | Show current game bets and player info |
 
-#### PvP Betting
+#### Tic-Tac-Toe
+
+| Command | Description |
+|---|---|
+| `#start ttt` | Start a new Tic-Tac-Toe game |
+| `#join` | Join as Player 2 (O) |
+| `#addai` | Add the perfect AI as Player 2 |
+| `#A1` – `#C3` | Play your move (column A–C, row 1–3) |
+| `#quit` | End the current game |
+
+The AI opponent uses a minimax algorithm and **cannot be beaten** — best you can achieve is a draw.
+
+#### UNO
+
+UNO game announcements appear in the group, but hands and turn prompts are sent to each player via **DM** (direct message).
+
+**Group commands:**
+
+| Command | Description |
+|---|---|
+| `#start uno` | Open a UNO lobby (you become the host) |
+| `#join` | Join the lobby |
+| `#start uno go` | Host starts the game (min 2 players) |
+| `#status` | Show current game state and hand sizes |
+| `#pass` | Pass after drawing (only valid after `#draw`) |
+| `#quit` | Leave the game |
+| `#help uno` | Show UNO help |
+
+**DM commands** (send these as a direct message to the bot):
+
+| Command | Description |
+|---|---|
+| `#hand` | Show your current hand |
+| `#play <N>` | Play card number N from your hand |
+| `#play <N> <color>` | Play a Wild card and declare a colour (`red`, `green`, `blue`, `yellow`) |
+| `#draw` | Draw a card (or draw pending +2/+4 cards) |
+| `#pass` | Pass after drawing when you have no playable card |
+| `#quit` | Leave the game |
+| `#status` | Show game state from your DM |
+
+Players are automatically kicked after **2 minutes of inactivity**. If only one player remains, they win.
+
+#### PvP Betting (Connect Four)
 
 After both players join, a betting phase starts before play begins:
 
@@ -140,7 +187,7 @@ After both players join, a betting phase starts before play begins:
 
 Both players must bet (or skip) before moves are accepted. The **winner gets their own stake back plus the loser's stake**. If the game ends early or draws, all bets are fully refunded.
 
-#### Spectator Betting
+#### Spectator Betting (Connect Four)
 
 Anyone not playing can bet on a player using a **pari-mutuel (pool) system**:
 
@@ -161,7 +208,7 @@ All bets form a single shared pool. Winners receive their stake back **plus a pr
 | `!give @username <amount>` | Give points to another player |
 | `#leaderboard` | Show the top points rankings |
 
-#### Inventory
+#### Inventory & Trading
 
 | Command | Description |
 |---|---|
@@ -170,6 +217,10 @@ All bets form a single shared pool. Winners receive their stake back **plus a pr
 | `!items @user` | View someone else's inventory |
 | `!sellitem i<slot>` | Sell a creation back to the bot for its worth |
 | `!give @user i<slot>` | Gift one of your creations to another user |
+| `!request @user i<slot>` | Request an item from another user |
+| `!listrequests` | View all pending requests sent to you |
+| `!yes <request_id>` | Accept an incoming item request |
+| `!no <request_id>` | Decline an incoming item request |
 
 #### AI Chat
 
@@ -211,6 +262,8 @@ The AI can **search the web automatically** — just ask about current events, s
 | `#state 8ball true/false` | Enable or disable Magic 8-Ball |
 | `#state scripture true/false` | Enable or disable scripture commands |
 | `#state connect4 true/false` | Enable or disable Connect Four |
+| `#state tictactoe true/false` | Enable or disable Tic-Tac-Toe |
+| `#state uno true/false` | Enable or disable UNO |
 | `!aiswitch true/false` | Enable or disable AI (same as `#state ai`) |
 | `!aiforget` | Clear the shared AI conversation history |
 
@@ -223,11 +276,15 @@ The AI can **search the web automatically** — just ask about current events, s
 | `!help` | Show dev commands |
 | `!listgroups` | List all groups your token is in (with IDs) |
 | `!listgroups MAIN_GROUP_ID` | List topics/subgroups for a specific group |
-| `!add GROUPID` | Set the active game group |
-| `!add MAIN_ID,SUB_ID` | Set bot to a topic/subgroup |
+| `!addgroup GROUPID` | Add a game group for the bot to manage |
+| `!addgroup MAIN_ID,SUB_ID` | Add a bot to a topic/subgroup |
+| `!removegroup GROUPID` | Remove a group from bot management |
+| `!groups` | List all currently managed groups |
+| `!toggle GROUPID <feature> true/false` | Toggle a feature for a specific group |
 | `!reload` | Restart the bot script |
-| `!state true/false` | Enable or disable game responses |
-| `!aiswitch true/false` | Enable or disable AI responses |
+| `!state true/false` | Enable or disable game responses (primary group) |
+| `!aiswitch true/false` | Enable or disable AI responses (primary group) |
+| `!setpoints @user <amount>` | Set a user's points directly |
 
 ---
 
@@ -243,9 +300,9 @@ The AI can **search the web automatically** — just ask about current events, s
 | `!steal` | Steal 5–30 pts from a random user |
 | `!coin` win | +bet amount |
 | `!coin` loss | −bet amount |
-| Beat Easy AI | +50 pts |
-| Beat Medium AI | +125 pts |
-| Beat Hard AI | +200 pts |
+| Beat Easy AI (Connect Four) | +50 pts |
+| Beat Medium AI (Connect Four) | +125 pts |
+| Beat Hard AI (Connect Four) | +200 pts |
 | Win PvP game (with bets) | +loser's wagered points |
 
 Losing to the AI costs no points. PvP games without bets award no points.
@@ -262,7 +319,7 @@ Losing to the AI costs no points. PvP games without bets award no points.
 
 ### PvP betting in detail
 
-1. Player 1 uses `#start`, Player 2 uses `#join`
+1. Player 1 uses `#start c4`, Player 2 uses `#join`
 2. Both players use `#pvpbet <amount>` to wager (or `#pvpbet 0` to skip)
 3. Both bets are deducted and held immediately
 4. Winner receives **the full pot** (their stake + the loser's stake)
@@ -323,17 +380,6 @@ The AI has hardened safety rules that **cannot be overridden** by any personalit
 Setting a new personality wipes all conversation history so no old context carries over.
 
 The AI uses a **single shared group memory** — all `!ai` messages are in one conversation, so the whole group's context is visible to the AI rather than isolated per-user threads.
-
----
-
-## Profile Picture Swap
-
-When the bot sends an AI response, it automatically:
-1. Uploads a brightened version of your GroupMe avatar with a **"BOT"** banner stamped on it
-2. Switches its GroupMe profile picture to that image before sending
-3. Reverts to the original avatar immediately after
-
-The two avatar files (`pfp_original.jpg` and `pfp_bot.jpg`) are saved in the `Porta-GMBOT/` folder on first run. This feature is skipped gracefully if the avatar can't be downloaded.
 
 ---
 
@@ -421,11 +467,10 @@ OLLAMA_BASE_MODEL
 |---|---|
 | `config.json` | Saved credentials, group IDs, model choice, and all tuning values |
 | `Porta-GMBOT/Modelfile` | Auto-generated Ollama Modelfile (safe to delete to reset) |
-| `Porta-GMBOT/pfp_original.jpg` | Your original GroupMe avatar (downloaded on first run) |
-| `Porta-GMBOT/pfp_bot.jpg` | Brightened "BOT" avatar used while the bot is active |
 | `Porta-GMBOT/resources/` | Scripture text files — included in the repo |
 | `groups/<id>.json` | Per-group feature toggle state |
 | `groups/<id>/users/<uid>.json` | Per-user points records |
+| `groups/_known_names.json` | Cached display names — survives restarts so the bot always knows who's who |
 | `.bot.lock` | Single-instance lock file — deleted automatically on exit |
 
 ---

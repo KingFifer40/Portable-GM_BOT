@@ -212,19 +212,7 @@ def _run_gui_wizard(existing: dict) -> dict:
     token_entry.pack(fill="x", pady=(4, 0), ipady=5)
     fields["access_token"] = token_var
 
-    # ── User Access Token field ──────────────────────────────────────────────
-    user_token_row = tk.Frame(body)
-    user_token_row.pack(fill="x", pady=(8, 4))
-    tk.Label(user_token_row, text="GroupMe User Access Token (for DMs)",
-             font=("Helvetica", 11, "bold"), anchor="w").pack(fill="x")
-    tk.Label(user_token_row,
-             text="Same place as above — your personal token. Required for UNO DMs. Leave blank to use bot token (DMs may fail).",
-             font=("Helvetica", 9), fg="#666666", anchor="w", wraplength=440, justify="left").pack(fill="x")
-    user_token_var = tk.StringVar(value=existing.get("user_access_token", ""))
-    user_token_entry = tk.Entry(user_token_row, textvariable=user_token_var,
-                                font=("Helvetica", 11), width=52, show="*")
-    user_token_entry.pack(fill="x", pady=(4, 0), ipady=5)
-    fields["user_access_token"] = user_token_var
+    # ── Dev group picker ─────────────────────────────────────────────────────
     group_row = tk.Frame(body)
     group_row.pack(fill="x", pady=(10, 4))
     tk.Label(group_row, text="Dev Group",
@@ -437,7 +425,6 @@ def _run_gui_wizard(existing: dict) -> dict:
         result["access_token"]      = token
         result["dev_group_id"]      = dev_gid
         result["ollama_base_model"] = model
-        result["user_access_token"] = fields["user_access_token"].get().strip()
         root.destroy()
 
     def on_cancel():
@@ -486,8 +473,7 @@ def _run_terminal_wizard(existing: dict) -> dict:
             val = input(f"  {label}{hint}: ").strip()
         return val if val else current
 
-    token = prompt("GroupMe Access Token (bot/API token)", "access_token")
-    user_token = prompt("GroupMe User Access Token (for UNO DMs — same dev.groupme.com page)", "user_access_token")
+    token = prompt("GroupMe Access Token", "access_token")
 
     # Try to fetch groups with the token so the user can pick by number
     dev_gid = ""
@@ -534,7 +520,6 @@ def _run_terminal_wizard(existing: dict) -> dict:
         "access_token":      token,
         "dev_group_id":      dev_gid,
         "ollama_base_model": model or "llama3.1:8b",
-        "user_access_token": user_token or "",
     }
 
 
@@ -545,7 +530,7 @@ def _load_or_run_setup():
     Env vars always override config.json.
     Updates globals ACCESS_TOKEN, DEV_GROUP_ID, OLLAMA_BASE_MODEL.
     """
-    global ACCESS_TOKEN, DEV_GROUP_ID, OLLAMA_BASE_MODEL, USER_ACCESS_TOKEN
+    global ACCESS_TOKEN, DEV_GROUP_ID, OLLAMA_BASE_MODEL
 
     cfg_path = CONFIG_FILE
 
@@ -601,7 +586,6 @@ def _load_or_run_setup():
     ACCESS_TOKEN      = os.environ.get("GROUPME_TOKEN")         or token
     DEV_GROUP_ID      = os.environ.get("GROUPME_DEV_GROUP_ID")  or dev_gid
     OLLAMA_BASE_MODEL = os.environ.get("OLLAMA_BASE_MODEL")     or model
-    USER_ACCESS_TOKEN = os.environ.get("GROUPME_USER_TOKEN")    or existing.get("user_access_token", "") or ACCESS_TOKEN
 
 
 
@@ -617,8 +601,7 @@ def _load_or_run_setup():
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Sentinel values — replaced at runtime by _load_or_run_setup()
-ACCESS_TOKEN      = None   # Bot/API token — used for group messages and polling
-USER_ACCESS_TOKEN = None   # Personal user token — required for DMs (direct_messages endpoint)
+ACCESS_TOKEN   = None
 DEV_GROUP_ID   = None
 GAME_GROUP_ID  = None   # Set at runtime via !add GROUPID or Groups tab
 ADMIN_GROUP_ID = None   # Linked main group (for admin/feature data) — used when in subgroup mode
@@ -1723,7 +1706,7 @@ def apply_settings_from_config():
     Covers credentials, points constants, and custom messages.
     Safe to call at startup and after saving from the Settings tab.
     """
-    global ACCESS_TOKEN, DEV_GROUP_ID, OLLAMA_BASE_MODEL, USER_ACCESS_TOKEN
+    global ACCESS_TOKEN, DEV_GROUP_ID, OLLAMA_BASE_MODEL
     global POINTS_FIH_MIN, POINTS_FIH_MAX, POINTS_FIH_CD, POINTS_FIH_LOSE_CHANCE
     global POINTS_STEAL_MIN, POINTS_STEAL_MAX, POINTS_STEAL_CD
     global POINTS_C4_WIN, POINTS_C4_WIN_AI, LEADERBOARD_SIZE
@@ -1742,8 +1725,6 @@ def apply_settings_from_config():
         DEV_GROUP_ID = cfg["dev_group_id"]
     if not os.environ.get("OLLAMA_BASE_MODEL") and cfg.get("ollama_base_model"):
         OLLAMA_BASE_MODEL = cfg["ollama_base_model"]
-    if not os.environ.get("GROUPME_USER_TOKEN"):
-        USER_ACCESS_TOKEN = cfg.get("user_access_token") or ACCESS_TOKEN
 
     # Points constants
     def _int(key, default):
@@ -1987,24 +1968,21 @@ def send_message(group_id, text, reply_to_id=None):
 def send_dm(user_id, text):
     """Send a direct message to a GroupMe user via the /direct_messages endpoint."""
     try:
-        import time as _t
         data = {
             "direct_message": {
-                "source_guid": f"uno-dm-{_t.time()}-{user_id}-{random.randint(1000,9999)}",
+                "source_guid": f"uno-dm-{time.time()}-{user_id}-{random.randint(1000,9999)}",
                 "recipient_id": str(user_id),
                 "text": text,
             }
         }
-        # DMs require the personal user token, not the bot token.
-        # Fall back to ACCESS_TOKEN if USER_ACCESS_TOKEN was not configured.
-        dm_token = USER_ACCESS_TOKEN or ACCESS_TOKEN
         url = f"{BASE_URL}/direct_messages"
         headers = {
             "Content-Type": "application/json",
-            "X-Access-Token": dm_token,
+            "X-Access-Token": ACCESS_TOKEN,
         }
-        resp = requests.post(url, params={"token": dm_token}, json=data, headers=headers, timeout=10)
-        resp.raise_for_status()
+        resp = requests.post(url, params={"token": ACCESS_TOKEN}, json=data, headers=headers, timeout=10)
+        if not resp.ok:
+            print(f"[DM] Failed to send DM to {user_id}: HTTP {resp.status_code} — {resp.text[:300]}")
     except Exception:
         print(f"[DM] Error sending DM to {user_id}:")
         traceback.print_exc()
@@ -2012,24 +1990,26 @@ def send_dm(user_id, text):
 
 def fetch_dm_messages(other_id, since_id=None):
     """
-    Fetch recent DM messages between the bot owner and other_id.
+    Fetch recent DM messages between the bot and other_id.
     Returns a list of message dicts (oldest first), or [].
     """
     try:
-        dm_token = USER_ACCESS_TOKEN or ACCESS_TOKEN
-        params = {"other_id": str(other_id), "token": dm_token}
+        url = f"{BASE_URL}/direct_messages"
+        params = {
+            "other_id": str(other_id),
+            "token":    ACCESS_TOKEN,
+        }
         if since_id:
             params["since_id"] = str(since_id)
-        url = f"{BASE_URL}/direct_messages"
-        headers = {"X-Access-Token": dm_token}
+        headers = {"X-Access-Token": ACCESS_TOKEN}
         resp = requests.get(url, params=params, headers=headers, timeout=10)
-        if resp.status_code not in (200, 304):
-            print(f"Warning: GET /direct_messages returned status {resp.status_code}")
+        if resp.status_code == 304:
+            return []
+        if not resp.ok:
+            print(f"[DM] fetch_dm_messages {other_id}: HTTP {resp.status_code}")
             return []
         data = resp.json()
-        if "response" not in data:
-            return []
-        msgs = data["response"].get("direct_messages", [])
+        msgs = data.get("response", {}).get("direct_messages", [])
         return list(reversed(msgs))   # oldest first
     except Exception:
         return []
@@ -6989,7 +6969,6 @@ class ControlPanel:
                 "access_token":      ACCESS_TOKEN,
                 "dev_group_id":      DEV_GROUP_ID,
                 "ollama_base_model": OLLAMA_BASE_MODEL,
-                "user_access_token": USER_ACCESS_TOKEN,
             }.get(key, "")
             display_val = live_val or cfg_now.get(key, "")
             var = tk.StringVar(value=display_val)
@@ -7000,9 +6979,8 @@ class ControlPanel:
             return entry
 
         self._token_entry = add_row(0, "GroupMe Access Token", "access_token", show="*")
-        add_row(1, "User Token (DMs)",  "user_access_token", show="*")
-        add_row(2, "Dev Group ID",      "dev_group_id")
-        add_row(3, "Ollama Base Model", "ollama_base_model")
+        add_row(1, "Dev Group ID",      "dev_group_id")
+        add_row(2, "Ollama Base Model", "ollama_base_model")
 
         # Show/hide token — direct widget ref, no grid_info needed
         self._show_token = False
@@ -7085,7 +7063,7 @@ class ControlPanel:
             global POINTS_STEAL_MIN, POINTS_STEAL_MAX, POINTS_STEAL_CD
             global POINTS_C4_WIN, POINTS_C4_WIN_AI, LEADERBOARD_SIZE
             global POINTS_COIN_CD, POINTS_MAX_CAP
-            global ACCESS_TOKEN, DEV_GROUP_ID, OLLAMA_BASE_MODEL, USER_ACCESS_TOKEN
+            global ACCESS_TOKEN, DEV_GROUP_ID, OLLAMA_BASE_MODEL
 
             # Validate points before touching anything
             try:
@@ -7178,8 +7156,6 @@ class ControlPanel:
                 DEV_GROUP_ID = cfg["dev_group_id"]
             if not os.environ.get("OLLAMA_BASE_MODEL") and cfg.get("ollama_base_model"):
                 OLLAMA_BASE_MODEL = cfg["ollama_base_model"]
-            if not os.environ.get("GROUPME_USER_TOKEN"):
-                USER_ACCESS_TOKEN = cfg.get("user_access_token") or ACCESS_TOKEN
 
             self._set_status("Settings saved and applied.")
 

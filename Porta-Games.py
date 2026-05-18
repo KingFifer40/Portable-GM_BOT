@@ -348,8 +348,8 @@ def c4_start(gid, session, sender_id, sender_name, difficulty, msg_id, enabled):
     session["timeout_seconds"] = session.get("timeout_seconds", 300)
     c4 = _fresh_c4()
     c4["board"] = _c4_init_board()
-    c4["players"][str(sender_id)] = {"name": sender_name, "symbol": C4_P1}
-    c4["turn_order"] = [str(sender_id)]
+    c4["players"][sender_id] = {"name": sender_name, "symbol": C4_P1}
+    c4["turn_order"] = [sender_id]
     c4["current_turn"] = 0
     c4["ai_difficulty"] = diff
     session["c4"] = c4
@@ -369,12 +369,12 @@ def c4_join(gid, session, sender_id, sender_name, msg_id, enabled):
     c4 = session["c4"]
     if session["active_game"] != "connect4":
         _send(gid, "No active Connect Four game. Use #start c4 to begin.", reply_to_id=msg_id); return
-    if str(sender_id) in c4["players"]:
+    if sender_id in c4["players"]:
         _send(gid, "You are already in this game.", reply_to_id=msg_id); return
     if len(c4["players"]) >= 2:
         _send(gid, "The game already has two players.", reply_to_id=msg_id); return
-    c4["players"][str(sender_id)] = {"name": sender_name, "symbol": C4_P2}
-    c4["turn_order"].append(str(sender_id))
+    c4["players"][sender_id] = {"name": sender_name, "symbol": C4_P2}
+    c4["turn_order"].append(sender_id)
     session["last_move_time"] = time.time()
     p1_id = c4["turn_order"][0]
     p1_name = c4["players"][p1_id]["name"]
@@ -448,11 +448,11 @@ def c4_column_move(gid, session, sender_id, sender_name, col_raw, msg_id, enable
         _send(gid, "⏳ Waiting for both players to set their bet.\nUse #pvpbet <amount> or #pvpbet 0 to skip.", reply_to_id=msg_id); return True
 
     cur_uid = c4["turn_order"][c4["current_turn"]]
-    if str(sender_id) != cur_uid:
+    if sender_id != cur_uid:
         cur_name = c4["players"][cur_uid]["name"]
         _send(gid, f"It is {cur_name}'s turn.", reply_to_id=msg_id); return True
 
-    sym = c4["players"][str(sender_id)]["symbol"]
+    sym = c4["players"][sender_id]["symbol"]
     row, _ = _c4_drop(c4["board"], col_idx, sym)
     if row is None:
         _send(gid, "That column is full. Choose another.", reply_to_id=msg_id); return True
@@ -461,7 +461,7 @@ def c4_column_move(gid, session, sender_id, sender_name, col_raw, msg_id, enable
     # Check win
     if _c4_check_winner(c4["board"], sym):
         board_text = _c4_board_text(c4["board"])
-        opp_id = next((p for p in c4["turn_order"] if p != str(sender_id) and p != "AI"), None)
+        opp_id = next((p for p in c4["turn_order"] if p != sender_id and p != "AI"), None)
         if opp_id:
             # PvP win
             opp_name = c4["players"][opp_id]["name"]
@@ -540,7 +540,7 @@ def c4_pvpbet(gid, session, sender_id, sender_name, parts, msg_id):
     c4 = session["c4"]
     if session["active_game"] != "connect4":
         _send(gid, "No active Connect Four game.", reply_to_id=msg_id); return
-    if str(sender_id) not in c4["players"] or "AI" in c4["players"]:
+    if sender_id not in c4["players"] or "AI" in c4["players"]:
         _send(gid, "💡 #pvpbet is for PvP players only.", reply_to_id=msg_id); return
     if c4["pvp_bet_locked"]:
         _send(gid, "Betting is locked — the game has already started!", reply_to_id=msg_id); return
@@ -587,7 +587,7 @@ def c4_spectator_bet(gid, session, sender_id, sender_name, parts, message, msg_i
     c4 = session["c4"]
     if session["active_game"] != "connect4":
         _send(gid, "No active Connect Four game to bet on.", reply_to_id=msg_id); return
-    if str(sender_id) in c4["players"]:
+    if sender_id in c4["players"]:
         _send(gid, "💡 As a player, use #pvpbet to bet on yourself.", reply_to_id=msg_id); return
     if len(c4["players"]) < 2:
         _send(gid, "Wait for both players to join before betting.", reply_to_id=msg_id); return
@@ -825,8 +825,8 @@ def ttt_start(gid, session, sender_id, sender_name, difficulty, msg_id, enabled)
     session["last_move_time"] = time.time()
     ttt = _fresh_ttt()
     ttt["board"] = _ttt_init_board()
-    ttt["players"][str(sender_id)] = {"symbol": TTT_X, "name": sender_name}
-    ttt["turn_order"] = [str(sender_id)]
+    ttt["players"][sender_id] = TTT_X
+    ttt["turn_order"] = [sender_id]
     ttt["current_turn"] = 0
     # TTT AI is always "impossible" (perfect minimax), but accept the arg for UX
     ttt["ai_difficulty"] = "impossible"
@@ -850,15 +850,15 @@ def ttt_join(gid, session, sender_id, sender_name, msg_id, enabled):
     ttt = session["ttt"]
     if session["active_game"] != "tictactoe":
         _send(gid, "No active Tic-Tac-Toe game. Use #start ttt to begin.", reply_to_id=msg_id); return
-    if str(sender_id) in ttt["players"]:
+    if sender_id in ttt["players"]:
         _send(gid, "You are already in this game.", reply_to_id=msg_id); return
     if len(ttt["players"]) >= 2:
         _send(gid, "The game is already full.", reply_to_id=msg_id); return
-    ttt["players"][str(sender_id)] = {"symbol": TTT_O, "name": sender_name}
-    ttt["turn_order"].append(str(sender_id))
+    ttt["players"][sender_id] = TTT_O
+    ttt["turn_order"].append(sender_id)
     session["last_move_time"] = time.time()
     p1_id = ttt["turn_order"][0]
-    p1_name = ttt["players"][p1_id]["name"] if p1_id in ttt["players"] else _name(p1_id)
+    p1_name = _name(p1_id)
     _send(
         gid,
         f"⭕ {sender_name} joined as ⭕!\n"
@@ -878,11 +878,11 @@ def ttt_addai(gid, session, sender_id, sender_name, msg_id, enabled):
         _send(gid, "No active Tic-Tac-Toe game. Use #start ttt first.", reply_to_id=msg_id); return
     if len(ttt["players"]) >= 2:
         _send(gid, "The game already has a second player.", reply_to_id=msg_id); return
-    ttt["players"]["AI"] = {"symbol": TTT_O, "name": "AI"}
+    ttt["players"]["AI"] = TTT_O
     ttt["turn_order"].append("AI")
     session["last_move_time"] = time.time()
     p1_id = ttt["turn_order"][0]
-    p1_name = ttt["players"][p1_id]["name"] if p1_id in ttt["players"] else _name(p1_id)
+    p1_name = _name(p1_id)
     _send(
         gid,
         f"🤖 AI joined as ⭕ (Perfect AI — impossible to beat).\n"
@@ -915,8 +915,8 @@ def ttt_move(gid, session, sender_id, sender_name, col_letter, row_number, msg_i
         _send(gid, "Waiting for a second player — use #join or #addai.", reply_to_id=msg_id); return
 
     cur_uid = ttt["turn_order"][ttt["current_turn"]]
-    if str(sender_id) != cur_uid:
-        cur_name = ttt["players"][cur_uid]["name"] if cur_uid in ttt["players"] else _name(cur_uid)
+    if sender_id != cur_uid:
+        cur_name = _name(cur_uid) if cur_uid != "AI" else "AI"
         _send(gid, f"It is {cur_name}'s turn.", reply_to_id=msg_id); return
 
     r, c = _ttt_coord_to_rc(col_letter, row_number)
@@ -925,7 +925,7 @@ def ttt_move(gid, session, sender_id, sender_name, col_letter, row_number, msg_i
     if ttt["board"][r][c] != TTT_EMPTY:
         _send(gid, f"Cell {col_letter}{row_number} is already taken. Choose another.", reply_to_id=msg_id); return
 
-    sym = ttt["players"][str(sender_id)]["symbol"]
+    sym = ttt["players"][sender_id]
     ttt["board"][r][c] = sym
     session["last_move_time"] = time.time()
 
@@ -961,16 +961,16 @@ def ttt_move(gid, session, sender_id, sender_name, col_letter, row_number, msg_i
             _ttt_reset(session); return
         ttt["current_turn"] = 0
         p1_id = ttt["turn_order"][0]
-        p1_name = ttt["players"][p1_id]["name"] if p1_id in ttt["players"] else _name(p1_id)
+        p1_name = _name(p1_id)
         _send(gid, f"🤖 AI plays {ai_coord}.\nYour turn, {p1_name}!\n\n{board_text}", reply_to_id=msg_id)
         return
 
-    next_name = ttt["players"][next_uid]["name"] if next_uid in ttt["players"] else _name(next_uid)
+    next_name = _name(next_uid)
     board_text = _ttt_board_text(ttt["board"])
     _send(
         gid,
         f"{sender_name} played {col_letter}{row_number}.\n"
-        f"It is now {next_name}'s turn ({ttt['players'][next_uid]['symbol']}).\n\n{board_text}",
+        f"It is now {next_name}'s turn ({ttt['players'][next_uid]}).\n\n{board_text}",
         reply_to_id=msg_id,
     )
 
@@ -1155,603 +1155,6 @@ def check_timeout(gid, session):
     return True
 
 
-
-
-# =============================================================================
-# ┌─────────────────────────────────────────────────────────────────────────┐
-# │  UNO                                                                    │
-# └─────────────────────────────────────────────────────────────────────────┘
-#
-# Played via DM — each player receives their hand privately.
-# Group chat is used for game announcements and status only.
-#
-# State dict (stored in _uno_sessions[gid]):
-#   state       : "lobby" | "playing" | "done"
-#   host        : uid of the player who ran #start uno
-#   players     : [uid, uid, ...]  (join order; also turn order)
-#   names       : {uid: display_name}
-#   hands       : {uid: [card, ...]}
-#   deck        : [card, ...]
-#   discard     : [card, ...]  (last element is top card)
-#   current     : index into players list (whose turn it is)
-#   direction   : 1 (clockwise) | -1 (counter-clockwise; set by Reverse)
-#   draw_pending: int — how many cards next player must draw (stacked +2/+4)
-#   must_draw   : bool — current player drew and may pass
-#   wild_color  : str | None — colour chosen after Wild/Wild+4
-#   dm_since    : {uid: last_dm_id}  — per-player DM cursor
-#   idle_since  : float — time of last action (for idle-kick)
-#
-# Cards are strings: "R5", "B+2", "GS", "YR", "W", "W+4"
-# Colours: R(ed) G(reen) B(lue) Y(ellow)
-# Values : 0-9, +2(draw two), S(skip), R(reverse), W(wild), W+4(wild draw four)
-# =============================================================================
-
-UNO_COLOURS  = ["R", "G", "B", "Y"]
-UNO_NUMBERS  = [str(n) for n in range(10)]
-UNO_SPECIALS = ["+2", "S", "R"]
-UNO_WILD     = ["W", "W+4"]
-
-_COLOUR_NAMES = {"R": "Red", "G": "Green", "B": "Blue", "Y": "Yellow"}
-_COLOUR_EMOJI = {"R": "🔴", "G": "🟢", "B": "🔵", "Y": "🟡"}
-_WILD_EMOJI   = "⬛"
-
-UNO_MIN_PLAYERS  = 2
-UNO_MAX_PLAYERS  = 8
-UNO_HAND_SIZE    = 7
-UNO_IDLE_SECONDS = 120   # kick current player after 2 min of inactivity
-
-
-def _uno_make_deck():
-    """Build and shuffle a standard 108-card UNO deck."""
-    deck = []
-    for colour in UNO_COLOURS:
-        deck.append(f"{colour}0")                  # one 0 per colour
-        for val in UNO_NUMBERS[1:] + UNO_SPECIALS:
-            deck.append(f"{colour}{val}")           # two of each 1-9/+2/S/R
-            deck.append(f"{colour}{val}")
-    for _ in range(4):
-        deck.append("W")
-        deck.append("W+4")
-    random.shuffle(deck)
-    return deck
-
-
-def _uno_card_label(card):
-    """Human-readable card name, e.g. 'Red 5', 'Blue +2', 'Wild', 'Wild +4'."""
-    if card == "W":
-        return "Wild"
-    if card == "W+4":
-        return "Wild +4"
-    colour = _COLOUR_NAMES.get(card[0], card[0])
-    val    = card[1:]
-    label_map = {"+2": "+2", "S": "Skip", "R": "Reverse"}
-    return f"{colour} {label_map.get(val, val)}"
-
-
-def _uno_card_emoji(card, wild_color=None):
-    """Emoji prefix for a card."""
-    if card.startswith("W"):
-        if wild_color:
-            return _COLOUR_EMOJI.get(wild_color, _WILD_EMOJI)
-        return _WILD_EMOJI
-    return _COLOUR_EMOJI.get(card[0], "❓")
-
-
-def _uno_hand_text(hand):
-    """Format a player's hand as a numbered list for DM display."""
-    lines = []
-    for i, card in enumerate(hand, 1):
-        emoji = _uno_card_emoji(card)
-        lines.append(f"  {i}. {emoji} {_uno_card_label(card)}")
-    return "\n".join(lines)
-
-
-def _uno_top_card_text(state):
-    top  = state["discard"][-1]
-    wc   = state.get("wild_color")
-    emoji = _uno_card_emoji(top, wc)
-    label = _uno_card_label(top)
-    if top.startswith("W") and wc:
-        colour_name = _COLOUR_NAMES.get(wc, wc)
-        return f"{emoji} {label} → {colour_name}"
-    return f"{emoji} {label}"
-
-
-def _uno_draw_cards(state, n):
-    """Draw n cards from the deck, reshuffling the discard pile if needed."""
-    drawn = []
-    for _ in range(n):
-        if not state["deck"]:
-            # Reshuffle discard (keep top card)
-            top = state["discard"].pop()
-            state["deck"] = state["discard"][:]
-            random.shuffle(state["deck"])
-            state["discard"] = [top]
-        if state["deck"]:
-            drawn.append(state["deck"].pop())
-    return drawn
-
-
-def _uno_can_play(card, top, wild_color):
-    """Return True if card can be played on top of the discard."""
-    if card.startswith("W"):
-        return True
-    top_colour = wild_color if top.startswith("W") else top[0]
-    top_val    = top[1:] if not top.startswith("W") else ""
-    card_colour = card[0]
-    card_val    = card[1:]
-    return card_colour == top_colour or card_val == top_val
-
-
-def _uno_next_idx(state, skip=False):
-    """Return the index of the next player, respecting direction."""
-    n    = len(state["players"])
-    step = state["direction"]
-    nxt  = (state["current"] + step) % n
-    if skip:
-        nxt = (nxt + step) % n
-    return nxt
-
-
-def _uno_announce_turn(gid, state, sg, sdm):
-    """Send group turn prompt and DM hand to current player."""
-    uid  = state["players"][state["current"]]
-    name = state["names"].get(uid, uid)
-    top  = _uno_top_card_text(state)
-    hand = state["hands"].get(uid, [])
-    dp   = state.get("draw_pending", 0)
-
-    # Group announcement
-    lines = [f"🃏 It's {name}'s turn!",
-             f"Top card: {top}",
-             f"Cards in hand: {len(hand)}"]
-    if dp:
-        lines.append(f"⚠️ Must draw {dp} cards (or stack a matching card).")
-    sg(gid, "\n".join(lines))
-
-    # DM the player their hand
-    dm_lines = [f"🃏 Your turn! Top card: {top}"]
-    if dp:
-        dm_lines.append(f"⚠️ You must draw {dp} cards (or play a matching +card to stack).")
-    dm_lines.append(f"Your hand ({len(hand)} cards):")
-    dm_lines.append(_uno_hand_text(hand))
-    dm_lines.append("")
-    dm_lines.append("Commands: #play <number>  |  #play <number> <colour>  |  #draw  |  #hand  |  #quit")
-    sdm(uid, "\n".join(dm_lines))
-
-    state["idle_since"] = time.time()
-
-
-# ── Public API ─────────────────────────────────────────────────────────────
-
-def uno_help_text():
-    return (
-        "🃏 *UNO — How to Play*\n"
-        "\n"
-        "UNO is played via DM — you receive your hand privately.\n"
-        "\n"
-        "*Group commands:*\n"
-        "• #start uno        — Open a lobby (you are the host)\n"
-        "• #join             — Join the lobby\n"
-        "• #start uno go     — Host starts the game (min 2 players)\n"
-        "• #status           — Show current game state\n"
-        "• #quit             — Leave the game\n"
-        "\n"
-        "*DM commands (sent to the bot privately):*\n"
-        "• #hand             — Show your current hand\n"
-        "• #play <N>         — Play card number N from your hand\n"
-        "• #play <N> <color> — Play a Wild card and choose a colour\n"
-        "                      Colours: red, green, blue, yellow\n"
-        "• #draw             — Draw a card (or draw pending +2/+4 cards)\n"
-        "• #pass             — Pass after drawing (if no playable card)\n"
-        "• #quit             — Leave the game\n"
-        "\n"
-        "*Scoring:* First player to empty their hand wins.\n"
-        "Players are kicked after 2 minutes of inactivity.\n"
-        "If only 1 player remains, they win automatically."
-    )
-
-
-def uno_start(gid, group_name, host_id, host_name, enabled, sg, sdm):
-    """Open a UNO lobby. Returns the new state dict, or None on failure."""
-    if not enabled:
-        sg(gid, "🃏 UNO is currently disabled. Ask an admin to enable it with #state uno true.")
-        return None
-    state = {
-        "state":        "lobby",
-        "host":         str(host_id),
-        "players":      [str(host_id)],
-        "names":        {str(host_id): host_name},
-        "hands":        {},
-        "deck":         [],
-        "discard":      [],
-        "current":      0,
-        "direction":    1,
-        "draw_pending": 0,
-        "must_draw":    False,
-        "wild_color":   None,
-        "dm_since":     {},
-        "idle_since":   time.time(),
-    }
-    sg(gid,
-       f"🃏 {host_name} opened a UNO lobby!\n"
-       f"Type #join to join, then {host_name} can type #start uno go when ready.\n"
-       f"({UNO_MIN_PLAYERS}–{UNO_MAX_PLAYERS} players)")
-    sdm(host_id,
-        f"You opened a UNO lobby in {group_name}.\n"
-        f"Wait for others to #join, then type #start uno go in the group to begin.")
-    return state
-
-
-def uno_join(gid, state, uid, name, sg, sdm):
-    """Add a player to the lobby."""
-    uid = str(uid)
-    if uid in state["players"]:
-        sg(gid, f"🃏 {name}, you're already in the lobby!")
-        return
-    if len(state["players"]) >= UNO_MAX_PLAYERS:
-        sg(gid, f"🃏 The lobby is full ({UNO_MAX_PLAYERS} players max).")
-        return
-    state["players"].append(uid)
-    state["names"][uid] = name
-    count = len(state["players"])
-    names_list = ", ".join(state["names"][p] for p in state["players"])
-    sg(gid,
-       f"🃏 {name} joined! ({count}/{UNO_MAX_PLAYERS} players: {names_list})\n"
-       f"Host {state['names'][state['host']]}: type #start uno go to begin.")
-    sdm(uid, f"You joined the UNO lobby. Wait for the host to start the game.")
-
-
-def uno_begin(gid, state, host_id, sg, sdm):
-    """Deal cards and start the game. Only the host can call this."""
-    if str(host_id) != state["host"]:
-        sg(gid, "🃏 Only the host can start the game.")
-        return
-    if len(state["players"]) < UNO_MIN_PLAYERS:
-        sg(gid, f"🃏 Need at least {UNO_MIN_PLAYERS} players to start. Currently: {len(state['players'])}.")
-        return
-
-    deck = _uno_make_deck()
-    hands = {}
-    for uid in state["players"]:
-        hands[uid] = [deck.pop() for _ in range(UNO_HAND_SIZE)]
-
-    # First discard: skip Wilds for a clean start
-    while True:
-        top = deck.pop()
-        if not top.startswith("W"):
-            break
-        deck.insert(0, top)   # put it back at the bottom
-
-    state["deck"]         = deck
-    state["hands"]        = hands
-    state["discard"]      = [top]
-    state["state"]        = "playing"
-    state["current"]      = 0
-    state["direction"]    = 1
-    state["draw_pending"] = 0
-    state["must_draw"]    = False
-    state["wild_color"]   = None
-    state["idle_since"]   = time.time()
-
-    # Handle action first card
-    _uno_apply_start_card(gid, state, top, sg)
-
-    names_list = ", ".join(state["names"][p] for p in state["players"])
-    sg(gid,
-       f"🃏 UNO starts! Players: {names_list}\n"
-       f"Top card: {_uno_top_card_text(state)}\n"
-       f"Check your DMs for your hand!")
-
-    # DM each player their hand
-    for uid in state["players"]:
-        hand_text = _uno_hand_text(state["hands"][uid])
-        sdm(uid,
-            f"🃏 UNO has started!\n"
-            f"Your hand ({UNO_HAND_SIZE} cards):\n{hand_text}\n\n"
-            f"Top card: {_uno_top_card_text(state)}\n"
-            f"Commands: #play <number> | #draw | #hand | #quit")
-
-    _uno_announce_turn(gid, state, sg, sdm)
-
-
-def _uno_apply_start_card(gid, state, card, sg):
-    """Apply the effect of the first discard card."""
-    if card.endswith("S"):
-        state["current"] = _uno_next_idx(state)
-    elif card.endswith("R"):
-        state["direction"] *= -1
-        if len(state["players"]) == 2:
-            state["current"] = _uno_next_idx(state)
-    elif card.endswith("+2"):
-        state["draw_pending"] += 2
-
-
-def uno_play_card(gid, state, uid, card_text, sg, sdm):
-    """
-    Handle #play <N> [colour] from DM.
-    card_text: e.g. "3" or "7 red" or "2 blue"
-    """
-    uid = str(uid)
-    if uid != state["players"][state["current"]]:
-        sdm(uid, "It's not your turn.")
-        return
-
-    parts      = card_text.strip().split()
-    card_input = parts[0]
-    colour_arg = parts[1].upper()[0] if len(parts) > 1 else None
-
-    hand = state["hands"].get(uid, [])
-
-    # Parse card index
-    try:
-        idx = int(card_input) - 1
-        if idx < 0 or idx >= len(hand):
-            raise ValueError
-    except ValueError:
-        sdm(uid, f"Invalid card number. You have {len(hand)} cards. Use #hand to see them.")
-        return
-
-    card = hand[idx]
-    top  = state["discard"][-1]
-    wc   = state.get("wild_color")
-    dp   = state.get("draw_pending", 0)
-
-    # If there are pending draw cards, only allow stacking the same type
-    if dp > 0:
-        if card == "+2" or (card.endswith("+2") and top.endswith("+2")):
-            pass  # stacking +2
-        elif card == "W+4" and top == "W+4":
-            pass  # stacking +4
-        elif card == "W+4":
-            pass  # +4 can always stack on +2
-        else:
-            sdm(uid, f"You must draw {dp} cards (#draw) or stack a +2/+4 card.")
-            return
-
-    if not _uno_can_play(card, top, wc):
-        sdm(uid, f"You can't play {_uno_card_label(card)} on {_uno_top_card_text(state)}.")
-        return
-
-    # Wild colour required
-    if card.startswith("W"):
-        colour_map = {"R": "R", "G": "G", "B": "B", "Y": "Y",
-                      "RED": "R", "GREEN": "G", "BLUE": "B", "YELLOW": "Y"}
-        if colour_arg and colour_arg in colour_map:
-            chosen_colour = colour_map[colour_arg]
-        elif len(parts) > 1:
-            # Try full word
-            word = parts[1].upper()
-            chosen_colour = colour_map.get(word)
-            if not chosen_colour:
-                sdm(uid, "Choose a colour: #play <N> red/green/blue/yellow")
-                return
-        else:
-            sdm(uid, "You played a Wild — choose a colour: #play <N> red/green/blue/yellow")
-            return
-        state["wild_color"] = chosen_colour
-    else:
-        state["wild_color"] = None
-
-    # Remove from hand and place on discard
-    hand.pop(idx)
-    state["discard"].append(card)
-    state["idle_since"] = time.time()
-
-    name = state["names"].get(uid, uid)
-
-    # UNO call check (1 card left)
-    uno_alert = f" — {name} has UNO! 🃏" if len(hand) == 1 else ""
-
-    # Check win
-    if len(hand) == 0:
-        sg(gid, f"🎉 {name} played {_uno_card_emoji(card, state.get('wild_color'))} "
-               f"{_uno_card_label(card)} and WINS UNO! 🏆")
-        state["state"] = "done"
-        return
-
-    sg(gid, f"🃏 {name} played {_uno_card_emoji(card, state.get('wild_color'))} "
-            f"{_uno_card_label(card)}{uno_alert}")
-
-    # Apply card effects
-    _uno_apply_card(gid, state, card, uid, sg, sdm)
-
-    # Announce next turn if game still going
-    if state["state"] == "playing":
-        _uno_announce_turn(gid, state, sg, sdm)
-
-
-def _uno_apply_card(gid, state, card, player_uid, sg, sdm):
-    """Apply card effect and advance turn."""
-    n = len(state["players"])
-
-    if card.endswith("S"):
-        # Skip next player
-        skipped_idx  = _uno_next_idx(state)
-        skipped_name = state["names"].get(state["players"][skipped_idx], "?")
-        sg(gid, f"⛔ {skipped_name} is skipped!")
-        state["current"] = _uno_next_idx(state, skip=True)
-        state["draw_pending"] = 0
-
-    elif card.endswith("R"):
-        state["direction"] *= -1
-        dir_word = "clockwise" if state["direction"] == 1 else "counter-clockwise"
-        sg(gid, f"🔄 Direction reversed — now {dir_word}!")
-        if n == 2:
-            # In 2-player, Reverse acts like Skip
-            state["current"] = _uno_next_idx(state)
-        else:
-            state["current"] = _uno_next_idx(state)
-        state["draw_pending"] = 0
-
-    elif card.endswith("+2"):
-        state["draw_pending"] += 2
-        state["current"] = _uno_next_idx(state)
-
-    elif card == "W+4":
-        state["draw_pending"] += 4
-        state["current"] = _uno_next_idx(state)
-        colour_name = _COLOUR_NAMES.get(state.get("wild_color", ""), "?")
-        sg(gid, f"🌈 Wild +4! Next player must draw {state['draw_pending']} cards! Colour: {colour_name}")
-
-    elif card == "W":
-        colour_name = _COLOUR_NAMES.get(state.get("wild_color", ""), "?")
-        sg(gid, f"🌈 Wild! Colour changed to {colour_name}.")
-        state["current"] = _uno_next_idx(state)
-        state["draw_pending"] = 0
-
-    else:
-        state["current"] = _uno_next_idx(state)
-        state["draw_pending"] = 0
-
-    state["must_draw"] = False
-
-
-def uno_draw(gid, state, uid, sg, sdm):
-    """Handle #draw from DM."""
-    uid = str(uid)
-    if uid != state["players"][state["current"]]:
-        sdm(uid, "It's not your turn.")
-        return
-
-    dp = state.get("draw_pending", 0)
-    n  = max(dp, 1)
-    drawn = _uno_draw_cards(state, n)
-    state["hands"][uid].extend(drawn)
-    state["draw_pending"] = 0
-    state["must_draw"]    = True
-    state["idle_since"]   = time.time()
-
-    name = state["names"].get(uid, uid)
-    if dp:
-        sg(gid, f"📥 {name} drew {n} cards.")
-    else:
-        sg(gid, f"📥 {name} drew a card.")
-
-    # Show the drawn cards via DM
-    drawn_labels = ", ".join(_uno_card_label(c) for c in drawn)
-    sdm(uid, f"You drew: {drawn_labels}\n"
-             f"If you can play one, use #play <N>. Otherwise #pass.")
-
-
-def uno_pass(gid, state, uid, sg, sdm):
-    """Handle #pass from DM (only valid after drawing)."""
-    uid = str(uid)
-    if uid != state["players"][state["current"]]:
-        sdm(uid, "It's not your turn.")
-        return
-    if not state.get("must_draw"):
-        sdm(uid, "You must draw a card first (#draw) before you can pass.")
-        return
-
-    name = state["names"].get(uid, uid)
-    state["current"]   = _uno_next_idx(state)
-    state["must_draw"] = False
-    state["idle_since"] = time.time()
-    sg(gid, f"➡️ {name} passed.")
-    _uno_announce_turn(gid, state, sg, sdm)
-
-
-def uno_show_hand(state, uid, sdm):
-    """DM the player their current hand."""
-    uid  = str(uid)
-    hand = state["hands"].get(uid, [])
-    if not hand:
-        sdm(uid, "Your hand is empty.")
-        return
-    top  = _uno_top_card_text(state)
-    sdm(uid,
-        f"🃏 Your hand ({len(hand)} cards):\n"
-        f"{_uno_hand_text(hand)}\n\n"
-        f"Top card: {top}")
-
-
-def uno_status(gid, state, sg):
-    """Post game status to group."""
-    if state["state"] == "lobby":
-        names = ", ".join(state["names"][p] for p in state["players"])
-        sg(gid,
-           f"🃏 UNO Lobby ({len(state['players'])}/{UNO_MAX_PLAYERS} players): {names}\n"
-           f"Host: {state['names'].get(state['host'], '?')} — use #start uno go to begin.")
-        return
-
-    cur_uid  = state["players"][state["current"]]
-    cur_name = state["names"].get(cur_uid, "?")
-    dir_word = "➡️" if state["direction"] == 1 else "⬅️"
-    lines    = [f"🃏 UNO Status  {dir_word}",
-                f"Top card: {_uno_top_card_text(state)}",
-                f"Current turn: {cur_name}"]
-    if state.get("draw_pending"):
-        lines.append(f"⚠️ {cur_name} must draw {state['draw_pending']} cards.")
-    lines.append("")
-    lines.append("Players & hand sizes:")
-    for i, uid in enumerate(state["players"]):
-        name  = state["names"].get(uid, uid)
-        count = len(state["hands"].get(uid, []))
-        marker = " ← YOU" if i == state["current"] else ""
-        lines.append(f"  {name}: {count} card(s){marker}")
-    sg(gid, "\n".join(lines))
-
-
-def uno_quit_player(gid, state, uid, name, sg, sdm):
-    """
-    Remove a player from the game. If only 1 remains, that player wins.
-    Returns True if the game ended, False if it continues.
-    """
-    uid = str(uid)
-    if uid not in state["players"]:
-        return False
-
-    was_current = (state["players"].index(uid) == state["current"])
-    state["players"].remove(uid)
-    state["names"].pop(uid, None)
-    state["hands"].pop(uid, None)
-
-    sg(gid, f"🚪 {name} left UNO.")
-
-    if len(state["players"]) < 2:
-        if state["players"]:
-            winner_uid  = state["players"][0]
-            winner_name = state["names"].get(winner_uid, winner_uid)
-            sg(gid, f"🏆 {winner_name} wins UNO by default (all others left)!")
-        else:
-            sg(gid, "🃏 UNO ended — everyone left.")
-        state["state"] = "done"
-        return True
-
-    # Adjust current index after removal
-    if was_current:
-        n = len(state["players"])
-        state["current"] = state["current"] % n
-        _uno_announce_turn(gid, state, sg, sdm)
-    elif state["players"].index(state["players"][state["current"]]) != state["current"]:
-        # Recompute index if the current player shifted
-        cur_uid = state["players"][state["current"] % len(state["players"])]
-        state["current"] = state["players"].index(cur_uid)
-
-    return False
-
-
-def uno_check_idle(gid, state, sg, sdm):
-    """
-    Kick the current player if they've been idle too long.
-    Returns True if the game ended, False if it continues.
-    """
-    if state.get("state") != "playing":
-        return False
-    idle_since = state.get("idle_since")
-    if idle_since is None:
-        return False
-    if time.time() - idle_since < UNO_IDLE_SECONDS:
-        return False
-
-    uid  = state["players"][state["current"]]
-    name = state["names"].get(uid, uid)
-    sg(gid, f"⏰ {name} was idle too long and has been removed from UNO.")
-    sdm(uid, f"You were removed from the UNO game in the group due to inactivity.")
-    return uno_quit_player(gid, state, uid, name, sg, sdm)
-
-
 # =============================================================================
 # LEADERBOARD (pass-through — data lives in main file's points system)
 # =============================================================================
@@ -1763,3 +1166,570 @@ def leaderboard_text(entries, top_n):
     for i, e in enumerate(entries):
         lines.append(f"{medals[i]} {e.get('name','?')}: {e.get('points',0):,} pts")
     return "\n".join(lines)
+
+
+# =============================================================================
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │  UNO  —  DM-based multiplayer card game                                 │
+# └─────────────────────────────────────────────────────────────────────────┘
+# State dict keys used by the main bot:
+#   state["state"]    : "lobby" | "playing" | "done"
+#   state["players"]  : list of uid strings (turn order)
+#   state["current"]  : index into players for whose turn it is
+#   state["names"]    : {uid: display_name}
+#   state["hands"]    : {uid: [card, ...]}
+#   state["deck"]     : [card, ...]  remaining draw pile
+#   state["discard"]  : [card, ...]  top is [-1]
+#   state["host"]     : uid of the player who opened the lobby
+#   state["group"]    : group name string
+#   state["drawn"]    : bool — current player drew this turn (may pass)
+#   state["direction"]: 1 (clockwise) or -1 (counter-clockwise)
+#   state["last_move"]: float timestamp of last action (for idle kick)
+#   state["skip_next"]: bool — next player's turn is skipped
+#   state["color"]    : active color (after wild is played)
+# =============================================================================
+
+# ── Card definitions ──────────────────────────────────────────────────────────
+
+_UNO_COLORS  = ["Red", "Yellow", "Green", "Blue"]
+_UNO_NUMBERS = ["0","1","2","3","4","5","6","7","8","9"]
+_UNO_SPECIALS = ["Skip", "Reverse", "Draw Two"]
+_UNO_WILDS   = ["Wild", "Wild Draw Four"]
+
+_COLOR_EMOJI = {
+    "Red":    "🔴",
+    "Yellow": "🟡",
+    "Green":  "🟢",
+    "Blue":   "🔵",
+    "Wild":   "🃏",
+}
+
+UNO_IDLE_SECONDS = 120   # kick player after 2 minutes of inactivity
+UNO_MAX_PLAYERS  = 10
+UNO_MIN_PLAYERS  = 2
+UNO_HAND_SIZE    = 7
+
+
+def _uno_make_deck():
+    deck = []
+    for color in _UNO_COLORS:
+        deck.append(f"{color} 0")
+        for num in _UNO_NUMBERS[1:]:
+            deck.append(f"{color} {num}")
+            deck.append(f"{color} {num}")
+        for sp in _UNO_SPECIALS:
+            deck.append(f"{color} {sp}")
+            deck.append(f"{color} {sp}")
+    for _ in range(4):
+        deck.append("Wild")
+        deck.append("Wild Draw Four")
+    random.shuffle(deck)
+    return deck
+
+
+def _uno_card_emoji(card):
+    """Return a short emoji+text representation of a card."""
+    if card in ("Wild", "Wild Draw Four"):
+        return f"🃏 {card}"
+    parts = card.split(" ", 1)
+    color = parts[0]
+    face  = parts[1] if len(parts) > 1 else ""
+    return f"{_COLOR_EMOJI.get(color, '')} {card}"
+
+
+def _uno_hand_text(hand):
+    """Format a player's hand as a numbered list."""
+    lines = ["Your hand:"]
+    for i, card in enumerate(hand, 1):
+        lines.append(f"  {i}. {_uno_card_emoji(card)}")
+    return "\n".join(lines)
+
+
+def _uno_top_card_text(state):
+    top   = state["discard"][-1]
+    color = state["color"]
+    base  = f"Top card: {_uno_card_emoji(top)}"
+    if top in ("Wild", "Wild Draw Four"):
+        base += f"  (active color: {_COLOR_EMOJI.get(color,'')} {color})"
+    return base
+
+
+def _uno_can_play(card, top, active_color):
+    """Return True if card can legally be played on top/active_color."""
+    if card in ("Wild", "Wild Draw Four"):
+        return True
+    parts = card.split(" ", 1)
+    card_color = parts[0]
+    card_face  = parts[1] if len(parts) > 1 else ""
+    if card_color == active_color:
+        return True
+    top_parts = top.split(" ", 1) if top not in ("Wild","Wild Draw Four") else [None, None]
+    top_face = top_parts[1] if top not in ("Wild","Wild Draw Four") else None
+    if top_face and card_face == top_face:
+        return True
+    return False
+
+
+def _uno_active_color(state):
+    top = state["discard"][-1]
+    if top not in ("Wild", "Wild Draw Four"):
+        return top.split(" ", 1)[0]
+    return state.get("color", "Red")
+
+
+def _uno_draw_cards(state, n):
+    """Draw n cards from deck, reshuffling discard if needed. Returns list."""
+    drawn = []
+    for _ in range(n):
+        if not state["deck"]:
+            # reshuffle all but top discard card
+            if len(state["discard"]) > 1:
+                top = state["discard"].pop()
+                state["deck"] = state["discard"]
+                random.shuffle(state["deck"])
+                state["discard"] = [top]
+            else:
+                break  # truly out of cards
+        if state["deck"]:
+            drawn.append(state["deck"].pop())
+    return drawn
+
+
+def _uno_next_turn(state, skip=False):
+    """Advance state["current"] by direction, optionally skipping one."""
+    n = len(state["players"])
+    steps = 2 if skip else 1
+    state["current"] = (state["current"] + state["direction"] * steps) % n
+    state["drawn"]   = False
+
+
+def _uno_announce_turn(gid, state, sdm, sg):
+    """DM the current player their hand + top card, and post whose turn it is in group."""
+    uid  = state["players"][state["current"]]
+    name = state["names"].get(uid, uid)
+    top_txt  = _uno_top_card_text(state)
+    hand_txt = _uno_hand_text(state["hands"][uid])
+    card_count_line = "  ".join(
+        f"{state['names'].get(u, u)}: {len(state['hands'][u])} card{'s' if len(state['hands'][u])!=1 else ''}"
+        for u in state["players"] if u != uid
+    )
+    dm_lines = [
+        f"━━━ Your turn! ━━━",
+        top_txt,
+        hand_txt,
+        "",
+        f"Other players: {card_count_line}" if card_count_line else "",
+        "",
+        "Commands: #play <card>  |  #draw  |  #hand  |  #pass (after drawing)  |  #quit",
+        "Example: #play Red 7   or   #play Wild (then you'll be asked for a color)",
+    ]
+    sdm(uid, "\n".join(l for l in dm_lines if l != "" or True))
+    sg(gid, f"🃏 It's {name}'s turn! ({len(state['hands'][uid])} cards)")
+    state["last_move"] = time.time()
+
+
+# ── Public API called by Porta-GMBOT ─────────────────────────────────────────
+
+def uno_help_text():
+    return (
+        "🃏 UNO — How to play:\n"
+        "#start uno   — open a lobby\n"
+        "#join        — join the lobby\n"
+        "#start uno go — host starts the game (deals cards)\n"
+        "\nIn-game (via DM from the bot):\n"
+        "#hand        — show your cards\n"
+        "#play <card> — play a card  e.g. #play Red 7  or  #play Wild\n"
+        "#draw        — draw a card\n"
+        "#pass        — pass after drawing\n"
+        "#status      — show group game status\n"
+        "#quit        — leave the game"
+    )
+
+
+def uno_start(gid, group_name, sender_id, sender_name, enabled, sg, sdm):
+    """Open a lobby. Returns the new state dict, or None on failure."""
+    if not enabled:
+        sg(gid, "🃏 UNO is currently disabled. An admin must enable it first.")
+        return None
+    state = {
+        "state":     "lobby",
+        "players":   [str(sender_id)],
+        "names":     {str(sender_id): sender_name},
+        "hands":     {},
+        "deck":      [],
+        "discard":   [],
+        "host":      str(sender_id),
+        "group":     group_name,
+        "current":   0,
+        "direction": 1,
+        "drawn":     False,
+        "color":     "Red",
+        "last_move": time.time(),
+        "skip_next": False,
+    }
+    sg(gid,
+       f"🃏 {sender_name} opened a UNO lobby!\n"
+       f"Type #join to join. Host: say #start uno go when everyone is in "
+       f"(need {UNO_MIN_PLAYERS}–{UNO_MAX_PLAYERS} players).")
+    return state
+
+
+def uno_join(gid, state, sender_id, sender_name, sg, sdm):
+    """Add a player to the lobby."""
+    uid = str(sender_id)
+    if uid in state["players"]:
+        sg(gid, f"{sender_name}, you're already in the lobby!")
+        return
+    if len(state["players"]) >= UNO_MAX_PLAYERS:
+        sg(gid, f"Sorry {sender_name}, the lobby is full ({UNO_MAX_PLAYERS} players max).")
+        return
+    state["players"].append(uid)
+    state["names"][uid] = sender_name
+    names_list = ", ".join(state["names"][u] for u in state["players"])
+    sg(gid, f"🃏 {sender_name} joined the UNO lobby! Players: {names_list}")
+
+
+def uno_begin(gid, state, sender_id, sg, sdm):
+    """Host starts the game — deal cards and flip first card."""
+    uid = str(sender_id)
+    if uid != state["host"]:
+        sg(gid, "Only the host can start the game.")
+        return
+    if len(state["players"]) < UNO_MIN_PLAYERS:
+        sg(gid, f"Need at least {UNO_MIN_PLAYERS} players to start. Currently: {len(state['players'])}.")
+        return
+
+    state["deck"]    = _uno_make_deck()
+    state["discard"] = []
+    state["hands"]   = {u: [] for u in state["players"]}
+
+    # Deal hands
+    for u in state["players"]:
+        state["hands"][u] = _uno_draw_cards(state, UNO_HAND_SIZE)
+
+    # Flip first card — skip wilds as starting card
+    first = None
+    while True:
+        card = state["deck"].pop()
+        if card not in ("Wild", "Wild Draw Four"):
+            first = card
+            break
+        state["deck"].insert(0, card)  # put wild back at bottom
+
+    state["discard"] = [first]
+    state["color"]   = first.split(" ", 1)[0]
+    state["state"]   = "playing"
+    state["current"] = 0
+    state["direction"] = 1
+    state["drawn"]   = False
+    state["last_move"] = time.time()
+
+    # Apply first-card special effects
+    skip_first = False
+    if " Skip" in first:
+        skip_first = True
+    elif " Reverse" in first:
+        state["direction"] = -1
+    elif " Draw Two" in first:
+        victim_uid = state["players"][1 % len(state["players"])]
+        drawn = _uno_draw_cards(state, 2)
+        state["hands"][victim_uid].extend(drawn)
+        skip_first = True
+
+    player_list = " → ".join(state["names"][u] for u in state["players"])
+    sg(gid,
+       f"🃏 UNO starts! Turn order: {player_list}\n"
+       f"First card: {_uno_card_emoji(first)}")
+
+    # DM each player their hand
+    for u in state["players"]:
+        hand_txt = _uno_hand_text(state["hands"][u])
+        sdm(u, f"🃏 UNO has started in {state['group']}!\n{hand_txt}\n\nWait for your turn.")
+
+    if skip_first:
+        first_name = state["names"][state["players"][0]]
+        sg(gid, f"⏭ {first_name} is skipped by the first card!")
+        _uno_next_turn(state)
+
+    _uno_announce_turn(gid, state, sdm, sg)
+
+
+def uno_show_hand(state, uid, sdm):
+    """DM the player their current hand."""
+    uid = str(uid)
+    hand = state["hands"].get(uid, [])
+    sdm(uid, _uno_hand_text(hand))
+
+
+def uno_draw(gid, state, uid, sg, sdm):
+    """Current player draws a card."""
+    uid = str(uid)
+    cur_uid = state["players"][state["current"]]
+    if uid != cur_uid:
+        sdm(uid, "It's not your turn.")
+        return
+    if state["drawn"]:
+        sdm(uid, "You already drew this turn. Use #pass to end your turn, or #play <card>.")
+        return
+
+    drawn = _uno_draw_cards(state, 1)
+    if not drawn:
+        sdm(uid, "The deck is empty — no card to draw!")
+        return
+
+    state["hands"][uid].extend(drawn)
+    state["drawn"] = True
+    state["last_move"] = time.time()
+    card = drawn[0]
+    top  = state["discard"][-1]
+    active_color = _uno_active_color(state)
+
+    if _uno_can_play(card, top, active_color):
+        sdm(uid,
+            f"You drew: {_uno_card_emoji(card)}\n"
+            f"You can play it! Use #play {card}  or  #pass to skip.")
+    else:
+        sdm(uid,
+            f"You drew: {_uno_card_emoji(card)}\n"
+            f"Can't play it. Use #pass to end your turn.")
+
+
+def uno_pass(gid, state, uid, sg, sdm):
+    """Pass after drawing."""
+    uid = str(uid)
+    cur_uid = state["players"][state["current"]]
+    if uid != cur_uid:
+        sdm(uid, "It's not your turn.")
+        return
+    if not state["drawn"]:
+        sdm(uid, "You must draw a card first (#draw) before you can pass.")
+        return
+    name = state["names"].get(uid, uid)
+    sg(gid, f"➡️ {name} passes.")
+    _uno_next_turn(state)
+    _uno_announce_turn(gid, state, sdm, sg)
+
+
+def uno_play_card(gid, state, uid, card_text, sg, sdm):
+    """Play a card, with wild color-pick handling."""
+    uid = str(uid)
+    cur_uid = state["players"][state["current"]]
+    if uid != cur_uid:
+        sdm(uid, "It's not your turn.")
+        return
+
+    hand = state["hands"][uid]
+    name = state["names"].get(uid, uid)
+
+    # ── Wild color pick in progress ───────────────────────────────────────────
+    if state.get("color_pending") and state.get("color_pending_uid") == uid:
+        chosen = card_text.strip().title()
+        if chosen not in _UNO_COLORS:
+            sdm(uid,
+                f"'{card_text}' isn't a valid color. Choose one:\n"
+                f"  #play Red\n  #play Yellow\n  #play Green\n  #play Blue")
+            return
+        state["color"] = chosen
+        state.pop("color_pending", None)
+        matched = state.pop("color_pending_card", "Wild")
+        sg(gid, f"🎨 {name} chose {_COLOR_EMOJI.get(chosen,'')} {chosen}!")
+
+        # Apply Wild Draw Four effect
+        if matched == "Wild Draw Four":
+            next_idx = (state["current"] + state["direction"]) % len(state["players"])
+            victim_uid = state["players"][next_idx]
+            drawn_cards = _uno_draw_cards(state, 4)
+            state["hands"][victim_uid].extend(drawn_cards)
+            victim_name = state["names"][victim_uid]
+            sg(gid, f"➕4️⃣ {victim_name} draws 4 cards and is skipped!")
+            sdm(victim_uid,
+                f"You were hit with Wild Draw Four! You drew 4 cards.\n"
+                f"{_uno_hand_text(state['hands'][victim_uid])}")
+            _uno_next_turn(state, skip=True)
+        else:
+            _uno_next_turn(state)
+
+        # Check win (hand was already removed before color pick prompt)
+        if len(hand) == 0:
+            _uno_handle_win(gid, state, uid, sg, sdm)
+            return
+        if len(hand) == 1:
+            sg(gid, f"🔔 UNO! {name} has one card left!")
+
+        _uno_announce_turn(gid, state, sdm, sg)
+        return
+
+    # ── Normal play ──────────────────────────────────────────────────────────
+    top          = state["discard"][-1]
+    active_color = _uno_active_color(state)
+
+    card_text_norm = card_text.strip().title()
+    matched = None
+    for c in hand:
+        if c.lower() == card_text_norm.lower():
+            matched = c
+            break
+    if matched is None:
+        for c in hand:
+            if card_text_norm.lower() in c.lower():
+                matched = c
+                break
+
+    if matched is None:
+        sdm(uid,
+            f"Card '{card_text}' not found in your hand.\n"
+            f"{_uno_hand_text(hand)}\n"
+            "Tip: type the card name exactly as shown, e.g.  #play Red 7")
+        return
+
+    if not _uno_can_play(matched, top, active_color):
+        sdm(uid,
+            f"Can't play {_uno_card_emoji(matched)} on {_uno_top_card_text(state)}.\n"
+            f"Must match color ({active_color}) or face value.")
+        return
+
+    # Remove from hand and place on discard
+    hand.remove(matched)
+    state["discard"].append(matched)
+    state["drawn"]     = False
+    state["last_move"] = time.time()
+
+    sg(gid, f"🃏 {name} played {_uno_card_emoji(matched)}!")
+
+    if len(hand) == 1:
+        sg(gid, f"🔔 UNO! {name} has one card left!")
+
+    if len(hand) == 0:
+        _uno_handle_win(gid, state, uid, sg, sdm)
+        return
+
+    # Wild — prompt for color, don't advance turn yet
+    if matched in ("Wild", "Wild Draw Four"):
+        state["color_pending"]      = True
+        state["color_pending_card"] = matched
+        state["color_pending_uid"]  = uid
+        sdm(uid,
+            f"You played {_uno_card_emoji(matched)}!\n"
+            f"Choose a color:\n"
+            f"  #play Red\n  #play Yellow\n  #play Green\n  #play Blue")
+        sg(gid, f"🎨 {name} is choosing a color...")
+        return
+
+    # Non-wild: set color and apply effects
+    state["color"] = matched.split(" ", 1)[0]
+    face  = matched.split(" ", 1)[1] if " " in matched else ""
+    skip  = False
+
+    if face == "Reverse":
+        state["direction"] *= -1
+        if len(state["players"]) == 2:
+            skip = True
+        else:
+            sg(gid, "🔄 Direction reversed!")
+
+    elif face == "Skip":
+        skip = True
+        next_idx = (state["current"] + state["direction"]) % len(state["players"])
+        skipped_name = state["names"][state["players"][next_idx]]
+        sg(gid, f"⏭ {skipped_name} is skipped!")
+
+    elif face == "Draw Two":
+        next_idx = (state["current"] + state["direction"]) % len(state["players"])
+        victim_uid = state["players"][next_idx]
+        drawn_cards = _uno_draw_cards(state, 2)
+        state["hands"][victim_uid].extend(drawn_cards)
+        victim_name = state["names"][victim_uid]
+        sg(gid, f"➕2️⃣ {victim_name} draws 2 cards and is skipped!")
+        sdm(victim_uid,
+            f"You were hit with Draw Two! Drew 2 cards.\n"
+            f"{_uno_hand_text(state['hands'][victim_uid])}")
+        skip = True
+
+    _uno_next_turn(state, skip=skip)
+    _uno_announce_turn(gid, state, sdm, sg)
+
+
+def _uno_handle_win(gid, state, uid, sg, sdm):
+    """Player played their last card — they win."""
+    name = state["names"].get(uid, uid)
+    sg(gid,
+       f"🎉 {name} played their last card and wins UNO! 🏆\n"
+       f"Thanks for playing everyone!")
+    state["state"] = "done"
+
+
+def uno_quit_player(gid, state, uid, name, sg, sdm):
+    """Remove a player from the game. Returns True if game ended."""
+    uid = str(uid)
+    if uid not in state["players"]:
+        return False
+
+    idx = state["players"].index(uid)
+    state["players"].remove(uid)
+    state["names"].pop(uid, None)
+
+    # Return hand to deck
+    hand = state["hands"].pop(uid, [])
+    state["deck"].extend(hand)
+    random.shuffle(state["deck"])
+
+    sg(gid, f"🚪 {name} left the UNO game.")
+
+    if len(state["players"]) < UNO_MIN_PLAYERS:
+        if state["players"]:
+            winner_uid  = state["players"][0]
+            winner_name = state["names"].get(winner_uid, winner_uid)
+            sg(gid, f"Not enough players to continue. {winner_name} wins by default!")
+        else:
+            sg(gid, "Everyone left — UNO game over!")
+        state["state"] = "done"
+        return True
+
+    # Fix current index if needed
+    if state["state"] == "playing":
+        n = len(state["players"])
+        if idx <= state["current"]:
+            state["current"] = max(0, state["current"] - 1)
+        state["current"] = state["current"] % n
+        _uno_announce_turn(gid, state, sdm, sg)
+
+    return False
+
+
+def uno_check_idle(gid, state, sg, sdm):
+    """Kick the current player if they've been idle too long. Returns True if game ended."""
+    if state["state"] != "playing":
+        return False
+    last = state.get("last_move", time.time())
+    if time.time() - last < UNO_IDLE_SECONDS:
+        return False
+
+    uid  = state["players"][state["current"]]
+    name = state["names"].get(uid, uid)
+    sg(gid, f"⏰ {name} took too long and is kicked from UNO!")
+    sdm(uid, "You were removed from the UNO game for inactivity.")
+    return uno_quit_player(gid, state, uid, name, sg, sdm)
+
+
+def uno_status(gid, state, sg):
+    """Post a summary of the current game state to the group."""
+    if state["state"] == "lobby":
+        players_list = ", ".join(state["names"][u] for u in state["players"])
+        sg(gid, f"🃏 UNO Lobby — Players: {players_list}\nHost: say #start uno go to begin.")
+        return
+    if state["state"] != "playing":
+        sg(gid, "No active UNO game.")
+        return
+    cur_uid  = state["players"][state["current"]]
+    cur_name = state["names"].get(cur_uid, cur_uid)
+    top_txt  = _uno_top_card_text(state)
+    counts   = "\n".join(
+        f"  {state['names'].get(u,u)}: {len(state['hands'][u])} card{'s' if len(state['hands'][u])!=1 else ''}"
+        for u in state["players"]
+    )
+    direction = "➡️ clockwise" if state["direction"] == 1 else "⬅️ counter-clockwise"
+    sg(gid,
+       f"🃏 UNO Status\n"
+       f"{top_txt}\n"
+       f"Turn: {cur_name}  |  Direction: {direction}\n"
+       f"Card counts:\n{counts}")

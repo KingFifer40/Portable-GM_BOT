@@ -10,6 +10,30 @@ import subprocess
 
 def _bootstrap_dependencies():
     required = ["requests", "ddgs"]
+    # Pillow is imported as 'PIL' but installed as 'Pillow'
+    try:
+        __import__("PIL")
+    except ImportError:
+        print("[setup] Package 'Pillow' is not installed. Attempting to install...")
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "--user", "Pillow"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            __import__("PIL")
+            print("[setup] 'Pillow' installed successfully.")
+        except Exception as e:
+            print()
+            print("  ERROR: Could not install 'Pillow' automatically.")
+            print("  Please install it manually by running:")
+            print()
+            print("      pip install Pillow")
+            print()
+            print(f"  Then run the bot again. (Error detail: {e})")
+            print()
+            input("Press Enter to exit...")
+            sys.exit(1)
     for pkg in required:
         try:
             __import__(pkg)
@@ -706,51 +730,13 @@ _ai_memory = []
 _known_names: dict = {}   # {user_id: str}
 
 
-# How often to flush _known_names to disk (every N registrations)
-_known_names_dirty_count = 0
-_KNOWN_NAMES_FLUSH_EVERY = 20   # write to disk once per 20 new/changed names
-
-_KNOWN_NAMES_FILE = os.path.join(SCRIPT_DIR_EARLY, "groups", "_known_names.json")
-
-
-def _restore_known_names():
-    """Load persisted display names from disk into _known_names on startup."""
-    global _known_names
-    try:
-        if os.path.exists(_KNOWN_NAMES_FILE):
-            with open(_KNOWN_NAMES_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                _known_names.update({str(k): v for k, v in data.items() if v})
-                print(f"[names] Restored {len(data)} display name(s) from disk.")
-    except Exception as e:
-        print(f"[names] Could not restore known names: {e}")
-
-
-def _flush_known_names():
-    """Write _known_names to disk so they survive restarts."""
-    try:
-        os.makedirs(os.path.dirname(_KNOWN_NAMES_FILE), exist_ok=True)
-        with open(_KNOWN_NAMES_FILE, "w", encoding="utf-8") as f:
-            json.dump(_known_names, f, ensure_ascii=False)
-    except Exception as e:
-        print(f"[names] Could not save known names: {e}")
-
-
 def register_name(user_id, raw_name: str):
-    """Store the sanitized display name for a user_id, persisting periodically."""
-    global _known_names_dirty_count
+    """Store the sanitized display name for a user_id."""
     if user_id is None:
         return
     cleaned = safe_name(raw_name)
     if cleaned and cleaned != "Unknown":
-        uid = str(user_id)
-        if _known_names.get(uid) != cleaned:
-            _known_names[uid] = cleaned
-            _known_names_dirty_count += 1
-            if _known_names_dirty_count >= _KNOWN_NAMES_FLUSH_EVERY:
-                _known_names_dirty_count = 0
-                threading.Thread(target=_flush_known_names, daemon=True).start()
+        _known_names[str(user_id)] = cleaned
 
 
 def resolve_display_name(user_id, raw_name: str) -> str:
@@ -1091,12 +1077,6 @@ def handle_shutdown(sig, frame):
     print("\nShutting down bot...")
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
-
-    # Persist display names so they survive the restart.
-    try:
-        _flush_known_names()
-    except Exception:
-        pass
 
     try:
         send_message(DEV_GROUP_ID, "Bot is shutting down.")
@@ -1948,8 +1928,12 @@ def gm_post(path, data=None):
 
     url = f"{BASE_URL}{path}"
     params = {"token": ACCESS_TOKEN}
+    headers = {
+        "Content-Type": "application/json",
+        "X-Access-Token": ACCESS_TOKEN,
+    }
 
-    resp = requests.post(url, params=params, json=data, timeout=10)
+    resp = requests.post(url, params=params, json=data, headers=headers, timeout=10)
     resp.raise_for_status()
     return resp.json().get("response")
 
@@ -1989,7 +1973,7 @@ def send_dm(user_id, text):
         import time as _t
         data = {
             "direct_message": {
-                "source_guid": f"uno-dm-{_t.time()}-{user_id}",
+                "source_guid": f"uno-dm-{_t.time()}-{user_id}-{random.randint(1000,9999)}",
                 "recipient_id": str(user_id),
                 "text": text,
             }
@@ -3441,10 +3425,9 @@ def check_ai_cooldown(user_id, cooldown_dict, cooldown_seconds):
     """
     Returns (allowed, seconds_remaining).
     allowed=True means the user may proceed.
-    Always coerces user_id to str so dict keys are consistent across call sites.
     """
     now = time.time()
-    last = cooldown_dict.get(str(user_id))
+    last = cooldown_dict.get(user_id)
     if last is None:
         return True, 0
     elapsed = now - last
@@ -3454,7 +3437,7 @@ def check_ai_cooldown(user_id, cooldown_dict, cooldown_seconds):
 
 
 def set_ai_cooldown(user_id, cooldown_dict):
-    cooldown_dict[str(user_id)] = time.time()
+    cooldown_dict[user_id] = time.time()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5325,7 +5308,7 @@ def handle_game_command(message):
                 if uno and uno["state"] in ("lobby", "playing"):
                     send_message(_gid, "There's already an active UNO game. Use #quit to end it first.", reply_to_id=msg_id)
                     return
-                group_name = _group_label(_gid)
+                group_name = _group_registry.get(_gid, {}).get("name", str(_gid))
                 def _sg(g, t): send_message(g, t)
                 def _sdm(u, t): send_dm(u, t)
                 state = games.uno_start(_gid, group_name, sender_id, sender_name, UNO_ENABLED, _sg, _sdm)
@@ -5346,7 +5329,7 @@ def handle_game_command(message):
         # #quit (for UNO)
         if cmd == "#quit":
             uno = _uno_sessions.get(_gid)
-            if uno and uno["state"] in ("lobby","playing") and str(sender_id) in uno["players"]:
+            if uno and uno["state"] in ("lobby","playing") and sender_id in uno["players"]:
                 def _sg(g, t): send_message(g, t)
                 def _sdm(u, t): send_dm(u, t)
                 ended = games.uno_quit_player(_gid, uno, sender_id, sender_name, _sg, _sdm)
@@ -5366,7 +5349,7 @@ def handle_game_command(message):
         # #pass (for UNO — after drawing)
         if cmd == "#pass":
             uno = _uno_sessions.get(_gid)
-            if uno and uno["state"] == "playing" and str(sender_id) in uno["players"]:
+            if uno and uno["state"] == "playing" and sender_id in uno["players"]:
                 def _sg(g, t): send_message(g, t)
                 def _sdm(u, t): send_dm(u, t)
                 games.uno_pass(_gid, uno, sender_id, _sg, _sdm)
@@ -5468,9 +5451,6 @@ def _group_poll_loop(group_id: str):
             for msg in msgs:
                 if msg.get("user_id") is None:
                     continue
-                # Register the sender's name before any command runs so that
-                # _known_names is always populated for game-engine lookups.
-                register_name(msg.get("user_id"), msg.get("name", ""))
                 handle_game_command_for(gid, rec, msg)
 
         except Exception:
@@ -5497,8 +5477,6 @@ def dev_poll_loop():
                 # Ignore bot messages
                 if msg.get("user_id") is None:
                     continue
-                # Register sender name so dev-group lookups work correctly.
-                register_name(msg.get("user_id"), msg.get("name", ""))
                 handle_dev_command(msg)
 
         except Exception:
@@ -5552,15 +5530,12 @@ def uno_dm_poll_loop():
                     uid  = str(msg.get("sender_id", ""))
                     text = (msg.get("text") or "").strip()
 
-                    # Always advance the cursor, including for bot's own outgoing DMs,
-                    # so we never re-process the same messages on the next poll.
+                    # Track last seen DM id
                     if mid and (since is None or mid > since):
                         _uno_dm_since[cur_uid] = mid
-                        since = mid   # update local var for this iteration too
 
-                    # Only process messages FROM the player (not the bot's own outgoing)
-                    sender_type = msg.get("sender_type", "user")
-                    if uid != str(cur_uid) or sender_type == "bot":
+                    # Only process messages FROM the player (not the bot's own)
+                    if uid != str(cur_uid):
                         continue
                     if not text:
                         continue
@@ -7691,11 +7666,6 @@ def main():
     )
 
     ensure_ai_directories()
-
-    # Restore persisted display names so commands that look up names by uid
-    # work immediately after a restart — before any new messages arrive.
-    _restore_known_names()
-
     global GAME_GROUP_ID, ADMIN_GROUP_ID, USE_SUBGROUP, last_dev_since_id, last_game_since_id
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)
@@ -7754,6 +7724,11 @@ def main():
         # Start just after the last existing message so we don't replay history
         rec["since_id"] = str(int(latest) + 1) if latest else "0"
         _ensure_group_thread(gid)
+        send_message(gid, "🤖 Porta-GMBOT is now online. All features are disabled by default — enable them from the dev group or control panel.")
+        send_message(
+            gid,
+            "Admins: use #state true to enable the bot, or enable individual features from the dev group.",
+        )
         print(f"[startup] Group {gid} ready.")
 
     # Keep the legacy global in sync for the control panel

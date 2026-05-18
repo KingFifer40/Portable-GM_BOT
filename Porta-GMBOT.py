@@ -127,6 +127,7 @@ import json
 import signal
 import random
 import socket
+import uuid
 
 EIGHTBALL_ANSWERS = [
     "It is certain.",
@@ -1963,21 +1964,46 @@ def send_message(group_id, text, reply_to_id=None):
 
 def send_dm(user_id, text):
     """Send a direct message to a GroupMe user via the /direct_messages endpoint."""
-    # GroupMe DMs require the bot owner's user_id as the "source" of the conversation
-    # The correct endpoint is POST /direct_messages with the other_id field.
+    # GroupMe DMs are sent as the authenticated user behind ACCESS_TOKEN.
     try:
-        import time as _t
         data = {
             "direct_message": {
-                "source_guid": f"uno-dm-{_t.time()}-{user_id}",
+                "source_guid": str(uuid.uuid4()),
                 "recipient_id": str(user_id),
                 "text": text,
             }
         }
         gm_post("/direct_messages", data)
+        return True, None
+    except requests.HTTPError as e:
+        detail = ""
+        resp = getattr(e, "response", None)
+        if resp is not None:
+            try:
+                body = resp.json()
+            except Exception:
+                body = resp.text
+            detail = f"HTTP {resp.status_code}: {body}"
+        else:
+            detail = str(e)
+        print(f"[DM] Error sending DM to {user_id}: {detail}")
+        return False, detail
     except Exception:
         print(f"[DM] Error sending DM to {user_id}:")
         traceback.print_exc()
+        return False, "unexpected DM send error"
+
+
+def send_uno_dm_or_warn(group_id, user_id, text):
+    """Send an UNO DM and warn the group if GroupMe rejects it."""
+    ok, err = send_dm(user_id, text)
+    if not ok:
+        send_message(
+            group_id,
+            f"⚠️ I couldn't DM user {user_id}. UNO needs DMs for private hands. "
+            f"GroupMe said: {err}",
+        )
+    return ok
 
 
 def fetch_dm_messages(other_id, since_id=None):
@@ -1986,7 +2012,7 @@ def fetch_dm_messages(other_id, since_id=None):
     Returns a list of message dicts (newest last), or [].
     """
     try:
-        params = {"other_id": str(other_id)}
+        params = {"other_user_id": str(other_id)}
         if since_id:
             params["since_id"] = str(since_id)
         resp = gm_get("/direct_messages", params=params)
@@ -5297,7 +5323,7 @@ def handle_game_command(message):
                     send_message(_gid, "No UNO lobby to start. Use #start uno first.", reply_to_id=msg_id)
                     return
                 def _sg(g, t): send_message(g, t)
-                def _sdm(u, t): send_dm(u, t)
+                def _sdm(u, t): send_uno_dm_or_warn(_gid, u, t)
                 games.uno_begin(_gid, uno, sender_id, _sg, _sdm)
             else:
                 # Open a lobby
@@ -5306,7 +5332,7 @@ def handle_game_command(message):
                     return
                 group_name = _group_registry.get(_gid, {}).get("name", str(_gid))
                 def _sg(g, t): send_message(g, t)
-                def _sdm(u, t): send_dm(u, t)
+                def _sdm(u, t): send_uno_dm_or_warn(_gid, u, t)
                 state = games.uno_start(_gid, group_name, sender_id, sender_name, UNO_ENABLED, _sg, _sdm)
                 if state:
                     _uno_sessions[_gid] = state
@@ -5317,7 +5343,7 @@ def handle_game_command(message):
             uno = _uno_sessions.get(_gid)
             if uno and uno["state"] == "lobby":
                 def _sg(g, t): send_message(g, t)
-                def _sdm(u, t): send_dm(u, t)
+                def _sdm(u, t): send_uno_dm_or_warn(_gid, u, t)
                 games.uno_join(_gid, uno, sender_id, sender_name, _sg, _sdm)
                 return
             # Fall through to C4/TTT #join if no UNO lobby
@@ -5327,7 +5353,7 @@ def handle_game_command(message):
             uno = _uno_sessions.get(_gid)
             if uno and uno["state"] in ("lobby","playing") and sender_id in uno["players"]:
                 def _sg(g, t): send_message(g, t)
-                def _sdm(u, t): send_dm(u, t)
+                def _sdm(u, t): send_uno_dm_or_warn(_gid, u, t)
                 ended = games.uno_quit_player(_gid, uno, sender_id, sender_name, _sg, _sdm)
                 if ended or uno["state"] == "done":
                     del _uno_sessions[_gid]
@@ -5347,7 +5373,7 @@ def handle_game_command(message):
             uno = _uno_sessions.get(_gid)
             if uno and uno["state"] == "playing" and sender_id in uno["players"]:
                 def _sg(g, t): send_message(g, t)
-                def _sdm(u, t): send_dm(u, t)
+                def _sdm(u, t): send_uno_dm_or_warn(_gid, u, t)
                 games.uno_pass(_gid, uno, sender_id, _sg, _sdm)
                 return
 
@@ -5508,7 +5534,7 @@ def uno_dm_poll_loop():
                     continue
 
                 def _sg(g, t): send_message(g, t)
-                def _sdm(u, t): send_dm(u, t)
+                def _sdm(u, t): send_uno_dm_or_warn(gid, u, t)
 
                 # ── Idle kick check ──────────────────────────────────────────
                 ended = games.uno_check_idle(gid, state, _sg, _sdm)

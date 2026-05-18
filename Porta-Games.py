@@ -1261,6 +1261,7 @@ def _uno_fresh():
         "direction":    1,         # +1 forward, -1 reverse
         "draw_pending": 0,         # stacked D2 / Wd4 cards waiting
         "must_draw":    False,     # active player must draw before playing
+        "drew_this_turn": False,   # active player drew and may now play or pass
         "pending_wild_color": None,  # set after a wild is played
         "group_id":     None,      # originating group
         "group_name":   "",
@@ -1555,6 +1556,7 @@ def uno_play_card(gid, state, sender_id, card_text, send_group_fn, send_dm_fn):
     state["pending_wild_color"] = chosen_color if card in ("W","Wd4") else None
     state["last_activity"] = time.time()
     state["must_draw"] = False
+    state["drew_this_turn"] = False
 
     # ── Check UNO ─────────────────────────────────────────────────────────────
     if len(state["hands"][sender_id]) == 1:
@@ -1582,6 +1584,7 @@ def uno_play_card(gid, state, sender_id, card_text, send_group_fn, send_dm_fn):
 def _advance_turn_after_play(state, val, send_group_fn, send_dm_fn, gid):
     """Advance turn index and apply card effects."""
     n = len(state["players"])
+    state["drew_this_turn"] = False
 
     if val == "Rev":
         state["direction"] *= -1
@@ -1620,7 +1623,7 @@ def _advance_turn_after_play(state, val, send_group_fn, send_dm_fn, gid):
 
 
 def uno_draw(gid, state, sender_id, send_group_fn, send_dm_fn):
-    """Process #draw — player draws card(s) and ends their turn."""
+    """Process #draw. Penalty draws end the turn; normal draws require #pass or #play."""
     if state is None or state["state"] != "playing":
         return
     if sender_id not in state["players"]:
@@ -1630,16 +1633,60 @@ def uno_draw(gid, state, sender_id, send_group_fn, send_dm_fn):
         send_dm_fn(sender_id, "It's not your turn.")
         return
 
-    n_draw = max(1, state["draw_pending"])
+    penalty_draw = state["draw_pending"] > 0
+    n_draw = state["draw_pending"] if penalty_draw else 1
     drawn  = _uno_draw_cards(state, sender_id, n_draw)
     state["draw_pending"] = 0
     state["must_draw"]    = False
 
     drawn_text = ", ".join(_uno_card_emoji(c) for c in drawn) if drawn else "nothing (deck empty!)"
-    send_dm_fn(sender_id, f"You drew {n_draw} card(s): {drawn_text}\n\n" + _uno_hand_text(sender_id, state))
     send_group_fn(gid, f"{state['names'].get(sender_id, sender_id)} drew {n_draw} card(s).")
 
+    if not penalty_draw:
+        state["drew_this_turn"] = True
+        send_dm_fn(
+            sender_id,
+            f"You drew {n_draw} card(s): {drawn_text}\n"
+            f"You may play a legal card now, or use #pass to end your turn.\n\n"
+            + _uno_hand_text(sender_id, state),
+        )
+        send_group_fn(gid, _uno_public_status(state))
+        return
+
+    state["drew_this_turn"] = False
+    send_dm_fn(sender_id, f"You drew {n_draw} card(s): {drawn_text}\n\n" + _uno_hand_text(sender_id, state))
+
     # Advance turn
+    n = len(state["players"])
+    state["current"] = (state["current"] + state["direction"]) % n
+    send_group_fn(gid, _uno_public_status(state))
+
+    cur_uid  = state["players"][state["current"]]
+    cur_name = state["names"].get(cur_uid, cur_uid)
+    send_dm_fn(cur_uid, f"🎴 Your turn, {cur_name}!\n\n" + _uno_hand_text(cur_uid, state))
+
+
+def uno_pass(gid, state, sender_id, send_group_fn, send_dm_fn):
+    """Process #pass after a player has drawn a normal card."""
+    if state is None or state["state"] != "playing":
+        return
+    if sender_id not in state["players"]:
+        return
+    cur_uid = state["players"][state["current"]]
+    if sender_id != cur_uid:
+        send_dm_fn(sender_id, "It's not your turn.")
+        return
+    if state.get("draw_pending", 0) > 0:
+        send_dm_fn(sender_id, f"You must draw {state['draw_pending']} card(s) first with #draw.")
+        return
+    if not state.get("drew_this_turn", False):
+        send_dm_fn(sender_id, "Draw a card with #draw before passing.")
+        return
+
+    state["drew_this_turn"] = False
+    state["last_activity"] = time.time()
+    send_group_fn(gid, f"{state['names'].get(sender_id, sender_id)} passed.")
+
     n = len(state["players"])
     state["current"] = (state["current"] + state["direction"]) % n
     send_group_fn(gid, _uno_public_status(state))
@@ -1731,6 +1778,7 @@ def uno_help_text():
         "#play <card> — play a card (in your DM with the bot)\n"
         "  Examples: #play R7  #play Bskip  #play WG  #play Wd4R\n"
         "#draw        — draw a card this turn\n"
+        "#pass        — end your turn after drawing\n"
         "#hand        — re-show your hand (DM)\n"
         "#status      — show game state in group\n"
         "#quit        — leave the game\n\n"

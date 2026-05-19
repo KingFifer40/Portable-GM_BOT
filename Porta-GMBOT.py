@@ -682,6 +682,7 @@ EIGHTBALL_ENABLED  = False  # ? magic 8-ball
 SCRIPTURE_ENABLED  = False  # #randverse, #findverse
 CONNECT4_ENABLED   = False  # #start, #join, #addai, #quit, column moves
 TICTACTOE_ENABLED  = False  # #ttt, ttt moves
+UNO_ENABLED        = False  # DM-based UNO game
 
 # Human-readable names used in status messages
 FEATURE_NAMES = {
@@ -690,6 +691,7 @@ FEATURE_NAMES = {
     "scripture": ("Scripture",       lambda: SCRIPTURE_ENABLED),
     "connect4":  ("Connect Four",    lambda: CONNECT4_ENABLED),
     "tictactoe": ("Tic-Tac-Toe",    lambda: TICTACTOE_ENABLED),
+    "uno":       ("UNO",            lambda: UNO_ENABLED),
 }
 
 # Default game timeout in seconds (controlled by #timeout)
@@ -1222,6 +1224,8 @@ POINTS_STEAL_MIN       = 5      # minimum points stolen by !steal
 POINTS_STEAL_MAX       = 30     # maximum points stolen by !steal
 POINTS_STEAL_CD        = 300    # !steal cooldown in seconds
 POINTS_COIN_CD         = 60     # !coin cooldown in seconds (1 min)
+POINTS_WHEEL_FEE       = 50     # cost to spin the wheel
+POINTS_WHEEL_CD        = 300    # !wheel cooldown in seconds (5 min)
 POINTS_MAX_CAP         = 1000000  # maximum points any user can hold (0 = no cap)
 POINTS_C4_WIN          = 50     # base points won in PvP (from pvp_bets pool)
 POINTS_C4_WIN_AI_EASY  = 50     # points gained for beating Easy AI
@@ -1232,6 +1236,7 @@ POINTS_C4_WIN_AI       = 125    # fallback (medium) — kept for config compat
 _fih_last_used   = {}    # {user_id: timestamp}
 _steal_last_used = {}    # {user_id: timestamp}
 _coin_last_used  = {}    # {user_id: timestamp}
+_wheel_last_used = {}    # {user_id: timestamp}
 
 # Customisable response message pools (edit live in the Settings tab)
 FIH_WIN_MESSAGES = [
@@ -1557,7 +1562,7 @@ def apply_group_config(group_id):
     Called whenever the active group changes.
     """
     global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED
-    global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, GAME_TIMEOUT_SECONDS
+    global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, UNO_ENABLED, GAME_TIMEOUT_SECONDS
     cfg = load_group_config(group_id)
     GAME_ENABLED      = cfg.get("game_enabled",      False)
     AI_ENABLED        = cfg.get("ai_enabled",         False)
@@ -1565,6 +1570,7 @@ def apply_group_config(group_id):
     SCRIPTURE_ENABLED = cfg.get("scripture_enabled",  False)
     CONNECT4_ENABLED  = cfg.get("connect4_enabled",   False)
     TICTACTOE_ENABLED = cfg.get("tictactoe_enabled",  False)
+    UNO_ENABLED       = cfg.get("uno_enabled",         False)
     GAME_TIMEOUT_SECONDS = cfg.get("game_timeout",    300)
 
 
@@ -1583,6 +1589,7 @@ def snapshot_group_config(group_id):
         "scripture_enabled": SCRIPTURE_ENABLED,
         "connect4_enabled":  CONNECT4_ENABLED,
         "tictactoe_enabled": TICTACTOE_ENABLED,
+        "uno_enabled":       UNO_ENABLED,
         "game_timeout":      GAME_TIMEOUT_SECONDS,
     })
     save_group_config(group_id, existing)
@@ -1612,6 +1619,7 @@ def _fresh_group_record(group_id):
         "SCRIPTURE_ENABLED": cfg.get("scripture_enabled", False),
         "CONNECT4_ENABLED":  cfg.get("connect4_enabled",  False),
         "TICTACTOE_ENABLED": cfg.get("tictactoe_enabled", False),
+        "UNO_ENABLED":       cfg.get("uno_enabled",        False),
         "GAME_TIMEOUT_SECONDS": cfg.get("game_timeout",   300),
         # Polling cursor
         "since_id": None,
@@ -1621,6 +1629,7 @@ def _fresh_group_record(group_id):
         "_fih_last_used":   {},
         "_steal_last_used": {},
         "_coin_last_used":  {},
+        "_wheel_last_used": {},
         # Per-group AI shared memory
         "_ai_memory": [],
     }
@@ -1655,6 +1664,7 @@ def snapshot_group_record(group_id: str):
         "scripture_enabled": rec["SCRIPTURE_ENABLED"],
         "connect4_enabled":  rec["CONNECT4_ENABLED"],
         "tictactoe_enabled": rec["TICTACTOE_ENABLED"],
+        "uno_enabled":       rec.get("UNO_ENABLED", False),
         "game_timeout":      rec["GAME_TIMEOUT_SECONDS"],
     })
     save_group_config(gid, existing)
@@ -1750,6 +1760,8 @@ def apply_settings_from_config():
         pass
     LEADERBOARD_SIZE       = _int("lb_size",   LEADERBOARD_SIZE)
     POINTS_COIN_CD         = _int("coin_cd",   POINTS_COIN_CD)
+    POINTS_WHEEL_FEE       = _int("wheel_fee", POINTS_WHEEL_FEE)
+    POINTS_WHEEL_CD        = _int("wheel_cd",  POINTS_WHEEL_CD)
     POINTS_MAX_CAP         = _int("points_max_cap", POINTS_MAX_CAP)
 
     # AI cooldowns
@@ -1957,6 +1969,63 @@ def send_message(group_id, text, reply_to_id=None):
     except Exception:
         print("Error sending message:")
         traceback.print_exc()
+
+
+def send_dm(user_id, text):
+    """Send a direct message to a GroupMe user via the /direct_messages endpoint."""
+    try:
+        data = {
+            "direct_message": {
+                "source_guid": f"uno-dm-{time.time()}-{user_id}-{random.randint(1000,9999)}",
+                "recipient_id": str(user_id),
+                "text": text,
+            }
+        }
+        url = f"{BASE_URL}/direct_messages"
+        headers = {
+            "Content-Type": "application/json",
+            "X-Access-Token": ACCESS_TOKEN,
+        }
+        resp = requests.post(url, params={"token": ACCESS_TOKEN}, json=data, headers=headers, timeout=10)
+        if not resp.ok:
+            print(f"[DM] Failed to send DM to {user_id}: HTTP {resp.status_code} — {resp.text[:300]}")
+    except Exception:
+        print(f"[DM] Error sending DM to {user_id}:")
+        traceback.print_exc()
+
+
+def fetch_dm_messages(other_id, since_id=None):
+    """
+    Fetch recent DM messages between the bot and other_id.
+    Returns a list of message dicts (oldest first), or [].
+    """
+    try:
+        url = f"{BASE_URL}/direct_messages"
+        params = {
+            "other_id": str(other_id),
+            "token":    ACCESS_TOKEN,
+        }
+        if since_id:
+            params["since_id"] = str(since_id)
+        headers = {"X-Access-Token": ACCESS_TOKEN}
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        if resp.status_code == 304:
+            return []
+        if not resp.ok:
+            print(f"[DM] fetch_dm_messages {other_id}: HTTP {resp.status_code}")
+            return []
+        data = resp.json()
+        msgs = data.get("response", {}).get("direct_messages", [])
+        return list(reversed(msgs))   # oldest first
+    except Exception:
+        return []
+
+
+# Global UNO session table  { group_id: uno_state_dict }
+# Lives here rather than in game_session so it persists across group swaps.
+_uno_sessions: dict = {}
+_uno_dm_since: dict = {}   # { uid: last_seen_dm_id } for DM polling
+
 
 def list_groups():
     groups = []
@@ -2881,8 +2950,10 @@ def handle_dev_command(message):
             CONNECT4_ENABLED = val
         elif feature in ("tictactoe", "ttt"):
             TICTACTOE_ENABLED = val
+        elif feature == "uno":
+            UNO_ENABLED = val
         else:
-            send_message(DEV_GROUP_ID, "Unknown feature. Use: ai, 8ball, scripture, connect4, tictactoe", reply_to_id=msg_id)
+            send_message(DEV_GROUP_ID, "Unknown feature. Use: ai, 8ball, scripture, connect4, tictactoe, uno", reply_to_id=msg_id)
             return
         snapshot_group_config(GAME_GROUP_ID)
         send_message(DEV_GROUP_ID, f"{'✅' if val else '❌'} {feature} set to {val}", reply_to_id=msg_id)
@@ -3408,7 +3479,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
     """
     global GAME_GROUP_ID, game_session
     global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED, SCRIPTURE_ENABLED
-    global CONNECT4_ENABLED, TICTACTOE_ENABLED, GAME_TIMEOUT_SECONDS
+    global CONNECT4_ENABLED, TICTACTOE_ENABLED, UNO_ENABLED, GAME_TIMEOUT_SECONDS
     global _ai_last_used, _aiset_last_used
     global _fih_last_used, _steal_last_used, _coin_last_used
     global _ai_memory
@@ -3423,6 +3494,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
         old_sc         = SCRIPTURE_ENABLED
         old_c4         = CONNECT4_ENABLED
         old_ttt        = TICTACTOE_ENABLED
+        old_uno        = UNO_ENABLED
         old_to         = GAME_TIMEOUT_SECONDS
         old_ai_lu      = _ai_last_used
         old_aiset_lu   = _aiset_last_used
@@ -3440,6 +3512,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
         SCRIPTURE_ENABLED    = rec["SCRIPTURE_ENABLED"]
         CONNECT4_ENABLED     = rec["CONNECT4_ENABLED"]
         TICTACTOE_ENABLED    = rec["TICTACTOE_ENABLED"]
+        UNO_ENABLED          = rec.get("UNO_ENABLED", False)
         GAME_TIMEOUT_SECONDS = rec["GAME_TIMEOUT_SECONDS"]
         _ai_last_used        = rec["_ai_last_used"]
         _aiset_last_used     = rec["_aiset_last_used"]
@@ -3460,6 +3533,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
             rec["SCRIPTURE_ENABLED"]    = SCRIPTURE_ENABLED
             rec["CONNECT4_ENABLED"]     = CONNECT4_ENABLED
             rec["TICTACTOE_ENABLED"]    = TICTACTOE_ENABLED
+            rec["UNO_ENABLED"]          = UNO_ENABLED
             rec["GAME_TIMEOUT_SECONDS"] = GAME_TIMEOUT_SECONDS
             rec["_ai_last_used"]        = _ai_last_used
             rec["_aiset_last_used"]     = _aiset_last_used
@@ -3477,6 +3551,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
             SCRIPTURE_ENABLED    = old_sc
             CONNECT4_ENABLED     = old_c4
             TICTACTOE_ENABLED    = old_ttt
+            UNO_ENABLED          = old_uno
             GAME_TIMEOUT_SECONDS = old_to
             _ai_last_used        = old_ai_lu
             _aiset_last_used     = old_aiset_lu
@@ -3487,7 +3562,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
 
 
 def handle_game_command(message):
-    global GAME_TIMEOUT_SECONDS, GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED
+    global GAME_TIMEOUT_SECONDS, GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, UNO_ENABLED
 
     # Extract text early so we can use it safely
     text = (message.get("text") or "").strip()
@@ -3942,7 +4017,9 @@ def handle_game_command(message):
             reply_to_id=msg_id)
         time.sleep(1.2)
 
-        result_heads = random.getrandbits(1) == 1  # fully unweighted random
+        # Coins have a ~60% chance of landing on whatever side was chosen
+        # (matching real-world research: the starting-face bias effect).
+        result_heads = random.random() < (0.60 if chosen_heads else 0.40)
         result_word  = "Heads" if result_heads else "Tails"
         won = (chosen_heads == result_heads)
 
@@ -3956,6 +4033,81 @@ def handle_game_command(message):
             send_message(GAME_GROUP_ID,
                 f"🪙 {result_word}! {sender_name} loses {bet} pts. ({new_bal} pts total)",
                 reply_to_id=msg_id)
+        return
+
+
+    # !wheel — spin the prize wheel (costs POINTS_WHEEL_FEE to play)
+    if cmd == "!wheel":
+        global _wheel_last_used
+        allowed, remaining = check_ai_cooldown(sender_id, _wheel_last_used, POINTS_WHEEL_CD)
+        if not allowed:
+            m, s = divmod(remaining, 60)
+            cd_msg = f"Wheel is cooling down! Try again in {int(m)}m {int(s)}s." if m else f"Wheel is cooling down! Try again in {int(s)}s."
+            send_message(GAME_GROUP_ID, f"🎡 {cd_msg}", reply_to_id=msg_id)
+            return
+
+        fee = POINTS_WHEEL_FEE
+        bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
+        if bal < fee:
+            send_message(GAME_GROUP_ID,
+                f"🎡 {sender_name}, you need {fee} pts to spin the wheel. You only have {bal} pts.",
+                reply_to_id=msg_id)
+            return
+
+        # Deduct the entry fee upfront
+        _add_pts(GAME_GROUP_ID, sender_id, sender_name, -fee)
+        set_ai_cooldown(sender_id, _wheel_last_used)
+
+        # ── Prize table ──────────────────────────────────────────────────────
+        # Each entry: (weight, net_pts_change, label, emoji)
+        # net_pts_change is what's ADDED back after the fee was already taken.
+        # e.g. net=0 means you get your fee back (break even);
+        #      net=50 means you get fee back + 50 profit;
+        #      net=-fee means you lost the fee (nothing returned).
+        prizes = [
+            # weight  net      label                    emoji
+            (28,      0,       "Nothing — break even",  "😐"),   # get fee back
+            (25,      0,       "Nothing — break even",  "😐"),   # second neutral slot (same outcome)
+            (22,     -fee,     "Bust! Lost it all",     "💀"),   # lost the fee, nothing back
+            (13,      50,      "+50 pts profit",         "🤑"),   # fee back + 50 bonus
+            (8,       200,     "+200 pts profit",        "🎉"),   # fee back + 200 bonus
+            (3,       500,     "+500 pts profit!",       "🌟"),   # fee back + 500 bonus
+            (1,       2000,    "JACKPOT! +2000 pts!!",   "🏆"),   # ultra-rare jackpot
+        ]
+        # Normalise weights and pick
+        total_weight = sum(p[0] for p in prizes)
+        roll = random.uniform(0, total_weight)
+        cumulative = 0
+        chosen = prizes[-1]  # fallback
+        for prize in prizes:
+            cumulative += prize[0]
+            if roll <= cumulative:
+                chosen = prize
+                break
+
+        weight, net, label, emoji = chosen
+
+        # Award (or not) the net change
+        if net != 0:
+            new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, fee + net)
+        else:
+            # Break-even: give the fee back
+            new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, fee)
+
+        # Build the result message
+        send_message(GAME_GROUP_ID,
+            f"🎡 {sender_name} spins the wheel...",
+            reply_to_id=msg_id)
+        time.sleep(1.5)
+
+        if net == -fee:
+            result_line = f"🎡 {emoji} {label}! {sender_name} walks away with nothing. ({new_bal} pts)"
+        elif net == 0:
+            result_line = f"🎡 {emoji} {label}. {sender_name} gets their {fee} pts back. ({new_bal} pts)"
+        else:
+            result_line = f"🎡 {emoji} {label}! {sender_name} wins {net} pts! ({new_bal} pts)"
+
+        send_message(GAME_GROUP_ID, result_line, reply_to_id=msg_id)
         return
 
     # !give @mentioned_user amount  — give points to another user
@@ -4488,12 +4640,19 @@ def handle_game_command(message):
                         send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
                         return
 
+                    if subgame in ("uno",):
+                        if not UNO_ENABLED:
+                            send_message(GAME_GROUP_ID, "🃏 UNO is currently disabled.\nUse #state uno true as an admin to enable it.", reply_to_id=msg_id)
+                            return
+                        send_message(GAME_GROUP_ID, games.uno_help_text(), reply_to_id=msg_id)
+                        return
 
                     # Unknown subgame
                     known_games = []
                     if CONNECT4_ENABLED:  known_games.append("connect4")
                     if TICTACTOE_ENABLED: known_games.append("tictactoe")
-                    all_games = ["connect4", "tictactoe"]
+                    if UNO_ENABLED:       known_games.append("uno")
+                    all_games = ["connect4", "tictactoe", "uno"]
                     send_message(
                         GAME_GROUP_ID,
                         f"Unknown game '{subgame}'.\n"
@@ -4513,6 +4672,10 @@ def handle_game_command(message):
                     lines.append("• tictactoe    — Tic-Tac-Toe (classic 3×3 grid)")
                 else:
                     lines.append("• tictactoe    — Tic-Tac-Toe [disabled]")
+                if UNO_ENABLED:
+                    lines.append("• uno          — UNO card game (played via DM)")
+                else:
+                    lines.append("• uno          — UNO [disabled]")
                 lines.append("\nExample: #help game connect4")
                 send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
                 return
@@ -4590,6 +4753,13 @@ def handle_game_command(message):
                 send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
                 return
 
+            # UNO HELP
+            if topic == "uno":
+                if not UNO_ENABLED:
+                    send_message(GAME_GROUP_ID, "🃏 UNO is currently disabled.\nUse #state uno true as an admin to enable it.", reply_to_id=msg_id)
+                    return
+                send_message(GAME_GROUP_ID, games.uno_help_text(), reply_to_id=msg_id)
+                return
 
             # STATE / ADMIN HELP
             if topic in ("admin", "state"):
@@ -4604,7 +4774,7 @@ def handle_game_command(message):
                     "#state scripture true/false    — Scripture on/off\n"
                     "#state connect4 true/false     — Connect Four on/off\n"
                     "#state tictactoe true/false    — Tic-Tac-Toe on/off\n"
-                    
+                    "#state uno true/false          — UNO on/off\n"
                     "\n"
                     "!aiforget — Clear the shared AI conversation history\n"
                     "\n"
@@ -4641,6 +4811,7 @@ def handle_game_command(message):
                         "  Example: !give @PlayerName 50\n"
                         "\u2022 !coin <h/t> <bet> \u2014 Flip a coin to gamble points\n"
                         "  Example: !coin h 50\n"
+                        "\u2022 !wheel \u2014 Spin the prize wheel (costs 50 pts to enter)\n"
                         "  Betting your full balance or more = All In!\n"
                         "\u2022 #leaderboard \u2014 Top points ranking\n"
                         "\n"
@@ -5165,6 +5336,7 @@ def handle_game_command(message):
             SCRIPTURE_ENABLED = val
             CONNECT4_ENABLED  = val
             TICTACTOE_ENABLED = val
+            UNO_ENABLED       = val
             snapshot_group_config(GAME_GROUP_ID)
             if not val:
                 send_message(GAME_GROUP_ID, "🔴 All features disabled. Only #state commands will work.", reply_to_id=msg_id)
@@ -5196,13 +5368,91 @@ def handle_game_command(message):
             snapshot_group_config(GAME_GROUP_ID)
             send_message(GAME_GROUP_ID, f"Tic-Tac-Toe {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
 
+        elif feature == "uno":
+            UNO_ENABLED = val
+            snapshot_group_config(GAME_GROUP_ID)
+            send_message(GAME_GROUP_ID, f"UNO {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
+
         else:
             send_message(
                 GAME_GROUP_ID,
-                f"Unknown feature '{feature}'.\nKnown features: all, ai, 8ball, scripture, connect4, tictactoe",
+                f"Unknown feature '{feature}'.\nKnown features: all, ai, 8ball, scripture, connect4, tictactoe, uno",
                 reply_to_id=msg_id,
             )
         return
+
+    # ── UNO COMMANDS (group side — DM handling is in the poll loop) ──────────
+    if cmd in ("#start", "#join", "#quit", "#status", "#pass") or (cmd == "#help" and parts[1:2] == ["uno"]):
+        _gid = GAME_GROUP_ID
+
+        # #help uno
+        if cmd == "#help" and parts[1:2] == ["uno"]:
+            send_message(_gid, games.uno_help_text(), reply_to_id=msg_id)
+            return
+
+        # #start uno  /  #start uno go
+        if cmd == "#start" and parts[1:2] == ["uno"]:
+            sub = parts[2:3]
+            uno = _uno_sessions.get(_gid)
+            if sub == ["go"]:
+                # Host starts the actual deal
+                if uno is None or uno["state"] != "lobby":
+                    send_message(_gid, "No UNO lobby to start. Use #start uno first.", reply_to_id=msg_id)
+                    return
+                def _sg(g, t): send_message(g, t)
+                def _sdm(u, t): send_dm(u, t)
+                games.uno_begin(_gid, uno, sender_id, _sg, _sdm)
+            else:
+                # Open a lobby
+                if uno and uno["state"] in ("lobby", "playing"):
+                    send_message(_gid, "There's already an active UNO game. Use #quit to end it first.", reply_to_id=msg_id)
+                    return
+                group_name = _group_registry.get(_gid, {}).get("name", str(_gid))
+                def _sg(g, t): send_message(g, t)
+                def _sdm(u, t): send_dm(u, t)
+                state = games.uno_start(_gid, group_name, sender_id, sender_name, UNO_ENABLED, _sg, _sdm)
+                if state:
+                    _uno_sessions[_gid] = state
+            return
+
+        # #join (for UNO lobby)
+        if cmd == "#join":
+            uno = _uno_sessions.get(_gid)
+            if uno and uno["state"] == "lobby":
+                def _sg(g, t): send_message(g, t)
+                def _sdm(u, t): send_dm(u, t)
+                games.uno_join(_gid, uno, sender_id, sender_name, _sg, _sdm)
+                return
+            # Fall through to C4/TTT #join if no UNO lobby
+
+        # #quit (for UNO)
+        if cmd == "#quit":
+            uno = _uno_sessions.get(_gid)
+            if uno and uno["state"] in ("lobby","playing") and sender_id in uno["players"]:
+                def _sg(g, t): send_message(g, t)
+                def _sdm(u, t): send_dm(u, t)
+                ended = games.uno_quit_player(_gid, uno, sender_id, sender_name, _sg, _sdm)
+                if ended or uno["state"] == "done":
+                    del _uno_sessions[_gid]
+                return
+            # Fall through to C4/TTT #quit
+
+        # #status (for UNO)
+        if cmd == "#status":
+            uno = _uno_sessions.get(_gid)
+            if uno and uno["state"] == "playing":
+                def _sg(g, t): send_message(g, t)
+                games.uno_status(_gid, uno, _sg)
+                return
+
+        # #pass (for UNO — after drawing)
+        if cmd == "#pass":
+            uno = _uno_sessions.get(_gid)
+            if uno and uno["state"] == "playing" and sender_id in uno["players"]:
+                def _sg(g, t): send_message(g, t)
+                def _sdm(u, t): send_dm(u, t)
+                games.uno_pass(_gid, uno, sender_id, _sg, _sdm)
+                return
 
     # ── GAME COMMANDS — delegated to Porta-Games ────────────────────────────
     # All #start, #join, #addai, #quit, #timeout, #pvpbet, #bet, #stats,
@@ -5343,6 +5593,86 @@ def game_poll_loop():
     # Threads are started from main() for all groups known at startup.
     # This function is kept so that any existing call sites don't break.
     pass
+
+
+UNO_DM_POLL_INTERVAL = 10   # seconds between DM checks for active players
+
+def uno_dm_poll_loop():
+    """
+    Polls DMs for the current-turn player of every active UNO game.
+    Handles: #play, #draw, #hand, #quit from DMs.
+    Also handles idle-kick and posts group status updates.
+    Runs as a single daemon thread — light-weight since UNO is turn-based.
+    """
+    while True:
+        try:
+            for gid, state in list(_uno_sessions.items()):
+                if state["state"] != "playing":
+                    continue
+
+                def _sg(g, t): send_message(g, t)
+                def _sdm(u, t): send_dm(u, t)
+
+                # ── Idle kick check ──────────────────────────────────────────
+                ended = games.uno_check_idle(gid, state, _sg, _sdm)
+                if ended or state["state"] == "done":
+                    _uno_sessions.pop(gid, None)
+                    continue
+
+                # ── Poll DMs for active player only ──────────────────────────
+                cur_uid = state["players"][state["current"]]
+                since   = _uno_dm_since.get(cur_uid)
+
+                msgs = fetch_dm_messages(cur_uid, since_id=since)
+                for msg in msgs:
+                    mid  = msg.get("id")
+                    uid  = str(msg.get("sender_id", ""))
+                    text = (msg.get("text") or "").strip()
+
+                    # Track last seen DM id
+                    if mid and (since is None or mid > since):
+                        _uno_dm_since[cur_uid] = mid
+
+                    # Only process messages FROM the player (not the bot's own)
+                    if uid != str(cur_uid):
+                        continue
+                    if not text:
+                        continue
+
+                    low = text.lower()
+                    if low.startswith("#play "):
+                        card_text = text[6:].strip()
+                        games.uno_play_card(gid, state, cur_uid, card_text, _sg, _sdm)
+                        if state["state"] == "done":
+                            _uno_sessions.pop(gid, None)
+                        break
+
+                    elif low == "#draw":
+                        games.uno_draw(gid, state, cur_uid, _sg, _sdm)
+                        break
+
+                    elif low == "#pass":
+                        games.uno_pass(gid, state, cur_uid, _sg, _sdm)
+                        break
+
+                    elif low == "#hand":
+                        games.uno_show_hand(state, cur_uid, _sdm)
+
+                    elif low == "#quit":
+                        name = state["names"].get(cur_uid, cur_uid)
+                        ended = games.uno_quit_player(gid, state, cur_uid, name, _sg, _sdm)
+                        if ended or state["state"] == "done":
+                            _uno_sessions.pop(gid, None)
+                        break
+
+                    elif low == "#status":
+                        games.uno_status(gid, state, _sg)
+
+        except Exception:
+            print("[UNO DM poll] Error:")
+            traceback.print_exc()
+
+        time.sleep(UNO_DM_POLL_INTERVAL)
 
 
 # ---------------------------------------------------------
@@ -5585,6 +5915,7 @@ class ControlPanel:
             ("Bot (master)",  "master"),
             ("Connect Four",  "connect4"),
             ("Tic-Tac-Toe",   "tictactoe"),
+            ("UNO",           "uno"),
             ("Magic 8-Ball",  "8ball"),
             ("Scripture",     "scripture"),
             ("AI Chat",       "ai"),
@@ -7039,6 +7370,7 @@ class ControlPanel:
                 "master":    viewed_rec.get("GAME_ENABLED",      GAME_ENABLED),
                 "connect4":  viewed_rec.get("CONNECT4_ENABLED",  CONNECT4_ENABLED),
                 "tictactoe": viewed_rec.get("TICTACTOE_ENABLED", TICTACTOE_ENABLED),
+                "uno":       viewed_rec.get("UNO_ENABLED",       UNO_ENABLED),
                 "8ball":     viewed_rec.get("EIGHTBALL_ENABLED", EIGHTBALL_ENABLED),
                 "scripture": viewed_rec.get("SCRIPTURE_ENABLED", SCRIPTURE_ENABLED),
                 "ai":        viewed_rec.get("AI_ENABLED",        AI_ENABLED),
@@ -7048,6 +7380,7 @@ class ControlPanel:
                 "master":    GAME_ENABLED,
                 "connect4":  CONNECT4_ENABLED,
                 "tictactoe": TICTACTOE_ENABLED,
+                "uno":       UNO_ENABLED,
                 "8ball":     EIGHTBALL_ENABLED,
                 "scripture": SCRIPTURE_ENABLED,
                 "ai":        AI_ENABLED,
@@ -7107,7 +7440,7 @@ class ControlPanel:
 
     def _toggle_feature(self, key, var):
         global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED
-        global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED
+        global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, UNO_ENABLED
 
         val = var.get()
 
@@ -7124,6 +7457,7 @@ class ControlPanel:
                 rec["SCRIPTURE_ENABLED"] = val
                 rec["CONNECT4_ENABLED"]  = val
                 rec["TICTACTOE_ENABLED"] = val
+                rec["UNO_ENABLED"]       = val
             elif key == "ai":
                 rec["AI_ENABLED"] = val
             elif key == "8ball":
@@ -7134,6 +7468,8 @@ class ControlPanel:
                 rec["CONNECT4_ENABLED"] = val
             elif key == "tictactoe":
                 rec["TICTACTOE_ENABLED"] = val
+            elif key == "uno":
+                rec["UNO_ENABLED"] = val
 
         for gid in target_gids:
             rec = _group_registry.get(gid)
@@ -7153,6 +7489,7 @@ class ControlPanel:
                 SCRIPTURE_ENABLED = val
                 CONNECT4_ENABLED  = val
                 TICTACTOE_ENABLED = val
+                UNO_ENABLED       = val
                 for k, v in self._feature_vars.items():
                     v.set(val)
             elif key == "ai":         AI_ENABLED        = val
@@ -7160,6 +7497,7 @@ class ControlPanel:
             elif key == "scripture":  SCRIPTURE_ENABLED = val
             elif key == "connect4":   CONNECT4_ENABLED  = val
             elif key == "tictactoe":  TICTACTOE_ENABLED = val
+            elif key == "uno":        UNO_ENABLED       = val
 
         label_map = {
             "master":    "All features",
@@ -7168,6 +7506,7 @@ class ControlPanel:
             "scripture": "Scripture",
             "connect4":  "Connect Four",
             "tictactoe": "Tic-Tac-Toe",
+            "uno":       "UNO",
         }
         feature_label = label_map.get(key, key)
         state_word    = "enabled ✅" if val else "disabled ❌"
@@ -7487,7 +7826,7 @@ def main():
         send_message(gid, "🤖 Porta-GMBOT is now online. All features are disabled by default — enable them from the dev group or control panel.")
         send_message(
             gid,
-            "Admins: use #state true to enable the bot, or enable individual features from the dev group.",
+            "Admins: use #state true to enable the bot, or enable individual features from the dev group.\nGames: Connect Four (#start c4) and Tic-Tac-Toe (#start ttt). Type #help in-group for commands.",
         )
         print(f"[startup] Group {gid} ready.")
 
@@ -7501,6 +7840,10 @@ def main():
     # Start the dev group poll thread
     dev_thread = threading.Thread(target=dev_poll_loop, daemon=True)
     dev_thread.start()
+
+    uno_dm_thread = threading.Thread(target=uno_dm_poll_loop, daemon=True, name="uno-dm-poll")
+    uno_dm_thread.start()
+    print("[bot] UNO DM poll thread started.")
 
     # Launch the control panel GUI on the main thread.
     # If tkinter is unavailable (headless server), fall back to a simple

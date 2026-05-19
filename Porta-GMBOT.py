@@ -5785,13 +5785,17 @@ def _do_self_update():
             return False, "restart_bot.py not found in script directory"
         
         print("[update] Update complete. Restarting bot via restart_bot.py...")
-        
+
+        # Manually release the lock file before exiting — os._exit() bypasses
+        # atexit so the registered _release_lock() handler never runs.
+        try:
+            os.remove(_LOCK_FILE)
+        except OSError:
+            pass
+
         # Launch restart script and immediately exit (DON'T wait for it to return)
-        # This ensures the lock file gets released before restart_bot tries to check it
+        # This ensures the lock file is already gone before restart_bot checks it.
         subprocess.Popen([sys.executable, restart_script])
-        
-        # CRITICAL: Exit immediately without waiting
-        # This allows the lock file cleanup to happen before restart_bot checks it
         os._exit(0)
         
     except Exception as e:
@@ -7855,5 +7859,207 @@ def main():
             time.sleep(60)
 
 
+def _launch_emergency_recovery(crash_log: str):
+    """
+    If main() crashes (e.g. after a broken update), show a minimal tkinter window
+    that displays the traceback and offers a one-click 'Download fresh copy & Restart'
+    button — so the user is never stuck with a bot they can't fix without manually
+    replacing files.
+
+    Falls back to a plain console prompt if tkinter is unavailable.
+    """
+    script_path   = os.path.abspath(__file__)
+    script_dir    = os.path.dirname(script_path)
+    restart_script = os.path.join(script_dir, "restart_bot.py")
+
+    def _do_emergency_update(status_cb=None):
+        """Download fresh Porta-GMBOT.py from the main branch and restart."""
+        try:
+            if status_cb:
+                status_cb("Downloading fresh copy from GitHub…")
+            resp = requests.get(GITHUB_RAW_URL, timeout=30)
+            if resp.status_code != 200:
+                msg = f"Download failed: HTTP {resp.status_code}"
+                if status_cb:
+                    status_cb(msg)
+                return False, msg
+            new_source = resp.text
+
+            # Stamp in the latest commit SHA if we can get it
+            try:
+                api_url = (
+                    f"https://api.github.com/repos/{GITHUB_REPO}"
+                    f"/commits?path=Porta-GMBOT.py&per_page=1"
+                )
+                sha_resp = requests.get(api_url, timeout=8)
+                if sha_resp.status_code == 200:
+                    data = sha_resp.json()
+                    if data:
+                        sha_short = data[0].get("sha", "")[:7]
+                        import re as _re
+                        new_source = _re.sub(
+                            r'BOT_COMMIT_SHA\s*=\s*"[^"]*"',
+                            f'BOT_COMMIT_SHA = "{sha_short}"',
+                            new_source, count=1,
+                        )
+            except Exception:
+                pass  # SHA stamp is cosmetic — skip if network is flaky
+
+            tmp_path = script_path + ".update_tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(new_source)
+            os.replace(tmp_path, script_path)
+
+            if status_cb:
+                status_cb("Download complete — restarting…")
+
+            # Release lock (atexit won't run after os._exit)
+            try:
+                os.remove(_LOCK_FILE)
+            except OSError:
+                pass
+
+            if os.path.exists(restart_script):
+                subprocess.Popen([sys.executable, restart_script])
+            else:
+                subprocess.Popen([sys.executable, script_path])
+
+            os._exit(0)
+
+        except Exception as e:
+            msg = f"Emergency update failed: {e}"
+            if status_cb:
+                status_cb(msg)
+            return False, msg
+
+    # ── Try tkinter first ──────────────────────────────────────────────────────
+    try:
+        import tkinter as tk
+        from tkinter import scrolledtext
+
+        root = tk.Tk()
+        root.title("Porta-GMBOT — Startup Crash")
+        root.resizable(True, True)
+        root.minsize(520, 380)
+
+        # Header
+        hdr = tk.Frame(root, bg="#c0392b", pady=10, padx=16)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="⚠  Bot failed to start",
+                 font=("Helvetica", 14, "bold"),
+                 bg="#c0392b", fg="white").pack(anchor="w")
+        tk.Label(hdr,
+                 text="A crash occurred during startup (see details below).",
+                 font=("Helvetica", 9), bg="#c0392b", fg="#ffd6d6").pack(anchor="w")
+
+        # Crash log display
+        body = tk.Frame(root, padx=14, pady=10)
+        body.pack(fill="both", expand=True)
+
+        tk.Label(body, text="Error details:", font=("Helvetica", 10, "bold"),
+                 anchor="w").pack(fill="x")
+        txt = scrolledtext.ScrolledText(body, height=14, font=("Courier", 9),
+                                        wrap="word", state="normal",
+                                        bg="#1e1e1e", fg="#ff6b6b",
+                                        insertbackground="white")
+        txt.insert("end", crash_log)
+        txt.config(state="disabled")
+        txt.pack(fill="both", expand=True, pady=(4, 0))
+
+        # Status label
+        status_var = tk.StringVar(value="")
+        tk.Label(body, textvariable=status_var, font=("Helvetica", 9),
+                 fg="#555555", wraplength=480, justify="left").pack(anchor="w", pady=(6, 0))
+
+        def _status(msg):
+            root.after(0, lambda: status_var.set(msg))
+
+        # Buttons
+        btn_frame = tk.Frame(body)
+        btn_frame.pack(anchor="w", pady=(10, 0))
+
+        def on_download():
+            dl_btn.config(state="disabled")
+            import threading as _t
+            _t.Thread(target=_do_emergency_update, args=(_status,), daemon=True).start()
+
+        dl_btn = tk.Button(
+            btn_frame,
+            text="⬇  Download fresh copy from GitHub & Restart",
+            font=("Helvetica", 10),
+            bg="#2ecc71", fg="white",
+            relief="flat", padx=12, pady=6,
+            command=on_download,
+        )
+        dl_btn.pack(side="left", padx=(0, 10))
+
+        tk.Button(
+            btn_frame,
+            text="✕  Exit",
+            font=("Helvetica", 10),
+            relief="flat", padx=12, pady=6,
+            command=lambda: os._exit(1),
+        ).pack(side="left")
+
+        tk.Label(body,
+                 text=(
+                     "Downloading replaces Porta-GMBOT.py with the latest version from the "
+                     "main branch.  Your config.json is not affected."
+                 ),
+                 font=("Helvetica", 8), fg="#888888",
+                 wraplength=480, justify="left").pack(anchor="w", pady=(8, 0))
+
+        root.mainloop()
+
+    except Exception:
+        # Headless / no display — fall back to console
+        print("\n" + "=" * 60)
+        print("BOT STARTUP CRASH — Emergency Recovery")
+        print("=" * 60)
+        print(crash_log)
+        print("=" * 60)
+        print("\nOptions:")
+        print("  1 — Download fresh copy from GitHub and restart")
+        print("  2 — Exit")
+        choice = input("\nEnter choice [1/2]: ").strip()
+        if choice == "1":
+            print("Downloading…")
+            ok, err = _do_emergency_update()
+            if not ok:
+                print(err)
+                sys.exit(1)
+        else:
+            sys.exit(1)
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise  # normal exits (setup cancelled, etc.) pass through untouched
+    except Exception:
+        # Capture the full traceback
+        crash_log = traceback.format_exc()
+
+        # Write a crash log file next to the script for reference
+        try:
+            log_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "crash_log.txt"
+            )
+            import datetime
+            with open(log_path, "w", encoding="utf-8") as _lf:
+                _lf.write(f"Crash at {datetime.datetime.now()}\n\n{crash_log}")
+            print(f"[crash] Full log written to: {log_path}")
+        except Exception:
+            pass
+
+        print("[crash] Bot startup failed — launching emergency recovery window…")
+        print(crash_log)
+
+        # Release the instance lock so recovery/restart can proceed cleanly
+        try:
+            os.remove(_LOCK_FILE)
+        except OSError:
+            pass
+
+        _launch_emergency_recovery(crash_log)

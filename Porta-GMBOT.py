@@ -1226,6 +1226,7 @@ POINTS_STEAL_CD        = 300    # !steal cooldown in seconds
 POINTS_COIN_CD         = 60     # !coin cooldown in seconds (1 min)
 POINTS_WHEEL_FEE       = 50     # cost to spin the wheel
 POINTS_WHEEL_CD        = 300    # !wheel cooldown in seconds (5 min)
+POINTS_GUESS_CD        = 120    # !guess cooldown in seconds (2 min)
 POINTS_MAX_CAP         = 1000000  # maximum points any user can hold (0 = no cap)
 POINTS_C4_WIN          = 50     # base points won in PvP (from pvp_bets pool)
 POINTS_C4_WIN_AI_EASY  = 50     # points gained for beating Easy AI
@@ -1237,6 +1238,10 @@ _fih_last_used   = {}    # {user_id: timestamp}
 _steal_last_used = {}    # {user_id: timestamp}
 _coin_last_used  = {}    # {user_id: timestamp}
 _wheel_last_used = {}    # {user_id: timestamp}
+_guess_last_used = {}    # {user_id: timestamp}
+
+# Active number-guess sessions: {group_id: {user_id: {"number": int, "attempts": int}}}
+_active_guess_sessions: dict = {}
 
 # Customisable response message pools (edit live in the Settings tab)
 FIH_WIN_MESSAGES = [
@@ -1711,6 +1716,7 @@ def apply_settings_from_config():
     global POINTS_STEAL_MIN, POINTS_STEAL_MAX, POINTS_STEAL_CD
     global POINTS_C4_WIN, POINTS_C4_WIN_AI, LEADERBOARD_SIZE
     global POINTS_COIN_CD, POINTS_MAX_CAP, POINTS_WHEEL_FEE, POINTS_WHEEL_CD
+    global POINTS_GUESS_CD
     global FIH_WIN_MESSAGES, FIH_LOSE_MESSAGES, FIH_COOLDOWN_MESSAGE
     global STEAL_SUCCESS_MESSAGES, STEAL_EMPTY_MESSAGE, STEAL_COOLDOWN_MESSAGE
 
@@ -1758,6 +1764,7 @@ def apply_settings_from_config():
     POINTS_COIN_CD         = _int("coin_cd",   POINTS_COIN_CD)
     POINTS_WHEEL_FEE       = _int("wheel_fee", POINTS_WHEEL_FEE)
     POINTS_WHEEL_CD        = _int("wheel_cd",  POINTS_WHEEL_CD)
+    POINTS_GUESS_CD        = _int("guess_cd",  POINTS_GUESS_CD)
     POINTS_MAX_CAP         = _int("points_max_cap", POINTS_MAX_CAP)
 
     # AI cooldowns
@@ -4099,6 +4106,108 @@ def handle_game_command(message):
         send_message(GAME_GROUP_ID, result_line, reply_to_id=msg_id)
         return
 
+    # !guess — number guessing game (1–10); points scale down exponentially with guesses
+    # Usage: !guess        → start a new round
+    #        !guess <1-10> → submit a guess while a round is active
+    if cmd == "!guess":
+        global _guess_last_used, _active_guess_sessions
+
+        gid_str = str(GAME_GROUP_ID)
+        uid_str = str(sender_id)
+
+        # Initialise group's session dict lazily
+        if gid_str not in _active_guess_sessions:
+            _active_guess_sessions[gid_str] = {}
+
+        group_sessions = _active_guess_sessions[gid_str]
+        active = group_sessions.get(uid_str)
+
+        # ── Branch A: no argument → start a new round ─────────────────────────
+        if len(parts) == 1:
+            if active is not None:
+                send_message(GAME_GROUP_ID,
+                    f"🔢 {sender_name}, you already have a round going! "
+                    f"Guess a number 1–10 with  !guess <number>",
+                    reply_to_id=msg_id)
+                return
+
+            # Enforce cooldown (only on starting a new round, not on guessing)
+            allowed, remaining = check_ai_cooldown(sender_id, _guess_last_used, POINTS_GUESS_CD)
+            if not allowed:
+                m, s = divmod(remaining, 60)
+                cd_str = f"{int(m)}m {int(s)}s" if m else f"{int(s)}s"
+                send_message(GAME_GROUP_ID,
+                    f"🔢 {sender_name}, your brain needs a rest! Try again in {cd_str}.",
+                    reply_to_id=msg_id)
+                return
+
+            secret = random.randint(1, 10)
+            group_sessions[uid_str] = {"number": secret, "attempts": 0}
+            set_ai_cooldown(sender_id, _guess_last_used)
+            send_message(GAME_GROUP_ID,
+                f"🔢 {sender_name} starts a guessing game!\n"
+                f"I'm thinking of a number from 1 to 10.\n"
+                f"Type  !guess <number>  to guess.\n\n"
+                f"🏆 Rewards: 1st guess = 200 pts  |  2nd = 75 pts  |  3rd = 30 pts  |  "
+                f"4th = 10 pts  |  5th+ = 5 pts",
+                reply_to_id=msg_id)
+            return
+
+        # ── Branch B: argument present → submit a guess ────────────────────────
+        raw_guess = parts[1]
+        try:
+            guess = int(raw_guess)
+            if not (1 <= guess <= 10):
+                raise ValueError
+        except ValueError:
+            send_message(GAME_GROUP_ID,
+                f"🔢 {sender_name}, guess must be a whole number between 1 and 10.",
+                reply_to_id=msg_id)
+            return
+
+        if active is None:
+            send_message(GAME_GROUP_ID,
+                f"🔢 {sender_name}, you don't have an active round! "
+                f"Start one with  !guess",
+                reply_to_id=msg_id)
+            return
+
+        active["attempts"] += 1
+        attempts = active["attempts"]
+
+        if guess != active["number"]:
+            hint = "too high 📈" if guess > active["number"] else "too low 📉"
+            send_message(GAME_GROUP_ID,
+                f"🔢 {sender_name} guesses {guess}... {hint}! "
+                f"(Attempt {attempts})",
+                reply_to_id=msg_id)
+            return
+
+        # ── Correct guess ──────────────────────────────────────────────────────
+        # Reward table — exponential drop-off
+        reward_table = {1: 200, 2: 75, 3: 30, 4: 10}
+        reward = reward_table.get(attempts, 5)   # 5 pts for 5th guess and beyond
+
+        del group_sessions[uid_str]   # clear the session
+
+        new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, reward)
+
+        attempt_word = "attempt" if attempts == 1 else "attempts"
+        if attempts == 1:
+            flair = "🎯 First try! Unbelievable!"
+        elif attempts == 2:
+            flair = "🔥 Second try! Nice one!"
+        elif attempts == 3:
+            flair = "👍 Third try! Not bad!"
+        else:
+            flair = f"😅 Took {attempts} tries, but you got there!"
+
+        send_message(GAME_GROUP_ID,
+            f"✅ {sender_name} guessed {guess} in {attempts} {attempt_word}! {flair}\n"
+            f"Earned {reward} pts! ({new_bal} pts total)",
+            reply_to_id=msg_id)
+        return
+
     # !give @mentioned_user amount  — give points to another user
     # (item gifting with i<N> slots is handled further below)
     if cmd == "!give" and not (len(parts) >= 3 and parts[-1].lower().startswith("i") and parts[-1][1:].isdigit()):
@@ -4781,6 +4890,8 @@ def handle_game_command(message):
                         "  Example: !coin h 50\n"
                         "\u2022 !wheel \u2014 Spin the prize wheel (costs 50 pts to enter)\n"
                         "  Betting your full balance or more = All In!\n"
+                        "\u2022 !guess \u2014 Guess a number 1–10 to earn points\n"
+                        "  First guess = 200 pts, drops off fast!\n"
                         "\u2022 #leaderboard \u2014 Top points ranking\n"
                         "\n"
                         "\u26a0\ufe0f There is a max point cap set by the server admin."
@@ -6910,6 +7021,7 @@ class ControlPanel:
             ("Max points cap",       "points_max_cap", str(cfg_now.get("points_max_cap", POINTS_MAX_CAP))),
             ("!wheel fee (pts)",     "wheel_fee", str(cfg_now.get("wheel_fee", POINTS_WHEEL_FEE))),
             ("!wheel cooldown (s)",  "wheel_cd",  str(cfg_now.get("wheel_cd",  POINTS_WHEEL_CD))),
+            ("!guess cooldown (s)",  "guess_cd",  str(cfg_now.get("guess_cd",  POINTS_GUESS_CD))),
         ]
         self._pts_vars = {}
         for r, (lbl, key, default) in enumerate(pts_fields):
@@ -6962,6 +7074,7 @@ class ControlPanel:
             global POINTS_STEAL_MIN, POINTS_STEAL_MAX, POINTS_STEAL_CD
             global POINTS_C4_WIN, POINTS_C4_WIN_AI, LEADERBOARD_SIZE
             global POINTS_COIN_CD, POINTS_MAX_CAP, POINTS_WHEEL_FEE, POINTS_WHEEL_CD
+            global POINTS_GUESS_CD
             global ACCESS_TOKEN, DEV_GROUP_ID, OLLAMA_BASE_MODEL
 
             # Validate points before touching anything
@@ -7007,15 +7120,18 @@ class ControlPanel:
                 new_points_cap   = int(self._pts_vars["points_max_cap"].get())
                 new_wheel_fee    = int(self._pts_vars["wheel_fee"].get())
                 new_wheel_cd     = int(self._pts_vars["wheel_cd"].get())
+                new_guess_cd     = int(self._pts_vars["guess_cd"].get())
             except (KeyError, ValueError):
                 new_coin_cd      = POINTS_COIN_CD
                 new_points_cap   = POINTS_MAX_CAP
                 new_wheel_fee    = POINTS_WHEEL_FEE
                 new_wheel_cd     = POINTS_WHEEL_CD
+                new_guess_cd     = POINTS_GUESS_CD
             cfg["coin_cd"]         = max(0, new_coin_cd)
             cfg["points_max_cap"]  = max(0, new_points_cap)
             cfg["wheel_fee"]       = max(0, new_wheel_fee)
             cfg["wheel_cd"]        = max(0, new_wheel_cd)
+            cfg["guess_cd"]        = max(0, new_guess_cd)
 
             # Custom messages
             global FIH_WIN_MESSAGES, FIH_LOSE_MESSAGES, FIH_COOLDOWN_MESSAGE
@@ -7046,6 +7162,7 @@ class ControlPanel:
             POINTS_MAX_CAP         = max(0, new_points_cap)
             POINTS_WHEEL_FEE       = max(0, new_wheel_fee)
             POINTS_WHEEL_CD        = max(0, new_wheel_cd)
+            POINTS_GUESS_CD        = max(0, new_guess_cd)
 
             # Apply custom message globals immediately
             if hasattr(self, "_msg_vars"):

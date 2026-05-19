@@ -5529,7 +5529,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "eba639e"
+BOT_COMMIT_SHA = "b36365f"
 
 _control_panel_instance = None  # set when panel launches
 
@@ -6908,6 +6908,8 @@ class ControlPanel:
             ("Leaderboard size",     "lb_size",   str(cfg_now.get("lb_size",   LEADERBOARD_SIZE))),
             ("!coin cooldown (s)",   "coin_cd",   str(cfg_now.get("coin_cd",   POINTS_COIN_CD))),
             ("Max points cap",       "points_max_cap", str(cfg_now.get("points_max_cap", POINTS_MAX_CAP))),
+            ("!wheel fee (pts)",     "wheel_fee", str(cfg_now.get("wheel_fee", POINTS_WHEEL_FEE))),
+            ("!wheel cooldown (s)",  "wheel_cd",  str(cfg_now.get("wheel_cd",  POINTS_WHEEL_CD))),
         ]
         self._pts_vars = {}
         for r, (lbl, key, default) in enumerate(pts_fields):
@@ -6959,7 +6961,7 @@ class ControlPanel:
             global POINTS_FIH_MIN, POINTS_FIH_MAX, POINTS_FIH_CD, POINTS_FIH_LOSE_CHANCE
             global POINTS_STEAL_MIN, POINTS_STEAL_MAX, POINTS_STEAL_CD
             global POINTS_C4_WIN, POINTS_C4_WIN_AI, LEADERBOARD_SIZE
-            global POINTS_COIN_CD, POINTS_MAX_CAP
+            global POINTS_COIN_CD, POINTS_MAX_CAP, POINTS_WHEEL_FEE, POINTS_WHEEL_CD
             global ACCESS_TOKEN, DEV_GROUP_ID, OLLAMA_BASE_MODEL
 
             # Validate points before touching anything
@@ -6999,15 +7001,21 @@ class ControlPanel:
             cfg["c4_win_ai"] = new_c4_win_ai
             cfg["lb_size"]   = new_lb_size
 
-            # Coin cooldown and point cap
+            # Coin cooldown, point cap, and wheel settings
             try:
                 new_coin_cd      = int(self._pts_vars["coin_cd"].get())
                 new_points_cap   = int(self._pts_vars["points_max_cap"].get())
+                new_wheel_fee    = int(self._pts_vars["wheel_fee"].get())
+                new_wheel_cd     = int(self._pts_vars["wheel_cd"].get())
             except (KeyError, ValueError):
                 new_coin_cd      = POINTS_COIN_CD
                 new_points_cap   = POINTS_MAX_CAP
+                new_wheel_fee    = POINTS_WHEEL_FEE
+                new_wheel_cd     = POINTS_WHEEL_CD
             cfg["coin_cd"]         = max(0, new_coin_cd)
             cfg["points_max_cap"]  = max(0, new_points_cap)
+            cfg["wheel_fee"]       = max(0, new_wheel_fee)
+            cfg["wheel_cd"]        = max(0, new_wheel_cd)
 
             # Custom messages
             global FIH_WIN_MESSAGES, FIH_LOSE_MESSAGES, FIH_COOLDOWN_MESSAGE
@@ -7036,6 +7044,8 @@ class ControlPanel:
             LEADERBOARD_SIZE       = new_lb_size
             POINTS_COIN_CD         = max(0, new_coin_cd)
             POINTS_MAX_CAP         = max(0, new_points_cap)
+            POINTS_WHEEL_FEE       = max(0, new_wheel_fee)
+            POINTS_WHEEL_CD        = max(0, new_wheel_cd)
 
             # Apply custom message globals immediately
             if hasattr(self, "_msg_vars"):

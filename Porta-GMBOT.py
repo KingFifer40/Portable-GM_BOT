@@ -682,6 +682,7 @@ EIGHTBALL_ENABLED  = False  # ? magic 8-ball
 SCRIPTURE_ENABLED  = False  # #randverse, #findverse
 CONNECT4_ENABLED   = False  # #start, #join, #addai, #quit, column moves
 TICTACTOE_ENABLED  = False  # #ttt, ttt moves
+UNO_ENABLED        = False  # DM-based UNO game
 
 # Human-readable names used in status messages
 FEATURE_NAMES = {
@@ -690,6 +691,7 @@ FEATURE_NAMES = {
     "scripture": ("Scripture",       lambda: SCRIPTURE_ENABLED),
     "connect4":  ("Connect Four",    lambda: CONNECT4_ENABLED),
     "tictactoe": ("Tic-Tac-Toe",    lambda: TICTACTOE_ENABLED),
+    "uno":       ("UNO",            lambda: UNO_ENABLED),
 }
 
 # Default game timeout in seconds (controlled by #timeout)
@@ -1560,7 +1562,7 @@ def apply_group_config(group_id):
     Called whenever the active group changes.
     """
     global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED
-    global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED,  GAME_TIMEOUT_SECONDS
+    global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, UNO_ENABLED, GAME_TIMEOUT_SECONDS
     cfg = load_group_config(group_id)
     GAME_ENABLED      = cfg.get("game_enabled",      False)
     AI_ENABLED        = cfg.get("ai_enabled",         False)
@@ -3477,7 +3479,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
     """
     global GAME_GROUP_ID, game_session
     global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED, SCRIPTURE_ENABLED
-    global CONNECT4_ENABLED, TICTACTOE_ENABLED,  GAME_TIMEOUT_SECONDS
+    global CONNECT4_ENABLED, TICTACTOE_ENABLED, UNO_ENABLED, GAME_TIMEOUT_SECONDS
     global _ai_last_used, _aiset_last_used
     global _fih_last_used, _steal_last_used, _coin_last_used
     global _ai_memory
@@ -3560,7 +3562,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
 
 
 def handle_game_command(message):
-    global GAME_TIMEOUT_SECONDS, GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED
+    global GAME_TIMEOUT_SECONDS, GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, UNO_ENABLED
 
     # Extract text early so we can use it safely
     text = (message.get("text") or "").strip()
@@ -5717,7 +5719,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "9f425b3"
+BOT_COMMIT_SHA = "eba639e"
 
 _control_panel_instance = None  # set when panel launches
 
@@ -7442,7 +7444,7 @@ class ControlPanel:
 
     def _toggle_feature(self, key, var):
         global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED
-        global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED
+        global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, UNO_ENABLED
 
         val = var.get()
 

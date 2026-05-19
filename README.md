@@ -262,6 +262,32 @@ The AI can **search the web automatically** — just ask about current events, s
 
 Losing to the AI costs no points. PvP games without bets award no points.
 
+
+
+## Wheel command tuning
+
+The `!wheel` command already supports a configurable cooldown through `config.json`.
+
+Example:
+
+```json
+{
+    "wheel_cd": 300
+}
+```
+
+`wheel_cd` is measured in seconds.
+
+Some useful values:
+
+| Value | Cooldown |
+|---|---|
+| `60` | 1 minute |
+| `300` | 5 minutes |
+| `900` | 15 minutes |
+
+The default is currently `300` seconds.
+
 ### Spending points
 
 | Activity | Cost |

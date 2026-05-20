@@ -682,7 +682,7 @@ EIGHTBALL_ENABLED  = False  # ? magic 8-ball
 SCRIPTURE_ENABLED  = False  # #randverse, #findverse
 CONNECT4_ENABLED   = False  # #start, #join, #addai, #quit, column moves
 TICTACTOE_ENABLED  = False  # #ttt, ttt moves
-WORDLE_ENABLED     = False  # #wordle, #guess
+WORDLE_ENABLED     = False  # #wordle, #guess <word>
 
 
 # Human-readable names used in status messages
@@ -1241,206 +1241,38 @@ _steal_last_used = {}    # {user_id: timestamp}
 _coin_last_used  = {}    # {user_id: timestamp}
 _wheel_last_used = {}    # {user_id: timestamp}
 _guess_last_used = {}    # {user_id: timestamp}
-
-# ── Wordle game state ──────────────────────────────────────────────────────────
-# Per-group active sessions (swapped in/out by dispatch shim like other dicts)
-_wordle_sessions = {}   # {user_id: {"word": str, "guesses": [str,...], "done": bool}}
-_wordle_cd       = {}   # {user_id: timestamp} — cooldown between new games
-
-POINTS_WORDLE_CD = 60   # seconds between starting new Wordle games (1 min)
-
-# Reward table: index 0 = correct on guess 1, index 5 = correct on guess 6
-WORDLE_REWARDS = [500, 200, 50, 20, 10, 5]
-
-# 2500-word list of common 5-letter words
-WORDLE_WORDS = [
-    "about","above","abuse","actor","acute","admit","adopt","adult","after","again",
-    "agent","agree","ahead","alarm","album","alert","alike","align","alive","alley",
-    "allow","alone","along","alter","angel","anger","angle","angry","anime","ankle",
-    "annex","apart","apple","apply","areas","arena","argue","arise","armor","armed",
-    "aroma","arose","arson","aside","asset","atlas","attic","audio","audit","avoid",
-    "awake","award","aware","awful","badly","baker","basic","basis","batch","beach",
-    "beard","beast","began","begin","being","below","bench","bible","birth","black",
-    "blade","blame","blank","blast","blaze","bleed","blend","bless","blind","block",
-    "blood","blown","blown","blues","blunt","board","boast","bonus","boost","booth",
-    "bound","boxer","brace","braid","brain","brand","brave","bread","break","breed",
-    "brick","bride","brief","bring","broke","brook","brown","brush","buddy","build",
-    "built","bunch","burst","buyer","cabin","cable","camel","candy","cargo","carry",
-    "catch","cause","cease","chain","chair","chaos","chart","chase","cheap","check",
-    "cheek","cheer","chess","chest","chief","child","china","choir","chose","chunk",
-    "civic","civil","claim","class","clean","clear","clerk","click","cliff","climb",
-    "cling","clock","clone","close","cloth","cloud","coach","coast","could","count",
-    "court","cover","crack","craft","crane","crash","crazy","cream","creek","crime",
-    "crisp","cross","crowd","crown","cruel","crush","curve","cycle","daily","dance",
-    "datum","death","debug","debut","decay","delay","delta","dense","depot","depth",
-    "derby","devil","diary","digit","dirty","disco","ditch","diver","dizzy","dodge",
-    "doing","donor","doubt","dough","draft","drain","drama","drank","drawn","dream",
-    "dress","drift","drink","drive","drove","drops","drugs","drunk","dryer","early",
-    "earth","eight","elect","elite","email","ember","empty","enemy","enjoy","enter",
-    "entry","equal","error","essay","event","every","exact","exist","extra","fable",
-    "faced","faith","false","fancy","fatal","fault","feast","field","fifth","fifty",
-    "fight","final","first","fixed","flame","flash","flask","flats","flesh","flick",
-    "flint","float","flood","floor","flora","flour","fluid","flute","focus","force",
-    "forge","forum","found","frame","frank","fraud","fresh","front","frost","froze",
-    "fruit","fully","funny","fuzzy","gains","games","ghost","giant","given","gland",
-    "glass","globe","gloom","glory","gloss","glove","going","grace","grade","grand",
-    "grant","graph","grasp","grass","grave","great","greed","green","greet","grief",
-    "grill","grind","groan","groom","gross","group","grove","grown","guard","guess",
-    "guest","guide","guild","guilt","guise","gulch","gummy","gusts","habit","happy",
-    "harsh","haven","heart","heavy","hedge","heist","hence","herbs","hinge","hippo",
-    "hippy","hoist","homer","honor","horns","hotel","house","human","humor","hurry",
-    "hyena","hyper","icing","ideal","image","imply","inbox","incur","index","indie",
-    "input","inter","intro","infer","inset","ivory","jazzy","jewel","jiffy","joker",
-    "joust","judge","juice","juicy","jumbo","jumpy","karma","kayak","kebab","knack",
-    "kneel","knife","knock","known","label","lance","large","laser","latch","later",
-    "laugh","layer","leach","least","leave","ledge","legal","lemon","level","light",
-    "limit","lingo","liner","liter","liver","llama","local","lodge","logic","loose",
-    "lover","lower","lucky","lunar","lunch","lusty","lying","magic","major","maker",
-    "manor","maple","march","marks","marry","match","mayor","media","mercy","merge",
-    "metal","meter","midst","might","minor","minus","model","money","month","moral",
-    "mouse","mouth","moved","movie","muddy","mulch","multi","music","nasty","naval",
-    "nerve","never","niece","night","noble","noise","north","noted","novel","nurse",
-    "nymph","occur","offer","often","olive","onset","overt","omega","onion","opera",
-    "order","other","ought","ounce","outer","ozone","paced","paint","panel","panic",
-    "paper","party","pasta","patch","pause","peace","peach","pearl","pedal","penny",
-    "perch","peril","phase","phone","photo","piano","piece","pilot","pitch","pixel",
-    "pizza","place","plain","plane","plant","plate","plaza","plead","pluck","plumb",
-    "plume","plump","plunge","point","polar","pound","power","press","price","pride",
-    "prime","print","prior","prize","probe","prove","prowl","pulse","punch","pupil",
-    "purse","pushy","query","queen","quest","queue","quick","quiet","quota","quote",
-    "racer","radar","radio","raise","rally","range","rapid","ratio","reach","ready",
-    "realm","rebel","repay","repel","reply","rerun","reset","resin","rider","ridge",
-    "rifle","right","rigid","risky","rival","river","robot","rocky","roman","rouge",
-    "rough","round","route","royal","rugby","ruler","rural","rusty","sadly","saint",
-    "salad","sauce","scale","scare","scene","score","scout","screw","seize","sense",
-    "serve","seven","shade","shaft","shake","shall","shame","shape","share","shark",
-    "sharp","sheer","sheet","shelf","shell","shift","shine","shirt","shock","shoot",
-    "shore","short","shout","shove","shown","sight","silly","since","sixth","sixty",
-    "sized","skill","skull","slain","slang","slash","slate","slave","sleep","slice",
-    "slick","slide","slime","sling","slope","sloth","slump","slunk","smart","smash",
-    "smell","smile","smite","smoke","snack","snail","snake","snare","sneak","snowy",
-    "solar","solid","solve","sorry","south","space","spare","spark","speak","spear",
-    "speed","spend","spice","spill","spine","spirit","spite","split","spoke","spoon",
-    "sport","spray","squad","stain","stair","stake","stand","stare","start","state",
-    "stays","steam","steel","steep","steer","stern","stick","stiff","still","stomp",
-    "stone","stood","storm","story","stove","strap","straw","stray","strip","stuck",
-    "study","stunt","style","sugar","suite","sunny","super","surge","swamp","swear",
-    "sweet","swept","swift","swipe","sword","swore","swung","table","talon","taste",
-    "teach","tears","teeth","tempo","tense","tenth","terms","tests","thank","theft",
-    "their","theme","there","thick","thing","think","third","thorn","those","three",
-    "threw","throw","thumb","tiara","tidal","tight","timer","tired","title","today",
-    "token","topic","torch","total","touch","tough","tower","toxic","trace","track",
-    "trade","trail","train","trait","trash","trawl","trend","trial","tribe","trick",
-    "tried","troop","truck","truly","trunk","trust","truth","tumor","tuner","tutor",
-    "tweak","twice","twist","tying","ultra","uncle","under","unify","union","unity",
-    "until","upper","upset","urban","usage","usual","utter","valid","valor","value",
-    "valve","vapor","vault","venom","verse","video","vigor","viral","virus","visor",
-    "vista","vivid","vocal","voice","vowed","voter","vague","waged","waste","watch",
-    "water","waves","weary","wedge","weigh","weird","wheat","wheel","where","which",
-    "while","white","whole","whose","wield","witch","woman","women","world","worry",
-    "worse","worst","worth","would","wound","wrath","wrist","write","wrote","yacht",
-    "yearn","yield","young","youth","zebra","zesty","zoned","tiger","viola","frogs",
-    "plaid","bingo","broth","cadet","creek","delta","dwarf","ergot","floss","glare",
-    "glint","grits","gruel","haunt","hazel","hedge","hertz","hippo","holly","horde",
-    "horse","hover","hyena","inbox","inlet","irate","irony","kapow","knave","knobs",
-    "kudos","lathe","liner","liver","llama","louse","macho","magma","manga","mangy",
-    "manly","manor","march","masse","merge","messy","mimic","mince","minty","mirth",
-    "moist","moldy","moose","moron","mossy","motif","moult","murky","mushy","myrrh",
-    "nacho","nasty","navel","ninja","nitro","nutty","nymph","offal","okapi","opium",
-    "otter","oxide","panda","pansy","panty","peeve","pesky","petty","pixel","pixie",
-    "plonk","pluck","podgy","polar","polka","poppy","potty","pouty","prawn","primo",
-    "privy","proxy","psalm","pubic","pudgy","puppy","pygmy","rabbi","rabid","radon",
-    "rainy","rally","randy","rebel","redux","reedy","refit","relic","remix","repro",
-    "reedy","rhino","ribby","rogue","rowdy","ruddy","rugby","sable","sandy","sappy",
-    "saucy","savvy","scald","scaly","scant","scary","seedy","serum","sewer",
-    "shady","shaky","shallow","shifty","shoddy","silky","sinew","sixth","sixty",
-    "siren","sissy","sixer","skimp","slimy","sloppy","sloth","slung","smear","smelt",
-    "smoky","snafu","snaky","snide","sniff","snoop","soggy","somber","sonic","soppy",
-    "sorry","soupy","spasm","spawn","spewy","spied","spiny","spoof","spore","spree",
-    "spruce","squab","squat","squid","staid","stark","stoic","stout","strap","strew",
-    "strut","stung","stunk","suave","sudsy","sulky","sumac","surly","sushi","swath",
-    "swirl","swoon","tangy","tapir","tawny","tease","tepid","terry","testy","theft",
-    "thief","thong","throb","throe","thrum","thump","timid","tinny","tipsy","tizzy",
-    "toast","toffy","tryst","tubby","tulip","tuner","turbo","twerp","twill","twine",
-    "twirl","udder","unfed","unfit","unwed","vague","valet","vapid","veiny","venom",
-    "vivid","vixen","vodka","voila","vouch","vulva","wacky","waddy","wagon","wampy",
-    "warty","weedy","wetly","whack","whelp","whiff","whims","whine","whiny","wimpy",
-    "windy","wispy","witty","wobbly","woeful","wormy","woozy","yucky","yummy","zappy",
-    "zingy","zippy","abbot","abode","afoot","afoul","aglow","agony","agora","aground",
-    "ahoy","airy","aloft","amaze","amble","amend","amine","amiss","among","ample",
-    "amuse","angel","annoy","antic","anvil","aphid","aplomb","apron","ardor","areal",
-    "aright","aroma","arrear","ascot","ashen","aspen","atone","avail","avert","avoid",
-    "azure","befit","began","belch","belle","bigot","bleak","bleat","blink","bliss",
-    "bloat","bloke","bloom","bloop","blown","blurt","bogus","bonny","brash","brawl",
-    "brawn","briny","brisk","brood","brunt","brute","burly","burnt","byway","cabal",
-    "caped","caste","chafe","champ","chant","chasm","chewy","chide","chimp","chive",
-    "chore","chump","clack","clamp","clang","clank","cleat","cleft","clomp","clout",
-    "clown","cluck","clump","comet","comfy","comic","comfy","coupe","covet","cower",
-    "cramp","crank","crawl","creak","crept","crimp","croak","crone","crook","croup",
-    "crumb","crypt","cubic","cuckoo","cuing","cushy","cutback","cynic","daunt","decry",
-    "dense","depot","derby","dodge","dowdy","dowel","dowry","drone","drool","droop",
-    "drove","drown","drugged","dully","dunce","duple","dwell","dwelt","dying","edict",
-    "eerie","elbow","elder","emcee","emote","endow","envoy","equip","erect","erode",
-    "expel","exert","exude","eyrie","faint","fairy","faker","farce","feral","feted",
-    "fetch","fetid","felon","ferny","fiend","fiery","filch","finch","flair","flank",
-    "flare","flaunt","fleck","fleet","flesh","flint","flirt","flock","flung","flunk",
-    "focal","foray","forlorn","forte","foyer","frail","freak","froth","futon","gaffe",
-    "gamut","gaunt","gauze","gauzy","gavel","gawky","giddy","gilded","given","gloat",
-    "glove","gnash","gnome","godly","goner","gorge","gouge","gourd","grail","gripe",
-    "grope","grout","gruel","gruff","guava","guile","gulch","gully","gummy","gusto",
-    "hamper","handy","harpy","haste","haute","haven","heron","hippy","hoary","hoist",
-    "homer","horde","huffy","humph","husky","imbue","impel","inane","incur","inept",
-    "ingot","inlay","innate","inter","inure","itchy","jaggy","jammy","jargon","jerky",
-    "jiffy","jolty","joust","jumpy","karat","kayak","klutz","knelt","knoll","kooky",
-    "kudos","lanky","larva","lasso","latent","liege","lilac","lissome","lithe","liver",
-    "loamy","loath","lobby","lofty","loopy","lorry","lousy","lowly","lucid","lumpy",
-    "lusty","mambo","mango","manly","mantle","mauve","mealy","melee","melon","milky",
-    "mogul","moist","molten","morph","mossy","motley","mucky","muddy","muggy","muted",
-    "naive","nanny","nifty","nippy","noble","noise","noisy","nutty","oaken","optic",
-    "orbit","orchid","ovoid","oxide","oxide","paced","paddy","pangs","parable","parch",
-    "passe","patchy","penal","perky","petty","phony","piney","pipit","pithy","pixel",
-    "plumb","plump","plush","poker","pommel","poppy","porky","potty","primo","privy",
-    "prone","prong","prose","proud","prowl","psalm","pudgy","puffy","pulpy","punky",
-    "puppy","putty","rabid","raspy","ratty","reedy","reedy","refit","regal","remit",
-    "repel","replete","rerun","retro","rhyme","ribald","rigid","ripen","risky","ritzy",
-    "rival","rocky","roman","rotary","rouse","rowdy","ruddy","rufus","runny","rusty",
-    "sandy","sassy","satay","saucy","scoff","scold","scoop","scorn","scott","scour",
-    "scram","scrawl","shawl","sheen","shims","shunn","sigma","silty","sissy","situp",
-    "skeletal","skimp","skulk","slant","sleet","slept","slick","slimy","sling","smack",
-    "snaky","snide","sniff","snoop","snore","snout","snowy","sodden","sooty","soppy",
-    "sowle","spasm","spawn","speck","spiny","spoof","spore","spree","squat","stoic",
-    "stony","stout","strut","stung","suave","sulky","sumac","surly","swath","taint",
-    "talon","tangy","taunt","tawny","tepid","terse","tetchy","thick","thorn","timid",
-    "tipsy","toxic","tramp","tripe","trite","troth","trout","truant","truly","tulip",
-    "tummy","turfy","twerp","twill","twine","twirl","inert","ultra","unfit","unify",
-    "untie","lusty","venal","veiny","vicar","villa","vivid","vixen","vodka","vouch",
-    "wacky","weedy","whack","whiff","wimpy","windy","wispy","witty","woeful","wormy",
-    "wrath","yacht","yucky","yummy","zippy","abbot","amble","amiss","ardor","ashen",
-    "atone","azure","bigot","blink","bliss","bogus","brash","brawl","brisk","burly",
-    "cabal","chafe","champ","chewy","chide","clamp","clout","clown","comet","covet",
-    "cramp","creep","crimp","crone","cubic","daunt","decry","dodge","dowdy","drown",
-    "dunce","eerie","elbow","emcee","emote","envoy","erode","fairy","faker","feral",
-    "fetid","fiend","filch","flair","fleck","fleet","flint","flirt","focal","forte",
-    "frail","froth","gaffe","gamut","gauze","gavel","giddy","gloat","gnash","gnome",
-    "gorge","grail","gripe","grout","gruel","gruff","guava","guile","gulch","gummy",
-    "hamper","handy","harpy","haste","heron","hoary","homer","huffy","imbue","inane",
-    "inept","ingot","itchy","jammy","jerky","jolty","jumpy","klutz","knoll","kooky",
-    "lanky","larva","lasso","liege","lilac","lithe","loamy","lobby","lofty","loopy",
-    "lousy","lucid","lumpy","mambo","mealy","melee","mogul","morph","mucky","muddy",
-    "nifty","nippy","oaken","orbit","paddy","pangs","parch","patchy","penal","perky",
-    "phony","pithy","plush","prone","prong","prose","psalm","pudgy","puffy","pulpy",
-    "putty","raspy","ratty","regal","retro","rhyme","rigid","ritzy","rocky","rowdy",
-    "runny","sandy","sassy","scoff","scold","scorn","scour","shawl","sheen","skulk",
-    "slant","sleet","slick","smack","snaky","snore","snout","sodden","sooty","speck",
-    "stony","strut","stung","sulky","swath","taint","taunt","tepid","terse","thick",
-    "timid","tipsy","tramp","tripe","trite","trout","tulip","tummy","ultra","venal",
-    "vicar","villa","weedy","whiff","wimpy","wispy","yucky","yummy","zippy",
-]
-# Deduplicate and keep only clean 5-letter alpha words
-WORDLE_WORDS = sorted({w.lower() for w in WORDLE_WORDS if len(w) == 5 and w.isalpha()})
+_wordle_last_used = {}   # {user_id: timestamp}
 
 # Active number-guess sessions: {group_id: {user_id: {"number": int, "attempts": int}}}
 _active_guess_sessions: dict = {}
+
+# Active Wordle sessions: {group_id: {user_id: {"word": str, "guesses": [str], "done": bool}}}
+_active_wordle_sessions: dict = {}
+
+POINTS_WORDLE_CD = 30   # seconds between starting a new Wordle (not between guesses)
+
+# Wordle word list — loaded once from resources/wordle_words.json
+_wordle_words: list = []
+
+def _load_wordle_words():
+    """Load the Wordle word list from resources/wordle_words.json. Cached after first load."""
+    global _wordle_words
+    if _wordle_words:
+        return _wordle_words
+    path = os.path.join(AI_RESOURCES_DIR, "wordle_words.json")
+    try:
+        import re as _re
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read()
+        # Tolerate trailing comma before ] (common in hand-edited JSON)
+        cleaned = _re.sub(r",\s*\]", "\n]", raw)
+        words = json.loads(cleaned)
+        _wordle_words = [w.strip().lower() for w in words if isinstance(w, str) and len(w.strip()) == 5]
+        print(f"[wordle] Loaded {len(_wordle_words)} words from wordle_words.json")
+    except Exception as e:
+        print(f"[wordle] WARNING: Could not load wordle_words.json: {e}")
+        _wordle_words = []
+    return _wordle_words
 
 # Customisable response message pools (edit live in the Settings tab)
 FIH_WIN_MESSAGES = [
@@ -1766,8 +1598,7 @@ def apply_group_config(group_id):
     Called whenever the active group changes.
     """
     global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED
-    global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, GAME_TIMEOUT_SECONDS
-    global WORDLE_ENABLED
+    global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED, GAME_TIMEOUT_SECONDS
     cfg = load_group_config(group_id)
     GAME_ENABLED      = cfg.get("game_enabled",      False)
     AI_ENABLED        = cfg.get("ai_enabled",         False)
@@ -1835,9 +1666,7 @@ def _fresh_group_record(group_id):
         "_steal_last_used": {},
         "_coin_last_used":  {},
         "_wheel_last_used": {},
-        # Per-group Wordle sessions and cooldowns
-        "_wordle_sessions": {},   # {user_id: {word, guesses, done}}
-        "_wordle_cd":       {},   # {user_id: timestamp}
+        "_wordle_last_used": {},
         # Per-group AI shared memory
         "_ai_memory": [],
     }
@@ -3689,8 +3518,8 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
     global CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED, GAME_TIMEOUT_SECONDS
     global _ai_last_used, _aiset_last_used
     global _fih_last_used, _steal_last_used, _coin_last_used
+    global _wordle_last_used
     global _ai_memory
-    global _wordle_sessions, _wordle_cd
 
     with _group_dispatch_lock:
         # ── 1. Save current globals ──────────────────────────────────────────
@@ -3709,9 +3538,8 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
         old_fih_lu     = _fih_last_used
         old_steal_lu   = _steal_last_used
         old_coin_lu    = _coin_last_used
+        old_wordle_lu  = _wordle_last_used
         old_ai_mem     = _ai_memory
-        old_wrd_sess   = _wordle_sessions
-        old_wrd_cd     = _wordle_cd
 
         # ── 2. Install per-group values ──────────────────────────────────────
         GAME_GROUP_ID        = group_id
@@ -3729,9 +3557,8 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
         _fih_last_used       = rec["_fih_last_used"]
         _steal_last_used     = rec["_steal_last_used"]
         _coin_last_used      = rec["_coin_last_used"]
+        _wordle_last_used    = rec["_wordle_last_used"]
         _ai_memory           = rec["_ai_memory"]
-        _wordle_sessions     = rec["_wordle_sessions"]
-        _wordle_cd           = rec["_wordle_cd"]
 
         try:
             # ── 3. Run the command handler ───────────────────────────────────
@@ -3752,9 +3579,8 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
             rec["_fih_last_used"]       = _fih_last_used
             rec["_steal_last_used"]     = _steal_last_used
             rec["_coin_last_used"]      = _coin_last_used
+            rec["_wordle_last_used"]    = _wordle_last_used
             rec["_ai_memory"]           = _ai_memory
-            rec["_wordle_sessions"]     = _wordle_sessions
-            rec["_wordle_cd"]           = _wordle_cd
 
             # ── 5. Restore original globals ──────────────────────────────────
             GAME_GROUP_ID        = old_gid
@@ -3772,14 +3598,12 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
             _fih_last_used       = old_fih_lu
             _steal_last_used     = old_steal_lu
             _coin_last_used      = old_coin_lu
+            _wordle_last_used    = old_wordle_lu
             _ai_memory           = old_ai_mem
-            _wordle_sessions     = old_wrd_sess
-            _wordle_cd           = old_wrd_cd
 
 
 def handle_game_command(message):
     global GAME_TIMEOUT_SECONDS, GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED
-    global _wordle_sessions, _wordle_cd
 
     # Extract text early so we can use it safely
     text = (message.get("text") or "").strip()
@@ -3984,12 +3808,6 @@ def handle_game_command(message):
         return
     if cmd == "!fuh":
         send_message(GAME_GROUP_ID, "😞", reply_to_id=msg_id)
-        return
-    if cmd == "!fah":
-        send_message(GAME_GROUP_ID, "FAHHH", reply_to_id=msg_id)
-        return
-    if cmd == "!steak":
-        send_message(GAME_GROUP_ID, "🥩 Mmm, steak!", reply_to_id=msg_id)
         return
     if cmd == "marco":
         send_message(GAME_GROUP_ID, "Polo!", reply_to_id=msg_id)
@@ -4966,30 +4784,27 @@ def handle_game_command(message):
                         send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
                         return
 
-                    if subgame == "wordle":
+                    if subgame in ("wordle",):
                         if not WORDLE_ENABLED:
                             send_message(GAME_GROUP_ID, "🟩 Wordle is currently disabled.\nUse #state wordle true as an admin to enable it.", reply_to_id=msg_id)
                             return
                         help_text = (
                             "🟩 *Wordle Commands:*\n"
-                            "• #wordle — Start a new Wordle game\n"
+                            "• #wordle — Start your personal Wordle game\n"
                             "• #guess <word> — Submit a 5-letter guess\n"
                             "\n"
-                            "The board shows your guesses on the left and the words on the right:\n"
-                            "  🟩 = correct letter, correct spot\n"
-                            "  🟨 = correct letter, wrong spot\n"
-                            "  ⬜ = letter not in the word\n"
-                            "  ◼️ = not guessed yet\n"
+                            "Each player has their own game running independently.\n"
+                            "You have 6 guesses to find the secret 5-letter word.\n"
                             "\n"
-                            "Guesses that aren't exactly 5 letters are rejected without costing a turn.\n"
+                            "Board key:\n"
+                            "🟩 = correct letter, correct spot\n"
+                            "🟨 = letter is in the word, wrong spot\n"
+                            "⬜ = letter is not in the word\n"
+                            "◼️ = row not yet guessed\n"
                             "\n"
-                            "🏆 Points (if enabled):\n"
-                            "  Guess 1 = 500 pts\n"
-                            "  Guess 2 = 200 pts\n"
-                            "  Guess 3 = 50 pts\n"
-                            "  Guess 4 = 20 pts\n"
-                            "  Guess 5 = 10 pts\n"
-                            "  Guess 6 = 5 pts\n"
+                            "Wrong-length guesses don't cost a turn.\n"
+                            "\n"
+                            "🏆 Points on solve: 1st=500 | 2nd=200 | 3rd=50 | 4th=20 | 5th=10 | 6th=5\n"
                             "\n"
                             "Enable/disable with: #state wordle true/false"
                         )
@@ -5606,7 +5421,221 @@ def handle_game_command(message):
 
         send_message(GAME_GROUP_ID, "Verse not found.", reply_to_id=msg_id)
         return
-    
+
+    # ==========================================================================
+    # WORDLE (#wordle  and  #guess <word>)
+    # ==========================================================================
+    # #wordle           — start a new personal Wordle game
+    # #guess <word>     — submit a 5-letter guess while a game is active
+    # ==========================================================================
+
+    def _wordle_board(session: dict) -> str:
+        """
+        Build the visual Wordle board string.
+
+        Left column  : emoji grid row (6 rows × 5 squares)
+        Right column : the guessed word (or * for empty rows), separated by a space
+
+        Colour rules (identical to NYT Wordle):
+          🟩  correct letter, correct position
+          🟨  letter is in the word but wrong position
+               — only lit up if this occurrence hasn't been "used" by a green
+                 or an earlier yellow for the same letter
+          ⬜  letter is not in the word at all (or all copies accounted for)
+          ◼️  empty slot (row not yet guessed)
+        """
+        word    = session["word"]
+        guesses = session["guesses"]   # list of strings already submitted
+        rows    = []
+
+        for row_idx in range(6):
+            if row_idx < len(guesses):
+                guess = guesses[row_idx]
+                tiles = [""] * 5
+
+                # Pass 1: mark greens and count remaining letters in the answer
+                remaining = list(word)
+                for i, ch in enumerate(guess):
+                    if ch == word[i]:
+                        tiles[i] = "🟩"
+                        remaining[remaining.index(ch)] = None  # consume
+                    else:
+                        tiles[i] = None  # placeholder
+
+                # Pass 2: mark yellows / whites for non-green positions
+                for i, ch in enumerate(guess):
+                    if tiles[i] is not None:
+                        continue   # already green
+                    if ch in remaining:
+                        tiles[i] = "🟨"
+                        remaining[remaining.index(ch)] = None  # consume
+                    else:
+                        tiles[i] = "⬜"
+
+                emoji_row = "".join(tiles)
+                rows.append(f"{emoji_row} {guess.upper()}")
+            else:
+                # Empty row
+                rows.append("◼️◼️◼️◼️◼️ *")
+
+        return "\n".join(rows)
+
+    # ── #wordle — start a new game ────────────────────────────────────────────
+    if cmd == "#wordle":
+        if not WORDLE_ENABLED:
+            send_message(GAME_GROUP_ID, "🟩 Wordle is currently disabled.\nAn admin can enable it with: #state wordle true", reply_to_id=msg_id)
+            return
+
+        words = _load_wordle_words()
+        if not words:
+            send_message(GAME_GROUP_ID, "❌ Wordle word list is missing. Contact the bot admin.", reply_to_id=msg_id)
+            return
+
+        gid_str = str(GAME_GROUP_ID)
+        uid_str = str(sender_id)
+
+        if gid_str not in _active_wordle_sessions:
+            _active_wordle_sessions[gid_str] = {}
+
+        existing_session = _active_wordle_sessions[gid_str].get(uid_str)
+        if existing_session and not existing_session.get("done", False):
+            # Already has a live game — show the board
+            board = _wordle_board(existing_session)
+            guesses_left = 6 - len(existing_session["guesses"])
+            send_message(
+                GAME_GROUP_ID,
+                f"🟩 {sender_name}, you already have a Wordle in progress! ({guesses_left} guess{'es' if guesses_left != 1 else ''} left)\n"
+                f"Use #guess <word> to continue.\n\n{board}",
+                reply_to_id=msg_id,
+            )
+            return
+
+        # Cooldown — only on starting a new game, not on guessing
+        allowed, remaining = check_ai_cooldown(sender_id, _wordle_last_used, POINTS_WORDLE_CD)
+        if not allowed:
+            send_message(
+                GAME_GROUP_ID,
+                f"🟩 {sender_name}, wait {remaining}s before starting a new Wordle.",
+                reply_to_id=msg_id,
+            )
+            return
+
+        secret = random.choice(words)
+        _active_wordle_sessions[gid_str][uid_str] = {
+            "word":    secret,
+            "guesses": [],
+            "done":    False,
+        }
+        set_ai_cooldown(sender_id, _wordle_last_used)
+
+        # Points reward table — shown only when points are active
+        pts_line = (
+            "\n🏆 Points: 1st guess=500 | 2nd=200 | 3rd=50 | 4th=20 | 5th=10 | 6th=5"
+            if GAME_ENABLED else ""
+        )
+
+        board = _wordle_board(_active_wordle_sessions[gid_str][uid_str])
+        send_message(
+            GAME_GROUP_ID,
+            f"🟩 {sender_name} started a Wordle! Guess the 5-letter word in 6 tries.\n"
+            f"Use #guess <word> to submit a guess.{pts_line}\n\n{board}",
+            reply_to_id=msg_id,
+        )
+        return
+
+    # ── #guess <word> — submit a Wordle guess ─────────────────────────────────
+    if cmd == "#guess":
+        if not WORDLE_ENABLED:
+            send_message(GAME_GROUP_ID, "🟩 Wordle is currently disabled.", reply_to_id=msg_id)
+            return
+
+        gid_str = str(GAME_GROUP_ID)
+        uid_str = str(sender_id)
+
+        if gid_str not in _active_wordle_sessions:
+            _active_wordle_sessions[gid_str] = {}
+
+        session = _active_wordle_sessions[gid_str].get(uid_str)
+
+        if session is None or session.get("done", False):
+            send_message(
+                GAME_GROUP_ID,
+                f"🟩 {sender_name}, you don't have an active Wordle! Start one with #wordle",
+                reply_to_id=msg_id,
+            )
+            return
+
+        if len(parts) < 2:
+            send_message(GAME_GROUP_ID, "Usage: #guess <5-letter word>", reply_to_id=msg_id)
+            return
+
+        raw_guess = parts[1].strip().lower()
+
+        # Must be exactly 5 letters — does NOT cost a turn
+        if len(raw_guess) != 5 or not raw_guess.isalpha():
+            send_message(
+                GAME_GROUP_ID,
+                f"❌ '{raw_guess.upper()}' isn't a valid 5-letter guess. Try again — your turn is not used up.",
+                reply_to_id=msg_id,
+            )
+            return
+
+        # Record the guess
+        session["guesses"].append(raw_guess)
+        board = _wordle_board(session)
+        guesses_used = len(session["guesses"])
+        word = session["word"]
+
+        # ── Win ───────────────────────────────────────────────────────────────
+        if raw_guess == word:
+            session["done"] = True
+            reward_table = {1: 500, 2: 200, 3: 50, 4: 20, 5: 10, 6: 5}
+            reward = reward_table.get(guesses_used, 0)
+
+            if guesses_used == 1:
+                flair = "🎯 FIRST TRY!! Absolutely unbelievable!"
+            elif guesses_used == 2:
+                flair = "🔥 Got it in 2! Incredible!"
+            elif guesses_used == 3:
+                flair = "👏 3 guesses! Nicely done!"
+            elif guesses_used == 4:
+                flair = "👍 4 guesses. Solid!"
+            elif guesses_used == 5:
+                flair = "😅 Phew! 5 guesses, but you got there."
+            else:
+                flair = "😤 Cut it close — 6 guesses!"
+
+            pts_msg = ""
+            if GAME_ENABLED and reward > 0:
+                new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, reward)
+                pts_msg = f"\n+{reward} pts! ({new_bal} pts total)"
+
+            send_message(
+                GAME_GROUP_ID,
+                f"🟩 {sender_name} solved the Wordle in {guesses_used}/6! {flair}{pts_msg}\n\n{board}",
+                reply_to_id=msg_id,
+            )
+            return
+
+        # ── Out of guesses ────────────────────────────────────────────────────
+        if guesses_used >= 6:
+            session["done"] = True
+            send_message(
+                GAME_GROUP_ID,
+                f"💀 {sender_name} ran out of guesses! The word was **{word.upper()}**.\n\n{board}",
+                reply_to_id=msg_id,
+            )
+            return
+
+        # ── Still going ───────────────────────────────────────────────────────
+        guesses_left = 6 - guesses_used
+        send_message(
+            GAME_GROUP_ID,
+            f"🟩 {sender_name} — {guesses_left} guess{'es' if guesses_left != 1 else ''} left.\n\n{board}",
+            reply_to_id=msg_id,
+        )
+        return
+
     # #state  (admin only)
     # Usage:
     #   #state                        — show all feature states
@@ -5732,197 +5761,6 @@ def handle_game_command(message):
         CONNECT4_ENABLED, TICTACTOE_ENABLED,
         GAME_TIMEOUT_SECONDS,
     ):
-        return
-
-    # ── WORDLE COMMANDS ───────────────────────────────────────────────────────
-
-    def _wordle_render(session):
-        """
-        Render the Wordle board for a session.
-
-        Left column: 6 rows of 5 emoji squares (guessed or ◼️ for empty).
-        Right column: the guessed words (or * for empty rows).
-
-        Colour rules (true Wordle logic):
-          🟩  letter is in the right position
-          🟨  letter is in the word but wrong position — only if there are
-               remaining unaccounted-for copies of that letter in the answer
-          ⬜  not in the word at all (or all copies already accounted for)
-        """
-        word    = session["word"]
-        guesses = session["guesses"]  # list of lowercase 5-letter strings
-        MAX     = 6
-
-        board_lines = []
-        for row in range(MAX):
-            if row < len(guesses):
-                guess = guesses[row]
-                # --- True Wordle colouring ---
-                result = ["⬜"] * 5
-                answer_remaining = list(word)   # letters still available for 🟨
-
-                # Pass 1: mark exact matches (🟩)
-                for i in range(5):
-                    if guess[i] == word[i]:
-                        result[i] = "🟩"
-                        answer_remaining[i] = None   # consumed
-
-                # Pass 2: mark present-but-wrong-position (🟨) or absent (⬜)
-                for i in range(5):
-                    if result[i] == "🟩":
-                        continue
-                    if guess[i] in answer_remaining:
-                        result[i] = "🟨"
-                        answer_remaining[answer_remaining.index(guess[i])] = None
-                    # else stays ⬜
-
-                emoji_row = "".join(result)
-                word_col  = guess.upper()
-            else:
-                emoji_row = "◼️◼️◼️◼️◼️"
-                word_col  = "*"
-
-            board_lines.append(f"{emoji_row}  {word_col}")
-
-        return "\n".join(board_lines)
-
-    # #wordle — start a new Wordle game for the sender
-    if cmd == "#wordle":
-        if not WORDLE_ENABLED:
-            send_message(GAME_GROUP_ID, "🟩 Wordle is currently disabled.", reply_to_id=msg_id)
-            return
-
-        uid = str(sender_id)
-
-        # If already in a game, show the board instead of starting a new one
-        if uid in _wordle_sessions and not _wordle_sessions[uid].get("done", False):
-            sess = _wordle_sessions[uid]
-            board = _wordle_render(sess)
-            send_message(
-                GAME_GROUP_ID,
-                f"🟩 {sender_name}, you already have a game going!\n"
-                f"Use #guess <word> to guess.\n\n{board}",
-                reply_to_id=msg_id,
-            )
-            return
-
-        # Cooldown check (only applies to starting a new game after finishing one)
-        allowed, remaining = check_ai_cooldown(sender_id, _wordle_cd, POINTS_WORDLE_CD)
-        if not allowed:
-            m, s = divmod(remaining, 60)
-            cd_str = f"{int(m)}m {int(s)}s" if m else f"{int(s)}s"
-            send_message(
-                GAME_GROUP_ID,
-                f"🟩 {sender_name}, you just finished a game! Start another in {cd_str}.",
-                reply_to_id=msg_id,
-            )
-            return
-
-        word = random.choice(WORDLE_WORDS)
-        _wordle_sessions[uid] = {"word": word, "guesses": [], "done": False}
-
-        pts_note = ""
-        if GAME_ENABLED:
-            pts_note = (
-                "\n\n🏆 Points: 500 (1st guess) → 200 → 50 → 20 → 10 → 5 (6th)"
-            )
-
-        board = _wordle_render(_wordle_sessions[uid])
-        send_message(
-            GAME_GROUP_ID,
-            f"🟩 {sender_name} started a Wordle!\n"
-            f"Guess the 5-letter word with #guess <word>.\n"
-            f"You have 6 tries.{pts_note}\n\n{board}",
-            reply_to_id=msg_id,
-        )
-        return
-
-    # #guess <word> — submit a guess for an active Wordle game
-    if cmd == "#guess":
-        if not WORDLE_ENABLED:
-            send_message(GAME_GROUP_ID, "🟩 Wordle is currently disabled.", reply_to_id=msg_id)
-            return
-
-        uid = str(sender_id)
-        sess = _wordle_sessions.get(uid)
-
-        if sess is None or sess.get("done", False):
-            send_message(
-                GAME_GROUP_ID,
-                f"🟩 {sender_name}, you don't have an active Wordle game. Start one with #wordle!",
-                reply_to_id=msg_id,
-            )
-            return
-
-        if len(parts) < 2:
-            send_message(GAME_GROUP_ID, "Usage: #guess <word>", reply_to_id=msg_id)
-            return
-
-        raw_guess = parts[1].lower().strip()
-
-        # Reject anything that isn't exactly 5 letters — don't count as a turn
-        if len(raw_guess) != 5 or not raw_guess.isalpha():
-            send_message(
-                GAME_GROUP_ID,
-                f"❌ {sender_name}, guesses must be exactly 5 letters. Try again!",
-                reply_to_id=msg_id,
-            )
-            return
-
-        sess["guesses"].append(raw_guess)
-        board = _wordle_render(sess)
-        guess_num = len(sess["guesses"])
-        word = sess["word"]
-
-        if raw_guess == word:
-            # ── Correct! ──────────────────────────────────────────────────────
-            sess["done"] = True
-            set_ai_cooldown(sender_id, _wordle_cd)
-
-            reward = WORDLE_REWARDS[guess_num - 1] if guess_num <= len(WORDLE_REWARDS) else WORDLE_REWARDS[-1]
-
-            if guess_num == 1:
-                flair = "🎯 FIRST TRY! Absolutely legendary!"
-            elif guess_num == 2:
-                flair = "🔥 Second guess! Incredible!"
-            elif guess_num == 3:
-                flair = "👏 Third guess! Really impressive!"
-            elif guess_num == 4:
-                flair = "👍 Fourth guess! Solid work!"
-            elif guess_num == 5:
-                flair = "😅 Fifth guess! Cutting it close!"
-            else:
-                flair = "😮‍💨 Sixth guess! Squeaked it out!"
-
-            pts_line = ""
-            if GAME_ENABLED:
-                new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, reward)
-                pts_line = f"\n+{reward} pts! ({new_bal:,} pts total)"
-
-            send_message(
-                GAME_GROUP_ID,
-                f"{board}\n\n✅ {sender_name} got it in {guess_num}/6! {flair}{pts_line}",
-                reply_to_id=msg_id,
-            )
-
-        elif guess_num >= 6:
-            # ── Out of guesses ────────────────────────────────────────────────
-            sess["done"] = True
-            set_ai_cooldown(sender_id, _wordle_cd)
-            send_message(
-                GAME_GROUP_ID,
-                f"{board}\n\n❌ {sender_name} ran out of guesses! The word was: {word.upper()}",
-                reply_to_id=msg_id,
-            )
-
-        else:
-            # ── Still going ───────────────────────────────────────────────────
-            remaining_turns = 6 - guess_num
-            send_message(
-                GAME_GROUP_ID,
-                f"{board}\n\n{sender_name}: {remaining_turns} guess{'es' if remaining_turns != 1 else ''} left.",
-                reply_to_id=msg_id,
-            )
         return
 
     
@@ -7745,7 +7583,7 @@ class ControlPanel:
 
     def _refresh_ui(self):
         global GAME_GROUP_ID, GAME_ENABLED, AI_ENABLED
-        global EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED, WORDLE_ENABLED
+        global EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED
 
         # Build the shared group entry list used by all group dropdowns
         entries = self._active_group_dropdown_entries()
@@ -7772,7 +7610,6 @@ class ControlPanel:
                 "master":    viewed_rec.get("GAME_ENABLED",      GAME_ENABLED),
                 "connect4":  viewed_rec.get("CONNECT4_ENABLED",  CONNECT4_ENABLED),
                 "tictactoe": viewed_rec.get("TICTACTOE_ENABLED", TICTACTOE_ENABLED),
-                "wordle":    viewed_rec.get("WORDLE_ENABLED",    WORDLE_ENABLED),
                 "8ball":     viewed_rec.get("EIGHTBALL_ENABLED", EIGHTBALL_ENABLED),
                 "scripture": viewed_rec.get("SCRIPTURE_ENABLED", SCRIPTURE_ENABLED),
                 "ai":        viewed_rec.get("AI_ENABLED",        AI_ENABLED),
@@ -7782,7 +7619,6 @@ class ControlPanel:
                 "master":    GAME_ENABLED,
                 "connect4":  CONNECT4_ENABLED,
                 "tictactoe": TICTACTOE_ENABLED,
-                "wordle":    WORDLE_ENABLED,
                 "8ball":     EIGHTBALL_ENABLED,
                 "scripture": SCRIPTURE_ENABLED,
                 "ai":        AI_ENABLED,
@@ -7842,7 +7678,7 @@ class ControlPanel:
 
     def _toggle_feature(self, key, var):
         global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED
-        global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED
+        global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED
 
         val = var.get()
 
@@ -7859,7 +7695,6 @@ class ControlPanel:
                 rec["SCRIPTURE_ENABLED"] = val
                 rec["CONNECT4_ENABLED"]  = val
                 rec["TICTACTOE_ENABLED"] = val
-                rec["WORDLE_ENABLED"]    = val
             elif key == "ai":
                 rec["AI_ENABLED"] = val
             elif key == "8ball":
@@ -7870,8 +7705,6 @@ class ControlPanel:
                 rec["CONNECT4_ENABLED"] = val
             elif key == "tictactoe":
                 rec["TICTACTOE_ENABLED"] = val
-            elif key == "wordle":
-                rec["WORDLE_ENABLED"] = val
 
         for gid in target_gids:
             rec = _group_registry.get(gid)
@@ -7891,7 +7724,6 @@ class ControlPanel:
                 SCRIPTURE_ENABLED = val
                 CONNECT4_ENABLED  = val
                 TICTACTOE_ENABLED = val
-                WORDLE_ENABLED    = val
                 for k, v in self._feature_vars.items():
                     v.set(val)
             elif key == "ai":         AI_ENABLED        = val
@@ -7899,7 +7731,6 @@ class ControlPanel:
             elif key == "scripture":  SCRIPTURE_ENABLED = val
             elif key == "connect4":   CONNECT4_ENABLED  = val
             elif key == "tictactoe":  TICTACTOE_ENABLED = val
-            elif key == "wordle":     WORDLE_ENABLED    = val
 
         label_map = {
             "master":    "All features",
@@ -7908,7 +7739,6 @@ class ControlPanel:
             "scripture": "Scripture",
             "connect4":  "Connect Four",
             "tictactoe": "Tic-Tac-Toe",
-            "wordle":    "Wordle",
         }
         feature_label = label_map.get(key, key)
         state_word    = "enabled ✅" if val else "disabled ❌"

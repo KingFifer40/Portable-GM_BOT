@@ -6165,6 +6165,8 @@ class ControlPanel:
             ("Scripture",     "scripture"),
             ("AI Chat",       "ai"),
         ]
+        # NOTE: if you add a feature here, also update state_map in _refresh_ui,
+        # _apply_to_rec and label_map in _toggle_feature, and the WORDLE_ENABLED globals.
 
         grid = tk.Frame(tab)
         grid.pack(fill="x")
@@ -7604,7 +7606,7 @@ class ControlPanel:
 
     def _refresh_ui(self):
         global GAME_GROUP_ID, GAME_ENABLED, AI_ENABLED
-        global EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED
+        global EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED
 
         # Build the shared group entry list used by all group dropdowns
         entries = self._active_group_dropdown_entries()
@@ -7631,6 +7633,7 @@ class ControlPanel:
                 "master":    viewed_rec.get("GAME_ENABLED",      GAME_ENABLED),
                 "connect4":  viewed_rec.get("CONNECT4_ENABLED",  CONNECT4_ENABLED),
                 "tictactoe": viewed_rec.get("TICTACTOE_ENABLED", TICTACTOE_ENABLED),
+                "wordle":    viewed_rec.get("WORDLE_ENABLED",    WORDLE_ENABLED),
                 "8ball":     viewed_rec.get("EIGHTBALL_ENABLED", EIGHTBALL_ENABLED),
                 "scripture": viewed_rec.get("SCRIPTURE_ENABLED", SCRIPTURE_ENABLED),
                 "ai":        viewed_rec.get("AI_ENABLED",        AI_ENABLED),
@@ -7640,6 +7643,7 @@ class ControlPanel:
                 "master":    GAME_ENABLED,
                 "connect4":  CONNECT4_ENABLED,
                 "tictactoe": TICTACTOE_ENABLED,
+                "wordle":    WORDLE_ENABLED,
                 "8ball":     EIGHTBALL_ENABLED,
                 "scripture": SCRIPTURE_ENABLED,
                 "ai":        AI_ENABLED,
@@ -7699,7 +7703,7 @@ class ControlPanel:
 
     def _toggle_feature(self, key, var):
         global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED
-        global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED
+        global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED
 
         val = var.get()
 
@@ -7716,6 +7720,7 @@ class ControlPanel:
                 rec["SCRIPTURE_ENABLED"] = val
                 rec["CONNECT4_ENABLED"]  = val
                 rec["TICTACTOE_ENABLED"] = val
+                rec["WORDLE_ENABLED"]    = val
             elif key == "ai":
                 rec["AI_ENABLED"] = val
             elif key == "8ball":
@@ -7726,6 +7731,8 @@ class ControlPanel:
                 rec["CONNECT4_ENABLED"] = val
             elif key == "tictactoe":
                 rec["TICTACTOE_ENABLED"] = val
+            elif key == "wordle":
+                rec["WORDLE_ENABLED"] = val
 
         for gid in target_gids:
             rec = _group_registry.get(gid)
@@ -7745,6 +7752,7 @@ class ControlPanel:
                 SCRIPTURE_ENABLED = val
                 CONNECT4_ENABLED  = val
                 TICTACTOE_ENABLED = val
+                WORDLE_ENABLED    = val
                 for k, v in self._feature_vars.items():
                     v.set(val)
             elif key == "ai":         AI_ENABLED        = val
@@ -7752,6 +7760,7 @@ class ControlPanel:
             elif key == "scripture":  SCRIPTURE_ENABLED = val
             elif key == "connect4":   CONNECT4_ENABLED  = val
             elif key == "tictactoe":  TICTACTOE_ENABLED = val
+            elif key == "wordle":     WORDLE_ENABLED    = val
 
         label_map = {
             "master":    "All features",
@@ -7760,6 +7769,7 @@ class ControlPanel:
             "scripture": "Scripture",
             "connect4":  "Connect Four",
             "tictactoe": "Tic-Tac-Toe",
+            "wordle":    "Wordle",
         }
         feature_label = label_map.get(key, key)
         state_word    = "enabled ✅" if val else "disabled ❌"

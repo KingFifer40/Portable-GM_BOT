@@ -1,6 +1,6 @@
 # Porta-GMBOT — GroupMe Bot with AI Chat
 
-A portable GroupMe bot that lets your group play **Connect Four** and **Tic-Tac-Toe**, look up **scriptures**, chat with a **local AI** (via Ollama), earn **points**, and more. Built in Python, runs on Windows, Mac, or Linux.
+A portable GroupMe bot that lets your group play **Connect Four**, **Tic-Tac-Toe**, and **Wordle**, look up **scriptures**, chat with a **local AI** (via Ollama), earn **points**, and more. Built in Python, runs on Windows, Mac, or Linux.
 
 ---
 
@@ -8,7 +8,8 @@ A portable GroupMe bot that lets your group play **Connect Four** and **Tic-Tac-
 
 - 🎮 **Connect Four** — two-player PvP or vs AI (minimax engine, easy/medium/hard)
 - ✏️ **Tic-Tac-Toe** — classic 3×3 grid, PvP or vs AI (impossible/easy/medium/hard)
-- 💰 **Points system** — earn points by fishing (`!fih`), stealing (`!steal`), and coin flipping (`!coin`); give points to others (`!give`); wager them on Connect Four games
+- 🟩 **Wordle** — personal six-guess word game for each player; earns points on solve
+- 💰 **Points system** — earn points by fishing (`!fih`), stealing (`!steal`), coin flipping (`!coin`), spinning the wheel (`!wheel`), guessing numbers (`!guess`), and solving Wordle; wager them on Connect Four games
 - 🤖 **AI Chat** — powered by a local Ollama model with a shared group memory
 - 🌐 **Web search** — the AI automatically searches DuckDuckGo when asked about current events, recent news, live scores, or anything beyond its training data
 - 🎱 **Magic 8-Ball** — `?` + any question
@@ -109,7 +110,10 @@ You can also browse and set topics from the **Groups tab** of the control panel 
 | Command | Description |
 |---|---|
 | `#help` | Show help categories |
-| `#help game` | Game commands (Connect Four, Tic-Tac-Toe) |
+| `#help game` | Game commands (Connect Four, Tic-Tac-Toe, Wordle) |
+| `#help game connect4` | Connect Four command details |
+| `#help game tictactoe` | Tic-Tac-Toe command details |
+| `#help game wordle` | Wordle command details |
 | `#help 8ball` | Magic 8-Ball info |
 | `#help scripture` | Scripture commands |
 | `#help ai` | AI chat commands |
@@ -140,6 +144,24 @@ You can also browse and set topics from the **Groups tab** of the control panel 
 | `#A1` – `#C3` | Play your piece at that coordinate (column A–C, row 1–3) |
 | `#quit` | End the current game |
 
+#### Wordle
+
+| Command | Description |
+|---|---|
+| `#wordle` | Start your own personal Wordle game |
+| `#guess <word>` | Submit a 5-letter guess |
+
+Each player has their own independent game. You have 6 guesses to find the secret 5-letter word. Wrong-length guesses don't cost a turn. The board shows colour-coded tiles after each guess:
+
+| Tile | Meaning |
+|---|---|
+| 🟩 | Correct letter, correct position |
+| 🟨 | Letter is in the word, wrong position |
+| ⬜ | Letter is not in the word |
+| ◼️ | Row not yet guessed |
+
+Letters confirmed absent are shown below the board in alphabetical order so you don't waste guesses.
+
 #### PvP Betting
 
 After both players join, a betting phase starts before play begins:
@@ -169,6 +191,8 @@ All bets form a single shared pool. Winners receive their stake back **plus a pr
 | `!fih` | Fish for points — win or lose! (5 min cooldown) |
 | `!steal` | Steal points from a random person (5 min cooldown) |
 | `!coin <h/t> <amount>` | Flip a coin to double or lose your bet (1 min cooldown) |
+| `!wheel` | Spin the prize wheel (costs 50 pts, 5 min cooldown) |
+| `!guess` | Start a number-guessing game (1–10) |
 | `!give @username <amount>` | Give points to another player |
 | `#leaderboard` | Show the top points rankings |
 
@@ -181,6 +205,11 @@ All bets form a single shared pool. Winners receive their stake back **plus a pr
 | `!items @user` | View someone else's inventory |
 | `!sellitem i<slot>` | Sell a creation back to the bot for its worth |
 | `!give @user i<slot>` | Gift one of your creations to another user |
+| `!request @user i<slot>` | Request to buy someone's item |
+| `!request @user <amount>` | Ask someone for points |
+| `!listrequests` | See all incoming requests |
+| `!yes <N>` | Accept request number N |
+| `!no <N>` | Decline request number N |
 
 #### AI Chat
 
@@ -210,6 +239,7 @@ The AI can **search the web automatically** — just ask about current events, s
 |---|---|
 | `#state` | Show current state of all features |
 | `#state <feature>` | Check one feature's state |
+| `!disabled` | List all currently disabled features |
 
 ---
 
@@ -223,6 +253,7 @@ The AI can **search the web automatically** — just ask about current events, s
 | `#state scripture true/false` | Enable or disable scripture commands |
 | `#state connect4 true/false` | Enable or disable Connect Four |
 | `#state tictactoe true/false` | Enable or disable Tic-Tac-Toe |
+| `#state wordle true/false` | Enable or disable Wordle |
 | `!aiswitch true/false` | Enable or disable AI (same as `#state ai`) |
 | `!aiforget` | Clear the shared AI conversation history |
 
@@ -232,14 +263,33 @@ The AI can **search the web automatically** — just ask about current events, s
 
 | Command | Description |
 |---|---|
-| `!help` | Show dev commands |
-| `!listgroups` | List all groups your token is in (with IDs) |
-| `!listgroups MAIN_GROUP_ID` | List topics/subgroups for a specific group |
-| `!add GROUPID` | Set the active game group |
-| `!add MAIN_ID,SUB_ID` | Set bot to a topic/subgroup |
+| `!help` | Full list of dev commands |
+| `!add GROUPID` | Add a primary game group |
+| `!add MAIN,SUB` | Add a game group in subgroup/topic mode |
+| `!addgroup GROUPID` | Add an additional game group alongside existing ones |
+| `!removegroup GROUPID` | Remove a group from the active list |
+| `!groups` | List all currently active game groups |
+| `!listgroups` | List all your GroupMe groups (with IDs) |
 | `!reload` | Restart the bot script |
 | `!state true/false` | Enable or disable game responses |
+| `!toggle <feature> true/false` | Toggle a feature (ai, 8ball, scripture, connect4, tictactoe, wordle) |
 | `!aiswitch true/false` | Enable or disable AI responses |
+| `!setpoints @user <amount>` | Set a user's points exactly |
+| `!addpoints @user <amount>` | Add or subtract points |
+| `!removepoints @user <amount>` | Remove points from a user |
+| `!resetpoints @user` | Zero out a user's points |
+| `!resetallpoints` | Zero ALL users' points |
+| `!pointscap <amount>` | Set the max points cap (0 = unlimited) |
+| `!leaderboard [n]` | Show top n users |
+| `!checkpoints @user` | Check a specific user's balance |
+| `!setfih min <n> max <n> cd <s>` | Configure fishing |
+| `!setsteal min <n> max <n> cd <s>` | Configure steal |
+| `!setcoin cd <s>` | Configure coin flip cooldown |
+| `!setpersonality <text>` | Update AI personality |
+| `!setcooldown ai <s>` | Set `!ai` cooldown |
+| `!setcooldown aiset <s>` | Set `!aiset` cooldown |
+| `!setmemory <turns>` | Set AI memory depth |
+| `!clearai` | Clear all AI memory |
 
 ---
 
@@ -255,38 +305,24 @@ The AI can **search the web automatically** — just ask about current events, s
 | `!steal` | Steal 5–30 pts from a random user |
 | `!coin` win | +bet amount |
 | `!coin` loss | −bet amount |
-| Beat Easy AI | +50 pts |
-| Beat Medium AI | +125 pts |
-| Beat Hard AI | +200 pts |
+| `!wheel` jackpot | +2000 pts profit (very rare) |
+| `!guess` (1st guess) | +200 pts |
+| `!guess` (2nd guess) | +75 pts |
+| `!guess` (3rd guess) | +30 pts |
+| `!guess` (4th guess) | +10 pts |
+| `!guess` (5th+ guess) | +5 pts |
+| Wordle (1st guess) | +500 pts |
+| Wordle (2nd guess) | +200 pts |
+| Wordle (3rd guess) | +50 pts |
+| Wordle (4th guess) | +20 pts |
+| Wordle (5th guess) | +10 pts |
+| Wordle (6th guess) | +5 pts |
+| Beat Easy AI (Connect Four) | +50 pts |
+| Beat Medium AI (Connect Four) | +125 pts |
+| Beat Hard AI (Connect Four) | +200 pts |
 | Win PvP game (with bets) | +loser's wagered points |
 
 Losing to the AI costs no points. PvP games without bets award no points.
-
-
-
-## Wheel command tuning
-
-The `!wheel` command already supports a configurable cooldown through `config.json`.
-
-Example:
-
-```json
-{
-    "wheel_cd": 300
-}
-```
-
-`wheel_cd` is measured in seconds.
-
-Some useful values:
-
-| Value | Cooldown |
-|---|---|
-| `60` | 1 minute |
-| `300` | 5 minutes |
-| `900` | 15 minutes |
-
-The default is currently `300` seconds.
 
 ### Spending points
 
@@ -295,6 +331,7 @@ The default is currently `300` seconds.
 | `#pvpbet <amount>` | Wager on yourself in a PvP game |
 | `#bet <amount> @player` | Wager as a spectator |
 | `!coin <h/t> <amount>` | Risk it on a coin flip |
+| `!wheel` | 50 pts entry fee |
 | `!create "Name" <worth>` | Mint a named item (min 20 pts) |
 | `!give @user <amount>` | Gift points to someone |
 
@@ -377,12 +414,13 @@ The two avatar files (`pfp_original.jpg` and `pfp_bot.jpg`) are saved in the `Po
 
 ## Control Panel (GUI)
 
-When run on a desktop, the bot opens a graphical control panel with five tabs:
+When run on a desktop, the bot opens a graphical control panel with six tabs:
 
 | Tab | What you can do |
 |---|---|
 | **Status** | Toggle all features on/off with checkboxes; see uptime and active groups |
 | **Groups** | Browse your groups and topics; set the active game group with one click |
+| **Points** | Live leaderboard; adjust individual user balances; manage inventory |
 | **AI** | Set personality, clear memory, adjust cooldowns and memory length |
 | **Settings** | Edit credentials, tune all points values, and customise response messages |
 | **Update** | Check for new commits on GitHub and auto-update with one click |
@@ -429,6 +467,16 @@ POINTS_STEAL_CD        = 300   # cooldown in seconds
 # Coin flip (!coin)
 POINTS_COIN_CD         = 60    # cooldown in seconds (1 min)
 
+# Wheel (!wheel)
+POINTS_WHEEL_FEE       = 50    # cost to spin
+POINTS_WHEEL_CD        = 300   # cooldown in seconds (5 min)
+
+# Number guess (!guess)
+POINTS_GUESS_CD        = 120   # cooldown in seconds (2 min)
+
+# Wordle (#wordle)
+POINTS_WORDLE_CD       = 30    # seconds between starting new games
+
 # Connect Four rewards
 POINTS_C4_WIN_AI_EASY  = 50    # beat Easy AI
 POINTS_C4_WIN_AI_MED   = 125   # beat Medium AI
@@ -461,34 +509,11 @@ OLLAMA_BASE_MODEL
 | `Porta-GMBOT/Modelfile` | Auto-generated Ollama Modelfile (safe to delete to reset) |
 | `Porta-GMBOT/pfp_original.jpg` | Your original GroupMe avatar (downloaded on first run) |
 | `Porta-GMBOT/pfp_bot.jpg` | Brightened "BOT" avatar used while the bot is active |
-| `Porta-GMBOT/resources/` | Scripture text files — included in the repo |
+| `Porta-GMBOT/resources/` | Scripture text files and Wordle word list — included in the repo |
+| `Porta-GMBOT/resources/wordle_words.json` | 2308 five-letter words used by `#wordle` |
 | `groups/<id>.json` | Per-group feature toggle state |
 | `groups/<id>/users/<uid>.json` | Per-user points records |
 | `.bot.lock` | Single-instance lock file — deleted automatically on exit |
-
----
-
-## Renaming the GitHub file
-
-If you are renaming from the old `AI-FSY.py` filename in your GitHub repo, the easiest way is:
-
-1. Go to your repo on GitHub
-2. Open `AI-FSY.py` and click the pencil (edit) icon
-3. At the top, click the filename field and change it to `Porta-GMBOT.py`
-4. Commit the change directly on the main branch
-
-Alternatively, do it locally:
-```
-git mv AI-FSY.py Porta-GMBOT.py
-git commit -m "Rename AI-FSY.py to Porta-GMBOT.py"
-git push
-```
-
----
-
-## .gitignore
-
-`config.json` and `.bot.lock` are already ignored so your token and runtime lock file are never committed. The `Porta-GMBOT/` folder is **not** ignored because the scripture files live there and are part of the repo.
 
 ---
 

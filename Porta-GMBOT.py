@@ -618,9 +618,10 @@ EXTRA_GROUP_IDS: list = []   # list of str group IDs
 # Per-group state registry — populated lazily as groups come online.
 # Maps group_id (str) → dict with keys:
 #   game_session, GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED,
-#   SCRIPTURE_ENABLED, CONNECT4_ENABLED, GAME_TIMEOUT_SECONDS,
-#   since_id, _ai_last_used, _aiset_last_used, _fih_last_used,
-#   _steal_last_used, _coin_last_used
+#   SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED,
+#   GAME_TIMEOUT_SECONDS, since_id,
+#   _ai_last_used, _aiset_last_used, _fih_last_used,
+#   _steal_last_used, _coin_last_used, _wordle_last_used, _ai_memory
 _group_registry: dict = {}
 _group_registry_lock = threading.Lock()
 
@@ -1088,7 +1089,7 @@ def handle_shutdown(sig, frame):
     # Notify all active game groups
     for gid in all_active_group_ids():
         try:
-            send_message(gid, "Connect Four bot is shutting down.")
+            send_message(gid, "Porta-GMBOT is shutting down.")
         except:
             pass
 
@@ -2674,7 +2675,7 @@ def handle_dev_command(message):
     global POINTS_STEAL_MIN, POINTS_STEAL_MAX, POINTS_STEAL_CD
     global POINTS_COIN_CD, POINTS_MAX_CAP, LEADERBOARD_SIZE
     global AI_COOLDOWN_SECONDS, AISET_COOLDOWN_SECONDS, AI_MEMORY_MAX_TURNS
-    global EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED
+    global EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED
 
     text = (message.get("text") or "").strip()
     raw_name = message.get("name", "Unknown")
@@ -2705,7 +2706,7 @@ def handle_dev_command(message):
             "!groups — List all currently active game groups\n"
             "!reload — Restart the bot\n"
             "!state true/false — Master on/off switch\n"
-            "!toggle ai/8ball/scripture/connect4 true/false — Toggle feature\n"
+            "!toggle ai/8ball/scripture/connect4/tictactoe/wordle true/false — Toggle feature\n"
             "!aiswitch true/false — Enable/disable AI\n"
             "\n"
             "── Points Management ──\n"
@@ -2964,7 +2965,7 @@ def handle_dev_command(message):
     # !toggle <feature> true/false
     if cmd == "!toggle":
         if len(parts) < 3:
-            send_message(DEV_GROUP_ID, "Usage: !toggle ai/8ball/scripture/connect4 true/false", reply_to_id=msg_id)
+            send_message(DEV_GROUP_ID, "Usage: !toggle ai/8ball/scripture/connect4/tictactoe/wordle true/false", reply_to_id=msg_id)
             return
         feature = parts[1].lower()
         val_str = parts[2].lower()
@@ -2985,11 +2986,13 @@ def handle_dev_command(message):
             CONNECT4_ENABLED = val
         elif feature in ("tictactoe", "ttt"):
             TICTACTOE_ENABLED = val
+        elif feature == "wordle":
+            WORDLE_ENABLED = val
         elif feature == "uno":
             send_message(DEV_GROUP_ID, "UNO has been removed.", reply_to_id=msg_id)
             return
         else:
-            send_message(DEV_GROUP_ID, "Unknown feature. Use: ai, 8ball, scripture, connect4, tictactoe", reply_to_id=msg_id)
+            send_message(DEV_GROUP_ID, "Unknown feature. Use: ai, 8ball, scripture, connect4, tictactoe, wordle", reply_to_id=msg_id)
             return
         snapshot_group_config(GAME_GROUP_ID)
         send_message(DEV_GROUP_ID, f"{'✅' if val else '❌'} {feature} set to {val}", reply_to_id=msg_id)
@@ -4080,7 +4083,6 @@ def handle_game_command(message):
 
     # !wheel — spin the prize wheel (costs POINTS_WHEEL_FEE to play)
     if cmd == "!wheel":
-        global _wheel_last_used
         allowed, remaining = check_ai_cooldown(sender_id, _wheel_last_used, POINTS_WHEEL_CD)
         if not allowed:
             m, s = divmod(remaining, 60)
@@ -4156,8 +4158,6 @@ def handle_game_command(message):
     # Usage: !guess        → start a new round
     #        !guess <1-10> → submit a guess while a round is active
     if cmd == "!guess":
-        global _guess_last_used, _active_guess_sessions
-
         gid_str = str(GAME_GROUP_ID)
         uid_str = str(sender_id)
 
@@ -4930,6 +4930,7 @@ def handle_game_command(message):
                     "#state scripture true/false    — Scripture on/off\n"
                     "#state connect4 true/false     — Connect Four on/off\n"
                     "#state tictactoe true/false    — Tic-Tac-Toe on/off\n"
+                    "#state wordle true/false       — Wordle on/off\n"
                     "\n"
                     "!aiforget — Clear the shared AI conversation history\n"
                     "\n"
@@ -5712,7 +5713,7 @@ def handle_game_command(message):
                 "  #state                     — show all states\n"
                 "  #state all true/false       — master switch\n"
                 "  #state <feature> true/false — toggle feature\n"
-                "Features: ai, 8ball, scripture, connect4, tictactoe",
+                "Features: ai, 8ball, scripture, connect4, tictactoe, wordle",
                 reply_to_id=msg_id,
             )
             return
@@ -5960,7 +5961,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "5c5dcb9"
+BOT_COMMIT_SHA = "f81af20"
 
 _control_panel_instance = None  # set when panel launches
 
@@ -8032,7 +8033,7 @@ def main():
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)
 
-    print("Starting Connect Four GroupMe bot...")
+    print("Starting Porta-GMBOT...")
     print(f"Dev group: {DEV_GROUP_ID}")
     print("Checking Ollama server...")
     ensure_ollama_running()
@@ -8089,7 +8090,7 @@ def main():
         send_message(gid, "🤖 Porta-GMBOT is now online. All features are disabled by default — enable them from the dev group or control panel.")
         send_message(
             gid,
-            "Admins: use #state true to enable the bot, or enable individual features from the dev group.\nGames: Connect Four (#start c4) and Tic-Tac-Toe (#start ttt). Type #help in-group for commands.",
+            "Admins: use #state true to enable the bot, or enable individual features from the dev group.\nGames: Connect Four (#start c4), Tic-Tac-Toe (#start ttt), and Wordle (#wordle). Type #help in-group for commands.",
         )
         print(f"[startup] Group {gid} ready.")
 

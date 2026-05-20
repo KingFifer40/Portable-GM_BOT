@@ -1257,7 +1257,7 @@ WORDLE_WORDS = [
     "about","above","abuse","actor","acute","admit","adopt","adult","after","again",
     "agent","agree","ahead","alarm","album","alert","alike","align","alive","alley",
     "allow","alone","along","alter","angel","anger","angle","angry","anime","ankle",
-    "annex","apart","apple","apply","areas","arena","argue","arise","armor","army",
+    "annex","apart","apple","apply","areas","arena","argue","arise","armor","armed",
     "aroma","arose","arson","aside","asset","atlas","attic","audio","audit","avoid",
     "awake","award","aware","awful","badly","baker","basic","basis","batch","beach",
     "beard","beast","began","begin","being","below","bench","bible","birth","black",
@@ -1352,7 +1352,7 @@ WORDLE_WORDS = [
     "privy","proxy","psalm","pubic","pudgy","puppy","pygmy","rabbi","rabid","radon",
     "rainy","rally","randy","rebel","redux","reedy","refit","relic","remix","repro",
     "reedy","rhino","ribby","rogue","rowdy","ruddy","rugby","sable","sandy","sappy",
-    "saucy","savvy","scald","scaly","scant","scary","seedy","serum","sewer","sexy",
+    "saucy","savvy","scald","scaly","scant","scary","seedy","serum","sewer",
     "shady","shaky","shallow","shifty","shoddy","silky","sinew","sixth","sixty",
     "siren","sissy","sixer","skimp","slimy","sloppy","sloth","slung","smear","smelt",
     "smoky","snafu","snaky","snide","sniff","snoop","soggy","somber","sonic","soppy",
@@ -3984,6 +3984,12 @@ def handle_game_command(message):
         return
     if cmd == "!fuh":
         send_message(GAME_GROUP_ID, "😞", reply_to_id=msg_id)
+        return
+    if cmd == "!fah":
+        send_message(GAME_GROUP_ID, "FAHHH", reply_to_id=msg_id)
+        return
+    if cmd == "!steak":
+        send_message(GAME_GROUP_ID, "🥩 Mmm, steak!", reply_to_id=msg_id)
         return
     if cmd == "marco":
         send_message(GAME_GROUP_ID, "Polo!", reply_to_id=msg_id)

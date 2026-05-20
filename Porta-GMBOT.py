@@ -3812,6 +3812,9 @@ def handle_game_command(message):
     if cmd == "!fuh":
         send_message(GAME_GROUP_ID, "😞", reply_to_id=msg_id)
         return
+    if cmd == "!steak":
+        send_message(GAME_GROUP_ID, "🥩", reply_to_id=msg_id)
+        return
     if cmd == "marco":
         send_message(GAME_GROUP_ID, "Polo!", reply_to_id=msg_id)
         return

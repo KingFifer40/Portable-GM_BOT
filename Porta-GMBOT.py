@@ -5478,7 +5478,28 @@ def handle_game_command(message):
                 # Empty row
                 rows.append("◼️◼️◼️◼️◼️ *")
 
-        return "\n".join(rows)
+        # Dead letters — letters confirmed not in the word at all, sorted A-Z
+        dead: set = set()
+        for guess in guesses:
+            remaining = list(word)
+            # Pass 1: consume greens
+            for i, ch in enumerate(guess):
+                if ch == word[i]:
+                    remaining[remaining.index(ch)] = None
+            # Pass 2: collect letters that are truly absent
+            for i, ch in enumerate(guess):
+                if ch == word[i]:
+                    continue  # green — not dead
+                if ch in remaining:
+                    remaining[remaining.index(ch)] = None  # yellow — not dead
+                else:
+                    dead.add(ch)  # white — dead
+
+        dead_line = ""
+        if dead:
+            dead_line = "\nNot in word: " + " ".join(sorted(dead)).upper()
+
+        return "\n".join(rows) + dead_line
 
     # ── #wordle — start a new game ────────────────────────────────────────────
     if cmd == "#wordle":

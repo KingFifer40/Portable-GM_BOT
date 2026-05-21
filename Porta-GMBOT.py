@@ -2805,18 +2805,19 @@ def handle_dev_command(message):
             cfg["admin_group_id"] = ADMIN_GROUP_ID
         save_config(cfg)
 
-        send_message(game_gid, "Connect Four bot has been added to this group.")
-        send_message(game_gid, "Admins: enable/disable the bot with #state true or #state false.")
+        apply_group_config(game_gid)
 
+        # Register in multi-group registry and anchor since_id BEFORE sending
+        # any messages, so the poll thread never replays the announcements.
+        rec = get_or_create_group_record(game_gid)
         last_game_since_id = get_latest_message_id(game_gid)
         if last_game_since_id is None:
             last_game_since_id = "0"
-
-        apply_group_config(game_gid)
-
-        # Register in multi-group registry and start poll thread
-        rec = get_or_create_group_record(game_gid)
         rec["since_id"] = last_game_since_id
+
+        send_message(game_gid, "🤖 Porta-GMBOT has been added to this group!")
+        send_message(game_gid, "Admins: enable/disable the bot with #state true or #state false.")
+
         _ensure_group_thread(game_gid)
 
         # Cache the group name so the UI shows it instead of the raw ID
@@ -4519,6 +4520,84 @@ def handle_game_command(message):
         )
         return
 
+    # ── WORTH ADJUST: !worth i<N> [+/-]<amount>  (any order) ─────────────────
+    # Adds or removes points from an item's worth.
+    # Adding worth costs the user points; removing worth refunds them.
+    # Format: !worth i1 +3 | !worth +3 i1 | !worth i1 3 | !worth i1 -5
+    if cmd == "!worth":
+        import re as _re_worth
+        if len(parts) < 3:
+            send_message(
+                GAME_GROUP_ID,
+                "Usage: !worth i<slot> [+/-]<amount>\n"
+                "  !worth i1 +3  — add 3 pts to item's worth (costs you 3 pts)\n"
+                "  !worth i1 -5  — remove 5 pts from item's worth (refunds you 5 pts)\n"
+                "  !worth i1 3   — treated as +3 (no sign = add)\n"
+                "The slot and amount can be in any order.",
+                reply_to_id=msg_id,
+            )
+            return
+        # Parse slot and delta from the two args (order-independent)
+        arg1, arg2 = parts[1], parts[2]
+        slot_worth = None
+        delta_worth = None
+        for arg in (arg1, arg2):
+            # Slot: starts with 'i' followed by digits
+            if _re_worth.match(r'^[iI]\d+$', arg) and slot_worth is None:
+                slot_worth = int(arg[1:])
+            # Delta: optional +/- prefix, then digits
+            elif _re_worth.match(r'^[+\-]?\d+$', arg) and delta_worth is None:
+                delta_worth = int(arg)
+        if slot_worth is None or delta_worth is None:
+            send_message(
+                GAME_GROUP_ID,
+                "❌ Couldn't parse that. Usage: !worth i<slot> [+/-]<amount>\nExample: !worth i2 +10",
+                reply_to_id=msg_id,
+            )
+            return
+        # If no sign was given (pure digits), treat as addition
+        # int() already handles this correctly; a bare '3' becomes +3
+        inv_w = _load_inventory(GAME_GROUP_ID, sender_id)
+        section_w, idx_w, item_w = _get_item_by_slot(inv_w, slot_worth)
+        if section_w is None:
+            send_message(GAME_GROUP_ID, f"❌ You don't have an item in slot i{slot_worth}.", reply_to_id=msg_id)
+            return
+        if section_w != "creations":
+            send_message(GAME_GROUP_ID, "❌ Only your own creations can have their worth adjusted.", reply_to_id=msg_id)
+            return
+        current_worth = item_w["worth"]
+        new_worth = current_worth + delta_worth
+        if new_worth < CREATION_MIN_WORTH:
+            send_message(
+                GAME_GROUP_ID,
+                f"❌ Worth cannot go below {CREATION_MIN_WORTH} pts (would be {new_worth} pts).",
+                reply_to_id=msg_id,
+            )
+            return
+        # Adding worth costs points; removing worth refunds them
+        bal_w = get_points(GAME_GROUP_ID, sender_id, sender_name)
+        if delta_worth > 0 and bal_w < delta_worth:
+            send_message(
+                GAME_GROUP_ID,
+                f"❌ You need {delta_worth} pts to add that much worth. You have {bal_w} pts.",
+                reply_to_id=msg_id,
+            )
+            return
+        # Apply point change (negative delta_worth = refund, positive = cost)
+        new_bal_w, _ = add_points(GAME_GROUP_ID, sender_id, sender_name, -delta_worth)
+        inv_w["creations"][idx_w]["worth"] = new_worth
+        _save_inventory(GAME_GROUP_ID, sender_id, inv_w)
+        direction = f"+{delta_worth}" if delta_worth >= 0 else str(delta_worth)
+        action = "added to" if delta_worth >= 0 else "removed from"
+        send_message(
+            GAME_GROUP_ID,
+            f'💰 {sender_name} {action} the worth of "{item_w["name"]}"!\n'
+            f'Worth: {current_worth} → {new_worth} pts\n'
+            f'Your balance: {new_bal_w:,} pts',
+            reply_to_id=msg_id,
+        )
+        return
+
     # ── REQUEST: !request @user i<N>  or  !request @user <pts> ───────────────
     if cmd == "!request":
         if len(parts) < 3:
@@ -4994,7 +5073,12 @@ def handle_game_command(message):
                         "\n"
                         "\u2022 !sellitem i<slot> \u2014 Sell a creation to the bot\n"
                         "  Destroys the item; gives you its worth in points.\n"
-                        "  Example: !sellitem i2"
+                        "  Example: !sellitem i2\n"
+                        "\n"
+                        "\u2022 !worth i<slot> [+/-]<amount> \u2014 Adjust an item's worth\n"
+                        "  Adding worth costs you points; removing refunds them.\n"
+                        "  Slot and amount can be in any order; no sign = add.\n"
+                        "  Examples: !worth i1 +3 | !worth i1 -5 | !worth +3 i1 | !worth i1 3"
                     )
                     send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
                     return
@@ -5964,7 +6048,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "f81af20"
+BOT_COMMIT_SHA = "29a4173"
 
 _control_panel_instance = None  # set when panel launches
 

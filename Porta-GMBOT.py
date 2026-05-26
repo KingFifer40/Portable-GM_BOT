@@ -684,6 +684,7 @@ SCRIPTURE_ENABLED  = False  # #randverse, #findverse
 CONNECT4_ENABLED   = False  # #start, #join, #addai, #quit, column moves
 TICTACTOE_ENABLED  = False  # #ttt, ttt moves
 WORDLE_ENABLED     = False  # #wordle, #guess <word>
+CHESS_ENABLED      = False  # #start chess, #e2e4, #O-O, etc.
 
 
 # Human-readable names used in status messages
@@ -694,6 +695,7 @@ FEATURE_NAMES = {
     "connect4":  ("Connect Four",    lambda: CONNECT4_ENABLED),
     "tictactoe": ("Tic-Tac-Toe",    lambda: TICTACTOE_ENABLED),
     "wordle":    ("Wordle",          lambda: WORDLE_ENABLED),
+    "chess":     ("Chess",           lambda: CHESS_ENABLED),
 
 }
 
@@ -1600,6 +1602,7 @@ def apply_group_config(group_id):
     """
     global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED
     global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED, GAME_TIMEOUT_SECONDS
+    global CHESS_ENABLED
     cfg = load_group_config(group_id)
     GAME_ENABLED      = cfg.get("game_enabled",      False)
     AI_ENABLED        = cfg.get("ai_enabled",         False)
@@ -1627,6 +1630,7 @@ def snapshot_group_config(group_id):
         "connect4_enabled":  CONNECT4_ENABLED,
         "tictactoe_enabled": TICTACTOE_ENABLED,
         "wordle_enabled":    WORDLE_ENABLED,
+        "chess_enabled":     CHESS_ENABLED,
         "game_timeout":      GAME_TIMEOUT_SECONDS,
     })
     save_group_config(group_id, existing)
@@ -1657,6 +1661,7 @@ def _fresh_group_record(group_id):
         "CONNECT4_ENABLED":  cfg.get("connect4_enabled",  False),
         "TICTACTOE_ENABLED": cfg.get("tictactoe_enabled", False),
         "WORDLE_ENABLED":    cfg.get("wordle_enabled",    False),
+        "CHESS_ENABLED":     cfg.get("chess_enabled",     False),
         "GAME_TIMEOUT_SECONDS": cfg.get("game_timeout",   300),
         # Polling cursor
         "since_id": None,
@@ -1703,6 +1708,7 @@ def snapshot_group_record(group_id: str):
         "connect4_enabled":  rec["CONNECT4_ENABLED"],
         "tictactoe_enabled": rec["TICTACTOE_ENABLED"],
         "wordle_enabled":    rec["WORDLE_ENABLED"],
+        "chess_enabled":     rec["CHESS_ENABLED"],
         "game_timeout":      rec["GAME_TIMEOUT_SECONDS"],
     })
     save_group_config(gid, existing)
@@ -2989,11 +2995,10 @@ def handle_dev_command(message):
             TICTACTOE_ENABLED = val
         elif feature == "wordle":
             WORDLE_ENABLED = val
-        elif feature == "uno":
-            send_message(DEV_GROUP_ID, "UNO has been removed.", reply_to_id=msg_id)
-            return
+        elif feature in ("chess",):
+            CHESS_ENABLED = val
         else:
-            send_message(DEV_GROUP_ID, "Unknown feature. Use: ai, 8ball, scripture, connect4, tictactoe, wordle", reply_to_id=msg_id)
+            send_message(DEV_GROUP_ID, "Unknown feature. Use: ai, 8ball, scripture, connect4, tictactoe, wordle, chess", reply_to_id=msg_id)
             return
         snapshot_group_config(GAME_GROUP_ID)
         send_message(DEV_GROUP_ID, f"{'✅' if val else '❌'} {feature} set to {val}", reply_to_id=msg_id)
@@ -3519,7 +3524,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
     """
     global GAME_GROUP_ID, game_session
     global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED, SCRIPTURE_ENABLED
-    global CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED, GAME_TIMEOUT_SECONDS
+    global CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED, CHESS_ENABLED, GAME_TIMEOUT_SECONDS
     global _ai_last_used, _aiset_last_used
     global _fih_last_used, _steal_last_used, _coin_last_used
     global _wordle_last_used
@@ -3536,6 +3541,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
         old_c4         = CONNECT4_ENABLED
         old_ttt        = TICTACTOE_ENABLED
         old_wrd        = WORDLE_ENABLED
+        old_chess      = CHESS_ENABLED
         old_to         = GAME_TIMEOUT_SECONDS
         old_ai_lu      = _ai_last_used
         old_aiset_lu   = _aiset_last_used
@@ -3555,6 +3561,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
         CONNECT4_ENABLED     = rec["CONNECT4_ENABLED"]
         TICTACTOE_ENABLED    = rec["TICTACTOE_ENABLED"]
         WORDLE_ENABLED       = rec["WORDLE_ENABLED"]
+        CHESS_ENABLED        = rec.get("CHESS_ENABLED", False)
         GAME_TIMEOUT_SECONDS = rec["GAME_TIMEOUT_SECONDS"]
         _ai_last_used        = rec["_ai_last_used"]
         _aiset_last_used     = rec["_aiset_last_used"]
@@ -3577,6 +3584,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
             rec["CONNECT4_ENABLED"]     = CONNECT4_ENABLED
             rec["TICTACTOE_ENABLED"]    = TICTACTOE_ENABLED
             rec["WORDLE_ENABLED"]       = WORDLE_ENABLED
+            rec["CHESS_ENABLED"]        = CHESS_ENABLED
             rec["GAME_TIMEOUT_SECONDS"] = GAME_TIMEOUT_SECONDS
             rec["_ai_last_used"]        = _ai_last_used
             rec["_aiset_last_used"]     = _aiset_last_used
@@ -3596,6 +3604,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
             CONNECT4_ENABLED     = old_c4
             TICTACTOE_ENABLED    = old_ttt
             WORDLE_ENABLED       = old_wrd
+            CHESS_ENABLED        = old_chess
             GAME_TIMEOUT_SECONDS = old_to
             _ai_last_used        = old_ai_lu
             _aiset_last_used     = old_aiset_lu
@@ -3607,7 +3616,7 @@ def handle_game_command_for(group_id: str, rec: dict, message: dict):
 
 
 def handle_game_command(message):
-    global GAME_TIMEOUT_SECONDS, GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED
+    global GAME_TIMEOUT_SECONDS, GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED, CHESS_ENABLED
 
     # Extract text early so we can use it safely
     text = (message.get("text") or "").strip()
@@ -3789,6 +3798,7 @@ def handle_game_command(message):
         disabled = []
         if not CONNECT4_ENABLED:  disabled.append("🎮 Connect Four   (#state connect4 true)")
         if not TICTACTOE_ENABLED: disabled.append("⭕ Tic-Tac-Toe   (#state tictactoe true)")
+        if not CHESS_ENABLED:     disabled.append("♟ Chess           (#state chess true)")
         if not WORDLE_ENABLED:    disabled.append("🟩 Wordle         (#state wordle true)")
         if not EIGHTBALL_ENABLED: disabled.append("🎱 Magic 8-Ball   (#state 8ball true)")
         if not SCRIPTURE_ENABLED: disabled.append("📖 Scripture      (#state scripture true)")
@@ -4866,6 +4876,38 @@ def handle_game_command(message):
                         send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
                         return
 
+                    if subgame in ("chess",):
+                        if not CHESS_ENABLED:
+                            send_message(GAME_GROUP_ID, "♟ Chess is currently disabled.\nUse #state chess true as an admin to enable it.", reply_to_id=msg_id)
+                            return
+                        help_text = (
+                            "♟ *Chess Commands:*\n"
+                            "• #start chess [easy|medium|hard] — Start a game (you play White)\n"
+                            "• #join — Join as Black (PvP)\n"
+                            "• #addai [easy|medium|hard] — Add AI as Black\n"
+                            "• #board — Resend the current board\n"
+                            "• #quit — End the game\n"
+                            "\n"
+                            "*Making moves:*\n"
+                            "• #e2e4  — Move from e2 to e4\n"
+                            "• #O-O   — Castle kingside\n"
+                            "• #O-O-O — Castle queenside\n"
+                            "• #e7e8Q — Promote pawn (Q/R/B/N)\n"
+                            "\n"
+                            "*Board key (every board includes this):*\n"
+                            "White: 🔵K 🟦Q 🟪R 🔷B 💠N 🔹P\n"
+                            "Black: 🔴K 🟥Q 🟣R 🔶B 🔸N ❤️P\n"
+                            "Empty: 🟫 (dark)  🟨 (light)\n"
+                            "\n"
+                            "*AI rewards:* Easy=75 | Medium=175 | Hard=300 pts\n"
+                            "\n"
+                            "Draws: stalemate, 50-move rule, threefold repetition\n"
+                            "\n"
+                            "Enable/disable with: #state chess true/false"
+                        )
+                        send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
+                        return
+
                     if subgame in ("wordle",):
                         if not WORDLE_ENABLED:
                             send_message(GAME_GROUP_ID, "🟩 Wordle is currently disabled.\nUse #state wordle true as an admin to enable it.", reply_to_id=msg_id)
@@ -4897,8 +4939,9 @@ def handle_game_command(message):
                     known_games = []
                     if CONNECT4_ENABLED:  known_games.append("connect4")
                     if TICTACTOE_ENABLED: known_games.append("tictactoe")
+                    if CHESS_ENABLED:     known_games.append("chess")
                     if WORDLE_ENABLED:    known_games.append("wordle")
-                    all_games = ["connect4", "tictactoe", "wordle"]
+                    all_games = ["connect4", "tictactoe", "chess", "wordle"]
                     send_message(
                         GAME_GROUP_ID,
                         f"Unknown game '{subgame}'.\n"
@@ -4918,6 +4961,10 @@ def handle_game_command(message):
                     lines.append("• tictactoe    — Tic-Tac-Toe (classic 3×3 grid)")
                 else:
                     lines.append("• tictactoe    — Tic-Tac-Toe [disabled]")
+                if CHESS_ENABLED:
+                    lines.append("• chess        — Chess (full rules, PvP or vs AI)")
+                else:
+                    lines.append("• chess        — Chess [disabled]")
                 if WORDLE_ENABLED:
                     lines.append("• wordle       — Wordle (guess the 5-letter word in 6 tries)")
                 else:
@@ -5179,7 +5226,7 @@ def handle_game_command(message):
         lines.append("\u2022 #help admin       \u2014 Admin feature controls")
 
         # Tip about hidden features (only show if something is actually disabled)
-        any_disabled = not CONNECT4_ENABLED or not TICTACTOE_ENABLED or not WORDLE_ENABLED or not EIGHTBALL_ENABLED or not SCRIPTURE_ENABLED or not AI_ENABLED
+        any_disabled = not CONNECT4_ENABLED or not TICTACTOE_ENABLED or not WORDLE_ENABLED or not CHESS_ENABLED or not EIGHTBALL_ENABLED or not SCRIPTURE_ENABLED or not AI_ENABLED
         if any_disabled:
             lines.append("")
             lines.append("\U0001f4a4 Some features are hidden. Run !disabled to see them,")
@@ -5766,6 +5813,7 @@ def handle_game_command(message):
                 f"{'Bot (master)':<16} {on if GAME_ENABLED else off}",
                 f"{'Connect Four':<16} {on if CONNECT4_ENABLED else off}",
                 f"{'Tic-Tac-Toe':<16} {on if TICTACTOE_ENABLED else off}",
+                f"{'Chess':<16} {on if CHESS_ENABLED else off}",
                 f"{'Wordle':<16} {on if WORDLE_ENABLED else off}",
                 f"{'Magic 8-Ball':<16} {on if EIGHTBALL_ENABLED else off}",
                 f"{'Scripture':<16} {on if SCRIPTURE_ENABLED else off}",
@@ -5800,7 +5848,7 @@ def handle_game_command(message):
                 "  #state                     — show all states\n"
                 "  #state all true/false       — master switch\n"
                 "  #state <feature> true/false — toggle feature\n"
-                "Features: ai, 8ball, scripture, connect4, tictactoe, wordle",
+                "Features: ai, 8ball, scripture, connect4, tictactoe, wordle, chess",
                 reply_to_id=msg_id,
             )
             return
@@ -5818,6 +5866,7 @@ def handle_game_command(message):
             CONNECT4_ENABLED  = val
             TICTACTOE_ENABLED = val
             WORDLE_ENABLED    = val
+            CHESS_ENABLED     = val
             snapshot_group_config(GAME_GROUP_ID)
             if not val:
                 send_message(GAME_GROUP_ID, "🔴 All features disabled. Only #state commands will work.", reply_to_id=msg_id)
@@ -5854,6 +5903,11 @@ def handle_game_command(message):
             snapshot_group_config(GAME_GROUP_ID)
             send_message(GAME_GROUP_ID, f"Wordle {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
 
+        elif feature == "chess":
+            CHESS_ENABLED = val
+            snapshot_group_config(GAME_GROUP_ID)
+            send_message(GAME_GROUP_ID, f"Chess {'enabled ✅' if val else 'disabled ❌'}.", reply_to_id=msg_id)
+
         else:
             send_message(
                 GAME_GROUP_ID,
@@ -5869,6 +5923,7 @@ def handle_game_command(message):
         message, GAME_GROUP_ID, game_session,
         CONNECT4_ENABLED, TICTACTOE_ENABLED,
         GAME_TIMEOUT_SECONDS,
+        chess_enabled=CHESS_ENABLED,
     ):
         return
 
@@ -6048,7 +6103,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "29a4173"
+BOT_COMMIT_SHA = "237ff17"
 
 _control_panel_instance = None  # set when panel launches
 

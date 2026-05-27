@@ -1435,13 +1435,59 @@ def transfer_points(group_id, from_id, from_name, to_id, to_name, amount):
 
 
 def points_leaderboard(group_id, top_n=None):
-    """Return top_n entries sorted by points. Uses LEADERBOARD_SIZE if None."""
+    """Return top_n entries sorted by level (desc) then net worth (desc).
+    Net worth = liquid points + sum of positive-worth items in inventory.
+    Negative-worth items ('illegal items') are excluded from the calculation.
+    Uses LEADERBOARD_SIZE if top_n is None."""
     if top_n is None:
         top_n = LEADERBOARD_SIZE
     ledger = load_points(group_id)
-    ranked = sorted(ledger.values(), key=lambda e: e.get("points", 0), reverse=True)
+    # Attach computed rank fields to each entry copy
+    enriched = []
+    for uid, entry in ledger.items():
+        pts    = entry.get("points", 0)
+        level  = entry.get("level", 0)
+        inv    = _load_inventory(group_id, uid)
+        item_worth = sum(
+            c.get("worth", 0)
+            for c in inv.get("creations", [])
+            if c.get("worth", 0) > 0          # exclude illegal/negative-worth items
+        )
+        net_worth = pts + item_worth
+        enriched.append({**entry, "uid": uid, "level": level,
+                         "net_worth": net_worth, "item_worth": item_worth})
+    # Primary: level (desc) — like Mario Party stars
+    # Secondary: net worth (desc) — liquid pts + positive item value
+    ranked = sorted(enriched,
+                    key=lambda e: (e["level"], e["net_worth"]),
+                    reverse=True)
     return ranked[:top_n]
 
+
+LEVEL_COST = 10_000   # points required to buy one level
+
+def get_level(group_id, user_id):
+    """Return the player's current level (0 = not levelled yet)."""
+    record = _load_user_record(group_id, str(user_id))
+    return record.get("level", 0)
+
+def buy_level(group_id, user_id, name):
+    """
+    Attempt to spend LEVEL_COST points to gain 1 level.
+    Returns (success, new_level, pts_remaining, reason).
+    Only liquid points count — items must be sold/extracted first.
+    """
+    uid    = str(user_id)
+    record = _load_user_record(group_id, uid)
+    record["name"]  = name or record.get("name") or uid
+    pts    = max(0, record.get("points", 0))
+    level  = record.get("level", 0)
+    if pts < LEVEL_COST:
+        return False, level, pts, f"You need {LEVEL_COST:,} liquid points to buy a level (you have {pts:,})."
+    record["points"] = pts - LEVEL_COST
+    record["level"]  = level + 1
+    _save_user_record(group_id, uid, record)
+    return True, record["level"], record["points"], ""
 
 
 # =============================================================================
@@ -3195,11 +3241,17 @@ def handle_dev_command(message):
         if not ranked:
             send_message(DEV_GROUP_ID, "No points data yet.", reply_to_id=msg_id)
             return
-        lines = [f"🏆 Top {top_n} Leaderboard:"]
+        lines = [f"🏆 Top {top_n} Leaderboard (Level → Net Worth):"]
         medals = ["🥇", "🥈", "🥉"]
         for i, entry in enumerate(ranked):
-            prefix = medals[i] if i < 3 else f"  {i+1}."
-            lines.append(f"{prefix} {entry.get('name', '?')} — {entry.get('points', 0):,} pts")
+            prefix    = medals[i] if i < 3 else f"  {i+1}."
+            level     = entry.get("level", 0)
+            pts       = entry.get("points", 0)
+            net_worth = entry.get("net_worth", pts)
+            item_w    = entry.get("item_worth", 0)
+            lv_tag    = f"Lv.{level} " if level > 0 else ""
+            worth_tag = f"{net_worth:,} net ({pts:,} liquid)" if item_w > 0 else f"{pts:,} pts"
+            lines.append(f"{prefix} {lv_tag}{entry.get('name', '?')} — {worth_tag}")
         send_message(DEV_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
         return
 
@@ -3223,8 +3275,12 @@ def handle_dev_command(message):
         bal = get_points(GAME_GROUP_ID, uid, uname)
         inv = _load_inventory(GAME_GROUP_ID, uid)
         creations = len(inv.get("creations", []))
+        record = _load_user_record(GAME_GROUP_ID, uid)
+        level  = record.get("level", 0)
+        item_w = sum(c.get("worth", 0) for c in inv.get("creations", []) if c.get("worth", 0) > 0)
+        net_w  = bal + item_w
         send_message(DEV_GROUP_ID,
-            f"📊 {uname}:\n  Points: {bal:,}\n  Creations: {creations}",
+            f"📊 {uname}:\n  Level: {level}\n  Liquid pts: {bal:,}\n  Item worth: {item_w:,}\n  Net worth: {net_w:,}\n  Creations: {creations}",
             reply_to_id=msg_id)
         return
 
@@ -3491,6 +3547,7 @@ def check_ai_cooldown(user_id, cooldown_dict, cooldown_seconds):
     """
     Returns (allowed, seconds_remaining).
     allowed=True means the user may proceed.
+    Remaining time is ceiled so it never displays as 0 while still blocking.
     """
     now = time.time()
     last = cooldown_dict.get(user_id)
@@ -3499,7 +3556,8 @@ def check_ai_cooldown(user_id, cooldown_dict, cooldown_seconds):
     elapsed = now - last
     if elapsed >= cooldown_seconds:
         return True, 0
-    return False, int(cooldown_seconds - elapsed)
+    import math
+    return False, math.ceil(cooldown_seconds - elapsed)
 
 
 def set_ai_cooldown(user_id, cooldown_dict):
@@ -3789,8 +3847,11 @@ def handle_game_command(message):
 
     # !points  — check own balance
     if cmd == "!points":
-        bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
-        send_message(GAME_GROUP_ID, f"💰 {sender_name} has {bal} points.", reply_to_id=msg_id)
+        bal    = get_points(GAME_GROUP_ID, sender_id, sender_name)
+        record = _load_user_record(GAME_GROUP_ID, str(sender_id))
+        level  = record.get("level", 0)
+        lv_tag = f"  ⭐ Level {level}\n" if level > 0 else ""
+        send_message(GAME_GROUP_ID, f"💰 {sender_name} has {bal:,} pts.\n{lv_tag}Use #level for full stats.", reply_to_id=msg_id)
         return
 
     # !disabled  — show all currently disabled features
@@ -3920,6 +3981,8 @@ def handle_game_command(message):
             actual_cd = 5 if cd_type == "retry" else POINTS_STEAL_CD
             remaining = actual_cd - (now - ts)
             if remaining > 0:
+                import math
+                remaining = math.ceil(remaining)
                 if cd_type == "retry":
                     send_message(GAME_GROUP_ID,
                         f"🦀 {sender_name}, pick someone else! ({int(remaining)}s)",
@@ -5101,7 +5164,15 @@ def handle_game_command(message):
                         "  Betting your full balance or more = All In!\n"
                         "\u2022 !guess \u2014 Guess a number 1–10 to earn points\n"
                         "  First guess = 200 pts, drops off fast!\n"
-                        "\u2022 #leaderboard \u2014 Top points ranking\n"
+                        "\n"
+                        "\u2b50 *Levels*\n"
+                        "\u2022 #level \u2014 Check your level and progress toward next\n"
+                        "\u2022 #levelup \u2014 Spend 10,000 liquid pts to gain 1 level\n"
+                        "  Levels rank you above same-net-worth players on the board.\n"
+                        "  Like Mario Party stars \u2014 more levels = higher placement!\n"
+                        "  Items must be sold/extracted first (only liquid pts count).\n"
+                        "\n"
+                        "\u2022 #leaderboard \u2014 Top ranking (sorted by level, then net worth)\n"
                         "\n"
                         "\u26a0\ufe0f There is a max point cap set by the server admin."
                     )
@@ -5937,11 +6008,61 @@ def handle_game_command(message):
         if not board_entries:
             send_message(GAME_GROUP_ID, "No points earned yet in this group!", reply_to_id=msg_id)
             return
-        medals = ["🥇", "🥈", "🥉"] + ["   "] * 7
-        lines = ["🏆 Points Leaderboard:"]
+        medals = ["🥇", "🥈", "🥉"] + ["   "] * max(0, len(board_entries) - 3)
+        lines = ["🏆 Leaderboard (Level → Net Worth):"]
         for i, entry in enumerate(board_entries):
-            lines.append(f"{medals[i]} {entry['name']}: {entry['points']} pts")
+            level     = entry.get("level", 0)
+            pts       = entry.get("points", 0)
+            net_worth = entry.get("net_worth", pts)
+            item_w    = entry.get("item_worth", 0)
+            lv_tag    = f"Lv.{level} " if level > 0 else ""
+            worth_tag = f"{net_worth:,} net" if item_w > 0 else f"{pts:,} pts"
+            lines.append(f"{medals[i]} {lv_tag}{entry['name']}: {worth_tag}")
+        lines.append("\n🔑 Net worth = liquid pts + positive item value")
         send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
+        return
+
+    # ── LEVEL SYSTEM ──────────────────────────────────────────────────────────
+
+    # #level  — check your own level and progress toward next
+    if cmd in ("#level", "#levels", "#rank"):
+        record   = _load_user_record(GAME_GROUP_ID, str(sender_id))
+        level    = record.get("level", 0)
+        pts      = max(0, record.get("points", 0))
+        inv      = _load_inventory(GAME_GROUP_ID, str(sender_id))
+        item_w   = sum(c.get("worth", 0) for c in inv.get("creations", []) if c.get("worth", 0) > 0)
+        net_w    = pts + item_w
+        need     = LEVEL_COST
+        can_buy  = pts >= need
+        progress = min(pts, need)
+        bar_len  = 10
+        filled   = int(bar_len * progress / need)
+        bar      = "█" * filled + "░" * (bar_len - filled)
+        item_note = f"\n📦 Item worth (excluded from cost): {item_w:,} pts" if item_w > 0 else ""
+        action   = f"✅ You can #levelup! Costs {need:,} liquid pts." if can_buy else f"Need {need - pts:,} more liquid pts to level up."
+        send_message(GAME_GROUP_ID,
+            f"⭐ {sender_name} — Level {level}\n"
+            f"💰 Liquid pts: {pts:,} / {need:,}\n"
+            f"[{bar}] {int(100*progress/need)}%\n"
+            f"🌐 Net worth: {net_w:,} pts{item_note}\n"
+            f"{action}",
+            reply_to_id=msg_id)
+        return
+
+    # #levelup  — spend 10,000 liquid points to gain 1 level
+    if cmd == "#levelup":
+        success, new_level, pts_left, reason = buy_level(GAME_GROUP_ID, sender_id, sender_name)
+        if not success:
+            send_message(GAME_GROUP_ID,
+                f"⭐ Level Up failed — {reason}\n"
+                f"💡 Sell or extract items to convert their worth to liquid points first.",
+                reply_to_id=msg_id)
+        else:
+            send_message(GAME_GROUP_ID,
+                f"🌟 {sender_name} levelled up to Level {new_level}! ⭐\n"
+                f"💰 {LEVEL_COST:,} pts spent. Remaining: {pts_left:,} pts\n"
+                f"Use #leaderboard to see your new standing.",
+                reply_to_id=msg_id)
         return
 
     send_message(GAME_GROUP_ID, "Unknown command. Use #help for a list of commands.", reply_to_id=msg_id)

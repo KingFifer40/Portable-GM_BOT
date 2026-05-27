@@ -6331,24 +6331,32 @@ def get_latest_message_id(group_id):
 GITHUB_REPO        = "KingFifer40/Portable-GM_BOT"
 GITHUB_COMMITS_URL = f"https://api.github.com/repos/{GITHUB_REPO}/commits/main"
 GITHUB_RAW_URL     = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/Porta-GMBOT.py"
+GITHUB_GAMES_URL   = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/Porta-Games.py"
 GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
+
+# All bot files downloaded during an update (filename → raw URL).
+# Add any new .py files here if the repo gains more modules.
+GITHUB_UPDATE_FILES = {
+    "Porta-GMBOT.py": GITHUB_RAW_URL,
+    "Porta-Games.py": GITHUB_GAMES_URL,
+}
 
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "b82cdbb"
+BOT_COMMIT_SHA = "3a41d00"
 
 _control_panel_instance = None  # set when panel launches
 
 
 def _check_for_update():
     """
-    Checks the latest commit that touched Porta-GMBOT.py specifically.
-    Commits to README, resources, or other files are ignored.
+    Checks the latest commit on the main branch of the whole repo.
+    Any commit to any file will be detected — not just Porta-GMBOT.py.
     Returns (sha_short, commit_message, commit_url) or (None, None, None) on failure.
     """
     try:
-        api_url = f"https://api.github.com/repos/{GITHUB_REPO}/commits?path=Porta-GMBOT.py&per_page=1"
+        api_url = f"https://api.github.com/repos/{GITHUB_REPO}/commits?per_page=1"
         resp = requests.get(api_url, timeout=8)
         if resp.status_code == 200:
             data = resp.json()
@@ -6366,49 +6374,59 @@ def _check_for_update():
 
 def _do_self_update():
     """
-    Downloads the latest Porta-GMBOT.py from the main branch, stamps the new
-    commit SHA into it so the update checker knows what version is running,
-    then replaces this file atomically and triggers a restart via restart_bot.py.
+    Downloads every file listed in GITHUB_UPDATE_FILES from the main branch,
+    stamps the new commit SHA into Porta-GMBOT.py, replaces files atomically,
+    then triggers a restart via restart_bot.py.
 
-    Before overwriting, saves the current file as Porta-GMBOT.py.bak so the
+    Before overwriting, saves Porta-GMBOT.py as Porta-GMBOT.py.bak so the
     user can roll back if the new version has problems.
     """
     try:
-        # Fetch the new script
-        resp = requests.get(GITHUB_RAW_URL, timeout=30)
-        if resp.status_code != 200:
-            return False, f"HTTP {resp.status_code}"
-        new_source = resp.text
-
-        # Fetch the current commit SHA and stamp it into the downloaded source.
-        sha_short, _, _ = _check_for_update()
-        if sha_short:
-            import re as _re
-            new_source = _re.sub(
-                r'BOT_COMMIT_SHA\s*=\s*"[^"]*"',
-                f'BOT_COMMIT_SHA = "{sha_short}"',
-                new_source,
-                count=1,
-            )
-
         script_path = os.path.abspath(__file__)
-        bak_path    = script_path + ".bak"
-        tmp_path    = script_path + ".update_tmp"
+        script_dir  = os.path.dirname(script_path)
 
-        # ── Back up the current version before overwriting ───────────────────
+        # ── Fetch the new commit SHA first ───────────────────────────────────
+        sha_short, _, _ = _check_for_update()
+
+        # ── Download every bot file ──────────────────────────────────────────
+        downloaded = {}   # filename → new text content
+        import re as _re
+        for filename, raw_url in GITHUB_UPDATE_FILES.items():
+            resp = requests.get(raw_url, timeout=30)
+            if resp.status_code != 200:
+                return False, f"HTTP {resp.status_code} downloading {filename}"
+            content = resp.text
+            # Stamp the new commit SHA into Porta-GMBOT.py so the update
+            # checker knows what version is running after the restart.
+            if filename == "Porta-GMBOT.py" and sha_short:
+                content = _re.sub(
+                    r'BOT_COMMIT_SHA\s*=\s*"[^"]*"',
+                    f'BOT_COMMIT_SHA = "{sha_short}"',
+                    content,
+                    count=1,
+                )
+            downloaded[filename] = content
+            print(f"[update] Downloaded {filename} ({len(content):,} bytes)")
+
+        # ── Back up Porta-GMBOT.py before overwriting ────────────────────────
         try:
             import shutil as _shutil
-            _shutil.copy2(script_path, bak_path)
-            print(f"[update] Current version backed up to: {bak_path}")
+            _shutil.copy2(script_path, script_path + ".bak")
+            print(f"[update] Backup saved to: {script_path}.bak")
         except Exception as e:
             print(f"[update] WARNING: Could not create backup: {e}")
 
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(new_source)
-        os.replace(tmp_path, script_path)
+        # ── Write all files atomically ───────────────────────────────────────
+        for filename, content in downloaded.items():
+            dest = os.path.join(script_dir, filename)
+            tmp  = dest + ".update_tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.replace(tmp, dest)
+            print(f"[update] Wrote {dest}")
 
-        # Find and call restart_bot.py in the same directory
-        restart_script = os.path.join(os.path.dirname(script_path), "restart_bot.py")
+        # ── Restart ──────────────────────────────────────────────────────────
+        restart_script = os.path.join(script_dir, "restart_bot.py")
         if not os.path.exists(restart_script):
             return False, "restart_bot.py not found in script directory"
 

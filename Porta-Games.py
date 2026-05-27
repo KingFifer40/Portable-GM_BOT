@@ -90,7 +90,7 @@ def fresh_game_session():
     """
     return {
         # ── Active game marker ─────────────────────────────────────────────
-        "active_game": None,      # None | "connect4" | "tictactoe" | "chess"
+        "active_game": None,      # None | "connect4" | "tictactoe"
         "last_move_time": None,   # float — for timeout tracking
         "timeout_seconds": 300,
 
@@ -99,9 +99,6 @@ def fresh_game_session():
 
         # ── Tic-Tac-Toe state ─────────────────────────────────────────────
         "ttt": _fresh_ttt(),
-
-        # ── Chess state ────────────────────────────────────────────────────
-        "chess": _fresh_chess(),
     }
 
 
@@ -997,7 +994,7 @@ def handle_game_command(message, gid, session, connect4_enabled, tictactoe_enabl
     connect4_enabled   : bool
     tictactoe_enabled  : bool
     game_timeout_seconds : int — inactive game timeout (kept in sync here)
-    chess_enabled      : bool
+    chess_enabled      : bool — reserved for future chess support (default False)
 
     Returns True if command handled, False otherwise.
     """
@@ -1024,12 +1021,11 @@ def handle_game_command(message, gid, session, connect4_enabled, tictactoe_enabl
             games = []
             if connect4_enabled:   games.append("c4 (Connect Four)")
             if tictactoe_enabled:  games.append("ttt (Tic-Tac-Toe)")
-            if chess_enabled:      games.append("chess (Chess)")
             if games:
                 _send(gid,
                     "Usage: #start <game> [difficulty]\n"
                     "Games: " + ", ".join(games) + "\n"
-                    "Example: #start c4 hard  |  #start ttt  |  #start chess medium",
+                    "Example: #start c4 hard  |  #start ttt",
                     reply_to_id=msg_id)
             else:
                 _send(gid, "No games are enabled. Ask an admin to enable them with #state.", reply_to_id=msg_id)
@@ -1044,11 +1040,8 @@ def handle_game_command(message, gid, session, connect4_enabled, tictactoe_enabl
         if game_arg in ("ttt", "tictactoe"):
             ttt_start(gid, session, sender_id, sender_name, diff_arg, msg_id, tictactoe_enabled)
             return True
-        if game_arg in ("chess",):
-            chess_start(gid, session, sender_id, sender_name, diff_arg, msg_id, chess_enabled)
-            return True
 
-        _send(gid, f"Unknown game '{game_arg}'.\nKnown games: c4, ttt, chess", reply_to_id=msg_id)
+        _send(gid, f"Unknown game '{game_arg}'.\nKnown games: c4, ttt", reply_to_id=msg_id)
         return True
 
     # ─── #join — joins whatever game is waiting for a second player ───────────
@@ -1058,8 +1051,6 @@ def handle_game_command(message, gid, session, connect4_enabled, tictactoe_enabl
             c4_join(gid, session, sender_id, sender_name, msg_id, connect4_enabled)
         elif ag == "tictactoe":
             ttt_join(gid, session, sender_id, sender_name, msg_id, tictactoe_enabled)
-        elif ag == "chess":
-            chess_join(gid, session, sender_id, sender_name, msg_id, chess_enabled)
         else:
             _send(gid, "No game is waiting for players. Use #start <game> to begin.", reply_to_id=msg_id)
         return True
@@ -1072,8 +1063,6 @@ def handle_game_command(message, gid, session, connect4_enabled, tictactoe_enabl
             c4_addai(gid, session, sender_id, sender_name, diff_arg, msg_id, connect4_enabled)
         elif ag == "tictactoe":
             ttt_addai(gid, session, sender_id, sender_name, msg_id, tictactoe_enabled)
-        elif ag == "chess":
-            chess_addai(gid, session, sender_id, sender_name, diff_arg, msg_id, chess_enabled)
         else:
             _send(gid, "No game is waiting for a second player. Use #start <game> first.", reply_to_id=msg_id)
         return True
@@ -1085,8 +1074,6 @@ def handle_game_command(message, gid, session, connect4_enabled, tictactoe_enabl
             c4_quit(gid, session, sender_name, msg_id)
         elif ag == "tictactoe":
             ttt_quit(gid, session, sender_name, msg_id)
-        elif ag == "chess":
-            chess_quit(gid, session, sender_name, msg_id)
         else:
             _send(gid, "No game is currently running.", reply_to_id=msg_id)
         return True
@@ -1105,22 +1092,6 @@ def handle_game_command(message, gid, session, connect4_enabled, tictactoe_enabl
         session["timeout_seconds"] = val
         _send(gid, f"Game timeout set to {val} seconds.", reply_to_id=msg_id)
         return True
-
-    # ─── #board — resend the chess board ─────────────────────────────────────
-    if cmd == "#board":
-        if session.get("active_game") == "chess":
-            chess_board(gid, session, sender_id, msg_id)
-            return True
-
-    # ─── Chess moves: #e2e4 / #O-O / #O-O-O ─────────────────────────────────
-    if session.get("active_game") == "chess":
-        raw = cmd  # e.g. "#e2e4" or "#O-O"
-        from_sq, to_sq, promo = _parse_chess_move(raw)
-        if from_sq is not None:
-            is_castle = (from_sq in ("O-O", "O-O-O"))
-            chess_move(gid, session, sender_id, sender_name,
-                       from_sq, to_sq, promo, is_castle, msg_id, chess_enabled)
-            return True
 
     # ─── Connect Four column moves: #A through #G or emoji ───────────────────
     if session.get("active_game") == "connect4":
@@ -1177,8 +1148,6 @@ def check_timeout(gid, session):
         _c4_reset(session)
     elif ag == "tictactoe":
         _ttt_reset(session)
-    elif ag == "chess":
-        _chess_reset(session)
 
     msg = f"⏰ {ag.title() if ag else 'Game'} timed out due to inactivity."
     if refunds:
@@ -1202,897 +1171,566 @@ def leaderboard_text(entries, top_n):
 
 # =============================================================================
 # ┌─────────────────────────────────────────────────────────────────────────┐
-# │  CHESS  —  PvP / vs-AI two-player board game                            │
+# │  UNO  —  DM-based multiplayer card game                                 │
 # └─────────────────────────────────────────────────────────────────────────┘
-#
-# Board representation
-# ---------------------
-#   board[row][col]  — row 0 = rank 8 (Black's back row), row 7 = rank 1 (White)
-#   col 0 = file a … col 7 = file h
-#   Each cell is "" (empty) or a piece string like "wK", "bP", etc.
-#     Prefix:  w = White,  b = Black
-#     Suffix:  K King  Q Queen  R Rook  B Bishop  N Knight  P Pawn
-#
-# Move input
-# ----------
-#   Players type  #e2e4  (from-square to-square, no spaces).
-#   Castling shortcuts: #O-O  (kingside)  #O-O-O  (queenside)
-#   Pawn promotion: #e7e8Q  (appended piece letter)
-#
-# Board display
-# -------------
-#   Squares alternate 🟫🟨 (dark/light).  Pieces are colour-coded emoji:
-#     White pieces → 🔵 blue square  |  Black pieces → 🔴 red square
-#   A key is printed below every board so players always know which is which.
-#
-# AI
-# --
-#   Minimax with alpha-beta pruning, iterative deepening.
-#   easy=2 ply, medium=4 ply, hard=6 ply.
-#   Rewards for winning AI: easy=75, medium=175, hard=300 pts.
-#
+# State dict keys used by the main bot:
+#   state["state"]    : "lobby" | "playing" | "done"
+#   state["players"]  : list of uid strings (turn order)
+#   state["current"]  : index into players for whose turn it is
+#   state["names"]    : {uid: display_name}
+#   state["hands"]    : {uid: [card, ...]}
+#   state["deck"]     : [card, ...]  remaining draw pile
+#   state["discard"]  : [card, ...]  top is [-1]
+#   state["host"]     : uid of the player who opened the lobby
+#   state["group"]    : group name string
+#   state["drawn"]    : bool — current player drew this turn (may pass)
+#   state["direction"]: 1 (clockwise) or -1 (counter-clockwise)
+#   state["last_move"]: float timestamp of last action (for idle kick)
+#   state["skip_next"]: bool — next player's turn is skipped
+#   state["color"]    : active color (after wild is played)
 # =============================================================================
 
-# ── Piece-to-emoji mapping ────────────────────────────────────────────────────
-# We use coloured-square emojis as the "piece cell" so every square is exactly
-# one emoji wide regardless of the Unicode chess glyph renderer.
-#
-#   White pieces: blue background  🔵-family
-#   Black pieces: red background   🔴-family
-#   Empty dark square:  🟫
-#   Empty light square: 🟨
+# ── Card definitions ──────────────────────────────────────────────────────────
 
-_CHESS_W_EMOJI = {
-    "wK": "🔵",   # King
-    "wQ": "🟦",   # Queen
-    "wR": "🟪",   # Rook  (reusing purple — key explains)
-    "wB": "🔷",   # Bishop
-    "wN": "💠",   # Knight
-    "wP": "🔹",   # Pawn
-}
-_CHESS_B_EMOJI = {
-    "bK": "🔴",   # King
-    "bQ": "🟥",   # Queen
-    "bR": "🟣",   # Rook
-    "bB": "🔶",   # Bishop
-    "bN": "🔸",   # Knight
-    "bP": "❤️",   # Pawn — single emoji, renders same width
-}
-# Piece full names for the key
-_CHESS_PIECE_NAMES = {
-    "K": "King", "Q": "Queen", "R": "Rook",
-    "B": "Bishop", "N": "Knight", "P": "Pawn",
+_UNO_COLORS  = ["Red", "Yellow", "Green", "Blue"]
+_UNO_NUMBERS = ["0","1","2","3","4","5","6","7","8","9"]
+_UNO_SPECIALS = ["Skip", "Reverse", "Draw Two"]
+_UNO_WILDS   = ["Wild", "Wild Draw Four"]
+
+_COLOR_EMOJI = {
+    "Red":    "🔴",
+    "Yellow": "🟡",
+    "Green":  "🟢",
+    "Blue":   "🔵",
+    "Wild":   "🃏",
 }
 
-_CHESS_DARK  = "🟫"
-_CHESS_LIGHT = "🟨"
-
-# Key printed below every board
-_CHESS_KEY = (
-    "♟ KEY — White(🔵): 🔵K 🟦Q 🟪R 🔷B 💠N 🔹P\n"
-    "♟ KEY — Black(🔴): 🔴K 🟥Q 🟣R 🔶B 🔸N ❤️P"
-)
-
-# File/rank labels for board edges
-_CHESS_FILES = "abcdefgh"
-_CHESS_RANKS = "87654321"   # row 0 → rank 8, row 7 → rank 1
-
-# Point rewards
-_chess_rewards = {"easy": 75, "medium": 175, "hard": 300}
-
-def set_chess_rewards(easy, medium, hard):
-    _chess_rewards["easy"]   = easy
-    _chess_rewards["medium"] = medium
-    _chess_rewards["hard"]   = hard
+UNO_IDLE_SECONDS = 120   # kick player after 2 minutes of inactivity
+UNO_MAX_PLAYERS  = 10
+UNO_MIN_PLAYERS  = 2
+UNO_HAND_SIZE    = 7
 
 
-# ── Board init ────────────────────────────────────────────────────────────────
-
-def _chess_start_board():
-    """Return the standard starting position as an 8×8 list of strings."""
-    back = ["R","N","B","Q","K","B","N","R"]
-    board = [[""]*8 for _ in range(8)]
-    for c, p in enumerate(back):
-        board[0][c] = "b" + p   # Black back row
-        board[7][c] = "w" + p   # White back row
-    for c in range(8):
-        board[1][c] = "bP"
-        board[6][c] = "wP"
-    return board
-
-
-def _fresh_chess():
-    return {
-        "board": None,
-        "players": {},          # {uid: {"name": str, "color": "w"|"b"}}
-        "turn_order": [],       # [uid_white, uid_black]  (or "AI")
-        "current_turn": 0,      # index into turn_order
-        "ai_difficulty": "medium",
-        # Castling rights: True = still possible (hasn't moved king/rook)
-        "castle_rights": {
-            "w": {"K": True, "Q": True},   # w kingside / queenside
-            "b": {"K": True, "Q": True},
-        },
-        "en_passant": None,     # (row, col) square that can be captured en-passant, or None
-        "last_move": None,      # string like "e2e4" for display
-        "move_count": 0,
-        "check_flag": None,     # "w" | "b" | None  — whose king is in check
-        "halfmove_clock": 0,    # for 50-move draw rule
-        "position_history": [], # list of board hashes for threefold repetition
-    }
+def _uno_make_deck():
+    deck = []
+    for color in _UNO_COLORS:
+        deck.append(f"{color} 0")
+        for num in _UNO_NUMBERS[1:]:
+            deck.append(f"{color} {num}")
+            deck.append(f"{color} {num}")
+        for sp in _UNO_SPECIALS:
+            deck.append(f"{color} {sp}")
+            deck.append(f"{color} {sp}")
+    for _ in range(4):
+        deck.append("Wild")
+        deck.append("Wild Draw Four")
+    random.shuffle(deck)
+    return deck
 
 
-# ── Board rendering ───────────────────────────────────────────────────────────
-
-def _chess_cell_emoji(piece, row, col):
-    """Return the display emoji for a board cell."""
-    if piece == "":
-        return _CHESS_DARK if (row + col) % 2 == 0 else _CHESS_LIGHT
-    if piece.startswith("w"):
-        return _CHESS_W_EMOJI.get(piece, "❓")
-    return _CHESS_B_EMOJI.get(piece, "❓")
-
-
-def _chess_board_text(board, last_move=None, perspective="w"):
-    """
-    Render the 8×8 board as text.
-    perspective="w" → White's view (rank 8 on top, a-file on left).
-    perspective="b" → Black's view (rank 1 on top, h-file on left).
-    """
-    rows_iter  = range(8)        if perspective == "w" else range(7,-1,-1)
-    cols_iter  = range(8)        if perspective == "w" else range(7,-1,-1)
-    rank_labels = _CHESS_RANKS   if perspective == "w" else _CHESS_RANKS[::-1]
-
-    # Column header (file letters)
-    if perspective == "w":
-        file_header = "  " + " ".join(_CHESS_FILES)
-    else:
-        file_header = "  " + " ".join(reversed(_CHESS_FILES))
-
-    lines = [file_header]
-    for ri, row in enumerate(rows_iter):
-        rank_lbl = rank_labels[ri]
-        row_cells = "".join(
-            _chess_cell_emoji(board[row][col], row, col)
-            for col in cols_iter
-        )
-        lines.append(f"{rank_lbl} {row_cells}")
-    lines.append(file_header)
-
-    board_str = "\n".join(lines)
-    if last_move:
-        board_str += f"\n📌 Last move: {last_move}"
-    board_str += "\n" + _CHESS_KEY
-    return board_str
+def _uno_card_emoji(card):
+    """Return a short emoji+text representation of a card."""
+    if card in ("Wild", "Wild Draw Four"):
+        return f"🃏 {card}"
+    parts = card.split(" ", 1)
+    color = parts[0]
+    face  = parts[1] if len(parts) > 1 else ""
+    return f"{_COLOR_EMOJI.get(color, '')} {card}"
 
 
-# ── Square helpers ────────────────────────────────────────────────────────────
-
-def _sq_to_rc(sq):
-    """'e2' → (6, 4)  (row, col).  Returns (None,None) on error."""
-    sq = sq.lower().strip()
-    if len(sq) < 2 or sq[0] not in _CHESS_FILES or sq[1] not in "12345678":
-        return None, None
-    col = _CHESS_FILES.index(sq[0])
-    row = 8 - int(sq[1])
-    return row, col
-
-def _rc_to_sq(row, col):
-    return _CHESS_FILES[col] + _CHESS_RANKS[row]
-
-def _parse_chess_move(cmd):
-    """
-    Parse '#e2e4', '#e2e4Q', '#O-O', '#O-O-O'.
-    Returns (from_sq, to_sq, promo) or (None,None,None).
-    """
-    inner = cmd.lstrip("#").upper()
-    if inner in ("O-O", "0-0"):
-        return "O-O", None, None
-    if inner in ("O-O-O", "0-0-0"):
-        return "O-O-O", None, None
-    inner = inner.lower()
-    if len(inner) == 4:
-        return inner[:2], inner[2:], None
-    if len(inner) == 5 and inner[4] in "qrbn":
-        return inner[:2], inner[2:4], inner[4]
-    return None, None, None
+def _uno_hand_text(hand):
+    """Format a player's hand as a numbered list."""
+    lines = ["Your hand:"]
+    for i, card in enumerate(hand, 1):
+        lines.append(f"  {i}. {_uno_card_emoji(card)}")
+    return "\n".join(lines)
 
 
-# ── Move generation ───────────────────────────────────────────────────────────
-
-def _chess_color(piece):
-    return piece[0] if piece else None
-
-def _chess_opponent(color):
-    return "b" if color == "w" else "w"
-
-def _in_bounds(r, c):
-    return 0 <= r < 8 and 0 <= c < 8
-
-def _chess_raw_moves(board, row, col, en_passant=None):
-    """
-    Generate all pseudo-legal (row,col) destination squares for piece at (row,col).
-    Does NOT check for leaving own king in check.
-    Returns list of (to_row, to_col, flags) where flags is a dict.
-    """
-    piece = board[row][col]
-    if not piece:
-        return []
-    color = piece[0]
-    ptype = piece[1]
-    opp   = _chess_opponent(color)
-    moves = []
-
-    def add(r, c, flags=None):
-        if _in_bounds(r, c) and _chess_color(board[r][c]) != color:
-            moves.append((r, c, flags or {}))
-
-    def slide(dirs):
-        for dr, dc in dirs:
-            r, c = row + dr, col + dc
-            while _in_bounds(r, c):
-                if board[r][c]:
-                    if _chess_color(board[r][c]) == opp:
-                        moves.append((r, c, {}))
-                    break
-                moves.append((r, c, {}))
-                r += dr; c += dc
-
-    if ptype == "P":
-        dir_ = -1 if color == "w" else 1
-        start_row = 6 if color == "w" else 1
-        # Forward
-        r1 = row + dir_
-        if _in_bounds(r1, col) and not board[r1][col]:
-            promo = (r1 == 0 or r1 == 7)
-            moves.append((r1, col, {"promo": promo}))
-            # Double push
-            r2 = row + 2*dir_
-            if row == start_row and not board[r2][col]:
-                moves.append((r2, col, {"ep_set": (row + dir_, col)}))
-        # Captures
-        for dc in (-1, 1):
-            rc = (row + dir_, col + dc)
-            if _in_bounds(*rc):
-                if board[rc[0]][rc[1]] and _chess_color(board[rc[0]][rc[1]]) == opp:
-                    moves.append((rc[0], rc[1], {"promo": (rc[0] == 0 or rc[0] == 7)}))
-                # En passant
-                if en_passant and rc == en_passant:
-                    moves.append((rc[0], rc[1], {"ep_capture": (row, col + dc)}))
-
-    elif ptype == "N":
-        for dr, dc in [(-2,-1),(-2,1),(-1,-2),(-1,2),(1,-2),(1,2),(2,-1),(2,1)]:
-            add(row+dr, col+dc)
-
-    elif ptype == "B":
-        slide([(-1,-1),(-1,1),(1,-1),(1,1)])
-
-    elif ptype == "R":
-        slide([(-1,0),(1,0),(0,-1),(0,1)])
-
-    elif ptype == "Q":
-        slide([(-1,-1),(-1,1),(1,-1),(1,1),(-1,0),(1,0),(0,-1),(0,1)])
-
-    elif ptype == "K":
-        for dr, dc in [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)]:
-            add(row+dr, col+dc)
-
-    return moves
+def _uno_top_card_text(state):
+    top   = state["discard"][-1]
+    color = state["color"]
+    base  = f"Top card: {_uno_card_emoji(top)}"
+    if top in ("Wild", "Wild Draw Four"):
+        base += f"  (active color: {_COLOR_EMOJI.get(color,'')} {color})"
+    return base
 
 
-def _chess_find_king(board, color):
-    for r in range(8):
-        for c in range(8):
-            if board[r][c] == color + "K":
-                return r, c
-    return None, None
-
-
-def _chess_is_attacked(board, row, col, by_color):
-    """Return True if (row,col) is attacked by any piece of by_color."""
-    for r in range(8):
-        for c in range(8):
-            if board[r][c] and board[r][c][0] == by_color:
-                for tr, tc, _ in _chess_raw_moves(board, r, c):
-                    if tr == row and tc == col:
-                        return True
+def _uno_can_play(card, top, active_color):
+    """Return True if card can legally be played on top/active_color."""
+    if card in ("Wild", "Wild Draw Four"):
+        return True
+    parts = card.split(" ", 1)
+    card_color = parts[0]
+    card_face  = parts[1] if len(parts) > 1 else ""
+    if card_color == active_color:
+        return True
+    top_parts = top.split(" ", 1) if top not in ("Wild","Wild Draw Four") else [None, None]
+    top_face = top_parts[1] if top not in ("Wild","Wild Draw Four") else None
+    if top_face and card_face == top_face:
+        return True
     return False
 
 
-def _chess_in_check(board, color):
-    kr, kc = _chess_find_king(board, color)
-    if kr is None:
-        return True   # no king = in check (shouldn't happen in normal play)
-    return _chess_is_attacked(board, kr, kc, _chess_opponent(color))
+def _uno_active_color(state):
+    top = state["discard"][-1]
+    if top not in ("Wild", "Wild Draw Four"):
+        return top.split(" ", 1)[0]
+    return state.get("color", "Red")
 
 
-def _chess_apply_move(board, fr, fc, tr, tc, flags, promo_piece=None, castle_rights=None, en_passant=None):
-    """
-    Apply a move to a copy of the board.  Returns (new_board, new_castle_rights, new_en_passant).
-    """
-    import copy
-    nb = copy.deepcopy(board)
-    piece = nb[fr][fc]
-    color = piece[0]
-    ptype = piece[1]
-    new_ep = None
+def _uno_draw_cards(state, n):
+    """Draw n cards from deck, reshuffling discard if needed. Returns list."""
+    drawn = []
+    for _ in range(n):
+        if not state["deck"]:
+            # reshuffle all but top discard card
+            if len(state["discard"]) > 1:
+                top = state["discard"].pop()
+                state["deck"] = state["discard"]
+                random.shuffle(state["deck"])
+                state["discard"] = [top]
+            else:
+                break  # truly out of cards
+        if state["deck"]:
+            drawn.append(state["deck"].pop())
+    return drawn
 
-    # En passant capture
-    if "ep_capture" in flags:
-        er, ec = flags["ep_capture"]
-        nb[er][ec] = ""
 
-    # Set EP square for double pawn push
-    if "ep_set" in flags:
-        new_ep = flags["ep_set"]
+def _uno_next_turn(state, skip=False):
+    """Advance state["current"] by direction, optionally skipping one."""
+    n = len(state["players"])
+    steps = 2 if skip else 1
+    state["current"] = (state["current"] + state["direction"] * steps) % n
+    state["drawn"]   = False
 
-    # Move piece
-    nb[tr][tc] = piece
-    nb[fr][fc] = ""
 
-    # Pawn promotion
-    if ptype == "P" and (tr == 0 or tr == 7):
-        pp = (promo_piece or "q").upper()
-        nb[tr][tc] = color + pp
+def _uno_announce_turn(gid, state, sdm, sg):
+    """DM the current player their hand + top card, and post whose turn it is in group."""
+    uid  = state["players"][state["current"]]
+    name = state["names"].get(uid, uid)
+    top_txt  = _uno_top_card_text(state)
+    hand_txt = _uno_hand_text(state["hands"][uid])
+    card_count_line = "  ".join(
+        f"{state['names'].get(u, u)}: {len(state['hands'][u])} card{'s' if len(state['hands'][u])!=1 else ''}"
+        for u in state["players"] if u != uid
+    )
+    dm_lines = [
+        f"━━━ Your turn! ━━━",
+        top_txt,
+        hand_txt,
+        "",
+        f"Other players: {card_count_line}" if card_count_line else "",
+        "",
+        "Commands: #play <card>  |  #draw  |  #hand  |  #pass (after drawing)  |  #quit",
+        "Example: #play Red 7   or   #play Wild (then you'll be asked for a color)",
+    ]
+    sdm(uid, "\n".join(l for l in dm_lines if l != "" or True))
+    sg(gid, f"🃏 It's {name}'s turn! ({len(state['hands'][uid])} cards)")
+    state["last_move"] = time.time()
 
-    # Update castle rights
-    new_cr = copy.deepcopy(castle_rights) if castle_rights else {
-        "w": {"K": True, "Q": True}, "b": {"K": True, "Q": True}
+
+# ── Public API called by Porta-GMBOT ─────────────────────────────────────────
+
+def uno_help_text():
+    return (
+        "🃏 UNO — How to play:\n"
+        "#start uno   — open a lobby\n"
+        "#join        — join the lobby\n"
+        "#start uno go — host starts the game (deals cards)\n"
+        "\nIn-game (via DM from the bot):\n"
+        "#hand        — show your cards\n"
+        "#play <card> — play a card  e.g. #play Red 7  or  #play Wild\n"
+        "#draw        — draw a card\n"
+        "#pass        — pass after drawing\n"
+        "#status      — show group game status\n"
+        "#quit        — leave the game"
+    )
+
+
+def uno_start(gid, group_name, sender_id, sender_name, enabled, sg, sdm):
+    """Open a lobby. Returns the new state dict, or None on failure."""
+    if not enabled:
+        sg(gid, "🃏 UNO is currently disabled. An admin must enable it first.")
+        return None
+    state = {
+        "state":     "lobby",
+        "players":   [str(sender_id)],
+        "names":     {str(sender_id): sender_name},
+        "hands":     {},
+        "deck":      [],
+        "discard":   [],
+        "host":      str(sender_id),
+        "group":     group_name,
+        "current":   0,
+        "direction": 1,
+        "drawn":     False,
+        "color":     "Red",
+        "last_move": time.time(),
+        "skip_next": False,
     }
-    if ptype == "K":
-        new_cr[color]["K"] = False
-        new_cr[color]["Q"] = False
-    if ptype == "R":
-        back_row = 7 if color == "w" else 0
-        if fr == back_row and fc == 7: new_cr[color]["K"] = False
-        if fr == back_row and fc == 0: new_cr[color]["Q"] = False
-
-    return nb, new_cr, new_ep
-
-
-def _chess_apply_castle(board, color, side, castle_rights):
-    """Apply castling. side='K' or 'Q'. Returns new board or None if illegal."""
-    import copy
-    row = 7 if color == "w" else 0
-    opp = _chess_opponent(color)
-
-    if side == "K":
-        # King e→g, Rook h→f
-        king_path = [(row, 4), (row, 5), (row, 6)]
-        rook_from, rook_to = (row, 7), (row, 5)
-    else:
-        # King e→c, Rook a→d
-        king_path = [(row, 4), (row, 3), (row, 2)]
-        rook_from, rook_to = (row, 0), (row, 3)
-
-    # Check rights and pieces present
-    if not castle_rights[color][side]:
-        return None
-    if board[row][4] != color + "K":
-        return None
-    if board[rook_from[0]][rook_from[1]] != color + "R":
-        return None
-    # Squares between must be empty
-    between = range(5, 7) if side == "K" else range(1, 4)
-    for c in between:
-        if board[row][c]:
-            return None
-    # King must not pass through check
-    for r, c in king_path:
-        if _chess_is_attacked(board, r, c, opp):
-            return None
-
-    nb = copy.deepcopy(board)
-    king_to_col = 6 if side == "K" else 2
-    nb[row][4]          = ""
-    nb[row][king_to_col] = color + "K"
-    nb[rook_from[0]][rook_from[1]] = ""
-    nb[rook_to[0]][rook_to[1]]     = color + "R"
-    return nb
-
-
-def _chess_legal_moves(board, color, castle_rights, en_passant):
-    """Return list of all legal (fr,fc,tr,tc,flags) moves for color."""
-    legal = []
-    for r in range(8):
-        for c in range(8):
-            if board[r][c] and board[r][c][0] == color:
-                for tr, tc, flags in _chess_raw_moves(board, r, c, en_passant):
-                    nb, ncr, nep = _chess_apply_move(board, r, c, tr, tc, flags,
-                                                      castle_rights=castle_rights,
-                                                      en_passant=en_passant)
-                    if not _chess_in_check(nb, color):
-                        legal.append((r, c, tr, tc, flags))
-    # Castling
-    for side in ("K", "Q"):
-        nb_castle = _chess_apply_castle(board, color, side, castle_rights)
-        if nb_castle and not _chess_in_check(nb_castle, color):
-            row = 7 if color == "w" else 0
-            to_col = 6 if side == "K" else 2
-            legal.append((row, 4, row, to_col, {"castle": side}))
-    return legal
-
-
-def _chess_is_checkmate(board, color, castle_rights, en_passant):
-    return (_chess_in_check(board, color) and
-            len(_chess_legal_moves(board, color, castle_rights, en_passant)) == 0)
-
-def _chess_is_stalemate(board, color, castle_rights, en_passant):
-    return (not _chess_in_check(board, color) and
-            len(_chess_legal_moves(board, color, castle_rights, en_passant)) == 0)
-
-
-# ── Evaluation for AI ─────────────────────────────────────────────────────────
-
-_PIECE_VALUE = {"P": 100, "N": 320, "B": 330, "R": 500, "Q": 900, "K": 20000}
-
-# Piece-square tables (white's perspective, row 0 = rank 8)
-_PST = {
-    "P": [
-        [ 0,  0,  0,  0,  0,  0,  0,  0],
-        [50, 50, 50, 50, 50, 50, 50, 50],
-        [10, 10, 20, 30, 30, 20, 10, 10],
-        [ 5,  5, 10, 25, 25, 10,  5,  5],
-        [ 0,  0,  0, 20, 20,  0,  0,  0],
-        [ 5, -5,-10,  0,  0,-10, -5,  5],
-        [ 5, 10, 10,-20,-20, 10, 10,  5],
-        [ 0,  0,  0,  0,  0,  0,  0,  0],
-    ],
-    "N": [
-        [-50,-40,-30,-30,-30,-30,-40,-50],
-        [-40,-20,  0,  0,  0,  0,-20,-40],
-        [-30,  0, 10, 15, 15, 10,  0,-30],
-        [-30,  5, 15, 20, 20, 15,  5,-30],
-        [-30,  0, 15, 20, 20, 15,  0,-30],
-        [-30,  5, 10, 15, 15, 10,  5,-30],
-        [-40,-20,  0,  5,  5,  0,-20,-40],
-        [-50,-40,-30,-30,-30,-30,-40,-50],
-    ],
-    "B": [
-        [-20,-10,-10,-10,-10,-10,-10,-20],
-        [-10,  0,  0,  0,  0,  0,  0,-10],
-        [-10,  0,  5, 10, 10,  5,  0,-10],
-        [-10,  5,  5, 10, 10,  5,  5,-10],
-        [-10,  0, 10, 10, 10, 10,  0,-10],
-        [-10, 10, 10, 10, 10, 10, 10,-10],
-        [-10,  5,  0,  0,  0,  0,  5,-10],
-        [-20,-10,-10,-10,-10,-10,-10,-20],
-    ],
-    "R": [
-        [ 0,  0,  0,  0,  0,  0,  0,  0],
-        [ 5, 10, 10, 10, 10, 10, 10,  5],
-        [-5,  0,  0,  0,  0,  0,  0, -5],
-        [-5,  0,  0,  0,  0,  0,  0, -5],
-        [-5,  0,  0,  0,  0,  0,  0, -5],
-        [-5,  0,  0,  0,  0,  0,  0, -5],
-        [-5,  0,  0,  0,  0,  0,  0, -5],
-        [ 0,  0,  0,  5,  5,  0,  0,  0],
-    ],
-    "Q": [
-        [-20,-10,-10, -5, -5,-10,-10,-20],
-        [-10,  0,  0,  0,  0,  0,  0,-10],
-        [-10,  0,  5,  5,  5,  5,  0,-10],
-        [ -5,  0,  5,  5,  5,  5,  0, -5],
-        [  0,  0,  5,  5,  5,  5,  0, -5],
-        [-10,  5,  5,  5,  5,  5,  0,-10],
-        [-10,  0,  5,  0,  0,  0,  0,-10],
-        [-20,-10,-10, -5, -5,-10,-10,-20],
-    ],
-    "K": [
-        [-30,-40,-40,-50,-50,-40,-40,-30],
-        [-30,-40,-40,-50,-50,-40,-40,-30],
-        [-30,-40,-40,-50,-50,-40,-40,-30],
-        [-30,-40,-40,-50,-50,-40,-40,-30],
-        [-20,-30,-30,-40,-40,-30,-30,-20],
-        [-10,-20,-20,-20,-20,-20,-20,-10],
-        [ 20, 20,  0,  0,  0,  0, 20, 20],
-        [ 20, 30, 10,  0,  0, 10, 30, 20],
-    ],
-}
-
-def _chess_evaluate(board):
-    """Static evaluation relative to White (positive = White advantage)."""
-    score = 0
-    for r in range(8):
-        for c in range(8):
-            p = board[r][c]
-            if not p:
-                continue
-            color, ptype = p[0], p[1]
-            val = _PIECE_VALUE.get(ptype, 0)
-            pst_row = r if color == "w" else 7 - r
-            pst_val = _PST.get(ptype, [[0]*8]*8)[pst_row][c]
-            if color == "w":
-                score += val + pst_val
-            else:
-                score -= val + pst_val
-    return score
-
-
-def _chess_minimax(board, depth, alpha, beta, maximizing, color, castle_rights, en_passant):
-    """Alpha-beta minimax. Returns (score, move) where move=(fr,fc,tr,tc,flags)."""
-    opp = _chess_opponent(color)
-    cur_color = "w" if maximizing else "b"
-
-    if depth == 0:
-        return _chess_evaluate(board), None
-
-    moves = _chess_legal_moves(board, cur_color, castle_rights, en_passant)
-    if not moves:
-        if _chess_in_check(board, cur_color):
-            return (100_000 if not maximizing else -100_000), None
-        return 0, None  # stalemate
-
-    # Move ordering: captures first
-    def move_priority(m):
-        fr, fc, tr, tc, flags = m
-        return 0 if board[tr][tc] else 1
-
-    moves.sort(key=move_priority)
-    best_move = moves[0]
-
-    if maximizing:
-        best_val = -10**9
-        for mv in moves:
-            fr, fc, tr, tc, flags = mv
-            if "castle" in flags:
-                nb = _chess_apply_castle(board, cur_color, flags["castle"], castle_rights)
-                ncr, nep = castle_rights, None
-            else:
-                nb, ncr, nep = _chess_apply_move(board, fr, fc, tr, tc, flags,
-                                                   castle_rights=castle_rights,
-                                                   en_passant=en_passant)
-            if nb is None:
-                continue
-            val, _ = _chess_minimax(nb, depth-1, alpha, beta, False, color, ncr, nep)
-            if val > best_val:
-                best_val, best_move = val, mv
-            alpha = max(alpha, val)
-            if alpha >= beta:
-                break
-        return best_val, best_move
-    else:
-        best_val = 10**9
-        for mv in moves:
-            fr, fc, tr, tc, flags = mv
-            if "castle" in flags:
-                nb = _chess_apply_castle(board, cur_color, flags["castle"], castle_rights)
-                ncr, nep = castle_rights, None
-            else:
-                nb, ncr, nep = _chess_apply_move(board, fr, fc, tr, tc, flags,
-                                                   castle_rights=castle_rights,
-                                                   en_passant=en_passant)
-            if nb is None:
-                continue
-            val, _ = _chess_minimax(nb, depth-1, alpha, beta, True, color, ncr, nep)
-            if val < best_val:
-                best_val, best_move = val, mv
-            beta = min(beta, val)
-            if alpha >= beta:
-                break
-        return best_val, best_move
-
-
-def _chess_ai_choose(board, ai_color, castle_rights, en_passant, difficulty):
-    depth_map = {"easy": 2, "medium": 4, "hard": 6}
-    depth = depth_map.get(difficulty, 4)
-    maximizing = (ai_color == "w")
-    _, move = _chess_minimax(board, depth, -10**9, 10**9, maximizing, ai_color, castle_rights, en_passant)
-    return move
-
-
-# ── Chess state helpers ───────────────────────────────────────────────────────
-
-def _chess_reset(session):
-    session["chess"] = _fresh_chess()
-    session["active_game"] = None
-    session["last_move_time"] = None
-
-
-def _chess_board_hash(board):
-    return tuple(tuple(row) for row in board)
-
-
-# ── Chess command handlers ────────────────────────────────────────────────────
-
-def chess_start(gid, session, sender_id, sender_name, difficulty, msg_id, enabled):
-    """#start chess [easy|medium|hard]"""
-    if not enabled:
-        _send(gid, "♟ Chess is currently disabled.", reply_to_id=msg_id); return
-    if any_game_active(session):
-        _send(gid, f"A game of {session['active_game']} is already running. Use #quit to end it first.", reply_to_id=msg_id); return
-
-    diff = difficulty if difficulty in ("easy","medium","hard") else "medium"
-    session["active_game"] = "chess"
-    session["last_move_time"] = time.time()
-
-    ch = _fresh_chess()
-    ch["board"] = _chess_start_board()
-    ch["players"][sender_id] = {"name": sender_name, "color": "w"}
-    ch["turn_order"] = [sender_id]
-    ch["current_turn"] = 0
-    ch["ai_difficulty"] = diff
-    session["chess"] = ch
-
-    board_txt = _chess_board_text(ch["board"], perspective="w")
-    _send(
-        gid,
-        f"♟ {sender_name} started Chess! (You are White ⬜)\n"
-        f"Use #join to play PvP, or #addai to play vs the AI ({diff}).\n\n"
-        + board_txt
-        + "\n\nMake moves like: #e2e4  •  Castle: #O-O or #O-O-O  •  Promote: #e7e8Q",
-        reply_to_id=msg_id,
-    )
-
-
-def chess_join(gid, session, sender_id, sender_name, msg_id, enabled):
-    """#join — join chess as Black"""
-    if not enabled:
-        _send(gid, "♟ Chess is currently disabled.", reply_to_id=msg_id); return
-    ch = session["chess"]
-    if session["active_game"] != "chess":
-        _send(gid, "No active Chess game. Use #start chess to begin.", reply_to_id=msg_id); return
-    if sender_id in ch["players"]:
-        _send(gid, "You are already in this game.", reply_to_id=msg_id); return
-    if len(ch["turn_order"]) >= 2:
-        _send(gid, "The game is already full.", reply_to_id=msg_id); return
-
-    ch["players"][sender_id] = {"name": sender_name, "color": "b"}
-    ch["turn_order"].append(sender_id)
-    session["last_move_time"] = time.time()
-
-    p1_id   = ch["turn_order"][0]
-    p1_name = ch["players"][p1_id]["name"]
-    board_txt = _chess_board_text(ch["board"], perspective="w")
-    _send(
-        gid,
-        f"♟ {sender_name} joined as Black! ⬛\n"
-        f"{p1_name} (White) vs {sender_name} (Black)\n"
-        f"{p1_name}'s turn first.\n\n"
-        + board_txt,
-        reply_to_id=msg_id,
-    )
-
-
-def chess_addai(gid, session, sender_id, sender_name, difficulty, msg_id, enabled):
-    """#addai — add AI as Black opponent"""
-    if not enabled:
-        _send(gid, "♟ Chess is currently disabled.", reply_to_id=msg_id); return
-    ch = session["chess"]
-    if session["active_game"] != "chess":
-        _send(gid, "No active Chess game. Use #start chess first.", reply_to_id=msg_id); return
-    if len(ch["turn_order"]) >= 2:
-        _send(gid, "The game already has a second player.", reply_to_id=msg_id); return
-
-    diff = difficulty if difficulty in ("easy","medium","hard") else ch["ai_difficulty"]
-    ch["players"]["AI"] = {"name": "AI", "color": "b"}
-    ch["turn_order"].append("AI")
-    ch["ai_difficulty"] = diff
-    session["last_move_time"] = time.time()
-
-    p1_name = ch["players"][ch["turn_order"][0]]["name"]
-    board_txt = _chess_board_text(ch["board"], perspective="w")
-    _send(
-        gid,
-        f"🤖 AI joined as Black ({diff.capitalize()})!\n"
-        f"{p1_name} (White) vs AI (Black)\n"
-        f"{p1_name}'s turn first.\n\n"
-        + board_txt,
-        reply_to_id=msg_id,
-    )
-
-
-def chess_quit(gid, session, sender_name, msg_id):
-    """#quit — end the chess game"""
-    if session["active_game"] != "chess":
-        _send(gid, "No active Chess game.", reply_to_id=msg_id); return
-    _chess_reset(session)
-    _send(gid, f"♟ Chess game ended by {sender_name}.", reply_to_id=msg_id)
-
-
-def chess_board(gid, session, sender_id, msg_id):
-    """#board — resend the current board"""
-    if session["active_game"] != "chess":
-        _send(gid, "No active Chess game.", reply_to_id=msg_id); return
-    ch = session["chess"]
-    pdata = ch["players"].get(sender_id, {})
-    persp = pdata.get("color", "w")
-    board_txt = _chess_board_text(ch["board"], last_move=ch.get("last_move"), perspective=persp)
-    _send(gid, board_txt, reply_to_id=msg_id)
-
-
-def chess_move(gid, session, sender_id, sender_name, from_sq, to_sq, promo, is_castle, msg_id, enabled):
-    """Process a chess move from a player."""
-    if not enabled:
-        _send(gid, "♟ Chess is currently disabled.", reply_to_id=msg_id); return
-
-    ch = session["chess"]
-    if session["active_game"] != "chess":
-        _send(gid, "No active Chess game. Use #start chess to begin.", reply_to_id=msg_id); return
-    if len(ch["turn_order"]) < 2:
-        _send(gid, "Waiting for a second player — use #join or #addai.", reply_to_id=msg_id); return
-
-    cur_uid = ch["turn_order"][ch["current_turn"]]
-    if sender_id != cur_uid:
-        cur_name = ch["players"][cur_uid]["name"]
-        _send(gid, f"It's {cur_name}'s turn.", reply_to_id=msg_id); return
-
-    color = ch["players"][sender_id]["color"]
-    board = ch["board"]
-    cr    = ch["castle_rights"]
-    ep    = ch["en_passant"]
-
-    # --- Castling ---
-    if is_castle:
-        side = "K" if from_sq == "O-O" else "Q"
-        nb = _chess_apply_castle(board, color, side, cr)
-        if nb is None:
-            _send(gid, "❌ Castling is not legal right now.", reply_to_id=msg_id); return
-        # Update castle rights
-        cr[color]["K"] = False
-        cr[color]["Q"] = False
-        ch["board"] = nb
-        ch["en_passant"] = None
-        move_label = "O-O" if side == "K" else "O-O-O"
-        ch["last_move"] = move_label
-        ch["halfmove_clock"] += 1
-    else:
-        # --- Normal move ---
-        fr, fc = _sq_to_rc(from_sq)
-        tr, tc = _sq_to_rc(to_sq)
-        if fr is None or tr is None:
-            _send(gid, "❌ Invalid square. Use format like #e2e4.", reply_to_id=msg_id); return
-
-        piece = board[fr][fc]
-        if not piece or piece[0] != color:
-            _send(gid, f"❌ No {('White' if color=='w' else 'Black')} piece on {from_sq}.", reply_to_id=msg_id); return
-
-        # Check move is in legal moves
-        legal = _chess_legal_moves(board, color, cr, ep)
-        matching = [(r2,c2,f2) for (r1,c1,r2,c2,f2) in legal if r1==fr and c1==fc and r2==tr and c2==tc]
-        if not matching:
-            _send(gid, f"❌ {from_sq}{to_sq} is not a legal move.", reply_to_id=msg_id); return
-
-        flags = matching[0][2]
-
-        # Promotion check
-        if flags.get("promo") and not promo:
-            _send(gid, "♟ Pawn promotion! Append piece letter: #" + from_sq + to_sq + "Q  (Q/R/B/N)", reply_to_id=msg_id); return
-
-        was_capture = bool(board[tr][tc]) or "ep_capture" in flags
-        nb, new_cr, new_ep = _chess_apply_move(board, fr, fc, tr, tc, flags,
-                                                promo_piece=promo,
-                                                castle_rights=cr,
-                                                en_passant=ep)
-
-        ch["board"] = nb
-        ch["castle_rights"] = new_cr
-        ch["en_passant"] = new_ep
-        move_label = from_sq + to_sq + (promo.upper() if promo else "")
-        ch["last_move"] = move_label
-
-        # Halfmove clock (reset on pawn move or capture)
-        if piece[1] == "P" or was_capture:
-            ch["halfmove_clock"] = 0
-        else:
-            ch["halfmove_clock"] += 1
-
-    # Track position for threefold repetition
-    h = _chess_board_hash(ch["board"])
-    ch["position_history"].append(h)
-    ch["move_count"] += 1
-    session["last_move_time"] = time.time()
-
-    opp_color = _chess_opponent(color)
-
-    # ── Win / draw detection ──────────────────────────────────────────────────
-    opp_legal = _chess_legal_moves(ch["board"], opp_color, ch["castle_rights"], ch["en_passant"])
-
-    if len(opp_legal) == 0 and _chess_in_check(ch["board"], opp_color):
-        # Checkmate
-        board_txt = _chess_board_text(ch["board"], last_move=ch["last_move"], perspective="w")
-        opp_uid = ch["turn_order"][(ch["current_turn"] + 1) % 2]
-        is_ai_game = "AI" in ch["turn_order"]
-        if is_ai_game:
-            reward = _chess_rewards.get(ch["ai_difficulty"], 175)
-            bal = _add_pts(gid, sender_id, sender_name, reward)
-            _send(gid, f"♟ Checkmate! {sender_name} wins!\n🏆 Earned {reward} pts! ({bal} pts)\n\n{board_txt}", reply_to_id=msg_id)
-        else:
-            opp_name = ch["players"][opp_uid]["name"] if opp_uid != "AI" else "AI"
-            _send(gid, f"♟ Checkmate! {sender_name} wins against {opp_name}! 🏆\n\n{board_txt}", reply_to_id=msg_id)
-        _chess_reset(session)
+    sg(gid,
+       f"🃏 {sender_name} opened a UNO lobby!\n"
+       f"Type #join to join. Host: say #start uno go when everyone is in "
+       f"(need {UNO_MIN_PLAYERS}–{UNO_MAX_PLAYERS} players).")
+    return state
+
+
+def uno_join(gid, state, sender_id, sender_name, sg, sdm):
+    """Add a player to the lobby."""
+    uid = str(sender_id)
+    if uid in state["players"]:
+        sg(gid, f"{sender_name}, you're already in the lobby!")
+        return
+    if len(state["players"]) >= UNO_MAX_PLAYERS:
+        sg(gid, f"Sorry {sender_name}, the lobby is full ({UNO_MAX_PLAYERS} players max).")
+        return
+    state["players"].append(uid)
+    state["names"][uid] = sender_name
+    names_list = ", ".join(state["names"][u] for u in state["players"])
+    sg(gid, f"🃏 {sender_name} joined the UNO lobby! Players: {names_list}")
+
+
+def uno_begin(gid, state, sender_id, sg, sdm):
+    """Host starts the game — deal cards and flip first card."""
+    uid = str(sender_id)
+    if uid != state["host"]:
+        sg(gid, "Only the host can start the game.")
+        return
+    if len(state["players"]) < UNO_MIN_PLAYERS:
+        sg(gid, f"Need at least {UNO_MIN_PLAYERS} players to start. Currently: {len(state['players'])}.")
         return
 
-    if len(opp_legal) == 0:
-        board_txt = _chess_board_text(ch["board"], last_move=ch["last_move"], perspective="w")
-        _send(gid, f"♟ Stalemate! It's a draw.\n\n{board_txt}", reply_to_id=msg_id)
-        _chess_reset(session); return
+    state["deck"]    = _uno_make_deck()
+    state["discard"] = []
+    state["hands"]   = {u: [] for u in state["players"]}
 
-    # 50-move rule
-    if ch["halfmove_clock"] >= 100:
-        board_txt = _chess_board_text(ch["board"], last_move=ch["last_move"], perspective="w")
-        _send(gid, f"♟ Draw by 50-move rule.\n\n{board_txt}", reply_to_id=msg_id)
-        _chess_reset(session); return
+    # Deal hands
+    for u in state["players"]:
+        state["hands"][u] = _uno_draw_cards(state, UNO_HAND_SIZE)
 
-    # Threefold repetition
-    if ch["position_history"].count(h) >= 3:
-        board_txt = _chess_board_text(ch["board"], last_move=ch["last_move"], perspective="w")
-        _send(gid, f"♟ Draw by threefold repetition.\n\n{board_txt}", reply_to_id=msg_id)
-        _chess_reset(session); return
+    # Flip first card — skip wilds as starting card
+    first = None
+    while True:
+        card = state["deck"].pop()
+        if card not in ("Wild", "Wild Draw Four"):
+            first = card
+            break
+        state["deck"].insert(0, card)  # put wild back at bottom
 
-    # ── Advance turn ──────────────────────────────────────────────────────────
-    ch["current_turn"] = (ch["current_turn"] + 1) % 2
-    next_uid = ch["turn_order"][ch["current_turn"]]
-    check_notice = ""
-    if _chess_in_check(ch["board"], opp_color):
-        check_notice = "⚠️ CHECK!\n"
+    state["discard"] = [first]
+    state["color"]   = first.split(" ", 1)[0]
+    state["state"]   = "playing"
+    state["current"] = 0
+    state["direction"] = 1
+    state["drawn"]   = False
+    state["last_move"] = time.time()
 
-    persp_next = "w" if opp_color == "w" else "b"
-    board_txt = _chess_board_text(ch["board"], last_move=ch["last_move"], perspective=persp_next)
+    # Apply first-card special effects
+    skip_first = False
+    if " Skip" in first:
+        skip_first = True
+    elif " Reverse" in first:
+        state["direction"] = -1
+    elif " Draw Two" in first:
+        victim_uid = state["players"][1 % len(state["players"])]
+        drawn = _uno_draw_cards(state, 2)
+        state["hands"][victim_uid].extend(drawn)
+        skip_first = True
 
-    if next_uid == "AI":
-        next_name = "AI"
-        _send(gid, f"{sender_name} played {ch['last_move']}. {check_notice}🤖 AI is thinking...\n\n{board_txt}")
-        _typing(gid)
+    player_list = " → ".join(state["names"][u] for u in state["players"])
+    sg(gid,
+       f"🃏 UNO starts! Turn order: {player_list}\n"
+       f"First card: {_uno_card_emoji(first)}")
 
-        ai_color = ch["players"]["AI"]["color"]
-        ai_move  = _chess_ai_choose(ch["board"], ai_color, ch["castle_rights"], ch["en_passant"], ch["ai_difficulty"])
-        if ai_move is None:
-            # No moves — already handled above as stalemate; safety fallback
-            _send(gid, "♟ AI has no moves. Game over.", reply_to_id=msg_id)
-            _chess_reset(session); return
+    # DM each player their hand
+    for u in state["players"]:
+        hand_txt = _uno_hand_text(state["hands"][u])
+        sdm(u, f"🃏 UNO has started in {state['group']}!\n{hand_txt}\n\nWait for your turn.")
 
-        a_fr, a_fc, a_tr, a_tc, a_flags = ai_move
-        if "castle" in a_flags:
-            side = a_flags["castle"]
-            nb = _chess_apply_castle(ch["board"], ai_color, side, ch["castle_rights"])
-            ch["castle_rights"][ai_color]["K"] = False
-            ch["castle_rights"][ai_color]["Q"] = False
-            ch["board"] = nb
-            ch["en_passant"] = None
-            ai_label = "O-O" if side == "K" else "O-O-O"
-        else:
-            nb, new_cr, new_ep = _chess_apply_move(
-                ch["board"], a_fr, a_fc, a_tr, a_tc, a_flags,
-                castle_rights=ch["castle_rights"], en_passant=ch["en_passant"]
-            )
-            ch["board"] = nb
-            ch["castle_rights"] = new_cr
-            ch["en_passant"] = new_ep
-            ai_label = _rc_to_sq(a_fr, a_fc) + _rc_to_sq(a_tr, a_tc)
-            if a_flags.get("promo"):
-                ai_label += "Q"   # AI always promotes to queen
-                ch["board"][a_tr][a_tc] = ai_color + "Q"
+    if skip_first:
+        first_name = state["names"][state["players"][0]]
+        sg(gid, f"⏭ {first_name} is skipped by the first card!")
+        _uno_next_turn(state)
 
-        ch["last_move"] = ai_label
-        ch["move_count"] += 1
-        session["last_move_time"] = time.time()
+    _uno_announce_turn(gid, state, sdm, sg)
 
-        h2 = _chess_board_hash(ch["board"])
-        ch["position_history"].append(h2)
 
-        p1_color = ch["players"][ch["turn_order"][0]]["color"]
-        p1_legal = _chess_legal_moves(ch["board"], p1_color, ch["castle_rights"], ch["en_passant"])
-        p1_name  = ch["players"][ch["turn_order"][0]]["name"]
-        board_txt2 = _chess_board_text(ch["board"], last_move=ai_label, perspective=p1_color)
+def uno_show_hand(state, uid, sdm):
+    """DM the player their current hand."""
+    uid = str(uid)
+    hand = state["hands"].get(uid, [])
+    sdm(uid, _uno_hand_text(hand))
 
-        if len(p1_legal) == 0 and _chess_in_check(ch["board"], p1_color):
-            _send(gid, f"🤖 AI plays {ai_label}.\n♟ Checkmate! AI wins! Better luck next time.\n\n{board_txt2}")
-            _chess_reset(session); return
 
-        if len(p1_legal) == 0:
-            _send(gid, f"🤖 AI plays {ai_label}.\n♟ Stalemate! It's a draw.\n\n{board_txt2}")
-            _chess_reset(session); return
-
-        check2 = "⚠️ CHECK! " if _chess_in_check(ch["board"], p1_color) else ""
-        ch["current_turn"] = 0
-        _send(gid, f"🤖 AI plays {ai_label}. {check2}Your turn, {p1_name}!\n\n{board_txt2}")
+def uno_draw(gid, state, uid, sg, sdm):
+    """Current player draws a card."""
+    uid = str(uid)
+    cur_uid = state["players"][state["current"]]
+    if uid != cur_uid:
+        sdm(uid, "It's not your turn.")
+        return
+    if state["drawn"]:
+        sdm(uid, "You already drew this turn. Use #pass to end your turn, or #play <card>.")
         return
 
-    # PvP — show board to both
-    next_name = ch["players"][next_uid]["name"]
-    _send(
-        gid,
-        f"{sender_name} played {ch['last_move']}. {check_notice}It's now {next_name}'s turn.\n\n{board_txt}",
-        reply_to_id=msg_id,
+    drawn = _uno_draw_cards(state, 1)
+    if not drawn:
+        sdm(uid, "The deck is empty — no card to draw!")
+        return
+
+    state["hands"][uid].extend(drawn)
+    state["drawn"] = True
+    state["last_move"] = time.time()
+    card = drawn[0]
+    top  = state["discard"][-1]
+    active_color = _uno_active_color(state)
+
+    if _uno_can_play(card, top, active_color):
+        sdm(uid,
+            f"You drew: {_uno_card_emoji(card)}\n"
+            f"You can play it! Use #play {card}  or  #pass to skip.")
+    else:
+        sdm(uid,
+            f"You drew: {_uno_card_emoji(card)}\n"
+            f"Can't play it. Use #pass to end your turn.")
+
+
+def uno_pass(gid, state, uid, sg, sdm):
+    """Pass after drawing."""
+    uid = str(uid)
+    cur_uid = state["players"][state["current"]]
+    if uid != cur_uid:
+        sdm(uid, "It's not your turn.")
+        return
+    if not state["drawn"]:
+        sdm(uid, "You must draw a card first (#draw) before you can pass.")
+        return
+    name = state["names"].get(uid, uid)
+    sg(gid, f"➡️ {name} passes.")
+    _uno_next_turn(state)
+    _uno_announce_turn(gid, state, sdm, sg)
+
+
+def uno_play_card(gid, state, uid, card_text, sg, sdm):
+    """Play a card, with wild color-pick handling."""
+    uid = str(uid)
+    cur_uid = state["players"][state["current"]]
+    if uid != cur_uid:
+        sdm(uid, "It's not your turn.")
+        return
+
+    hand = state["hands"][uid]
+    name = state["names"].get(uid, uid)
+
+    # ── Wild color pick in progress ───────────────────────────────────────────
+    if state.get("color_pending") and state.get("color_pending_uid") == uid:
+        chosen = card_text.strip().title()
+        if chosen not in _UNO_COLORS:
+            sdm(uid,
+                f"'{card_text}' isn't a valid color. Choose one:\n"
+                f"  #play Red\n  #play Yellow\n  #play Green\n  #play Blue")
+            return
+        state["color"] = chosen
+        state.pop("color_pending", None)
+        matched = state.pop("color_pending_card", "Wild")
+        sg(gid, f"🎨 {name} chose {_COLOR_EMOJI.get(chosen,'')} {chosen}!")
+
+        # Apply Wild Draw Four effect
+        if matched == "Wild Draw Four":
+            next_idx = (state["current"] + state["direction"]) % len(state["players"])
+            victim_uid = state["players"][next_idx]
+            drawn_cards = _uno_draw_cards(state, 4)
+            state["hands"][victim_uid].extend(drawn_cards)
+            victim_name = state["names"][victim_uid]
+            sg(gid, f"➕4️⃣ {victim_name} draws 4 cards and is skipped!")
+            sdm(victim_uid,
+                f"You were hit with Wild Draw Four! You drew 4 cards.\n"
+                f"{_uno_hand_text(state['hands'][victim_uid])}")
+            _uno_next_turn(state, skip=True)
+        else:
+            _uno_next_turn(state)
+
+        # Check win (hand was already removed before color pick prompt)
+        if len(hand) == 0:
+            _uno_handle_win(gid, state, uid, sg, sdm)
+            return
+        if len(hand) == 1:
+            sg(gid, f"🔔 UNO! {name} has one card left!")
+
+        _uno_announce_turn(gid, state, sdm, sg)
+        return
+
+    # ── Normal play ──────────────────────────────────────────────────────────
+    top          = state["discard"][-1]
+    active_color = _uno_active_color(state)
+
+    card_text_norm = card_text.strip().title()
+    matched = None
+    for c in hand:
+        if c.lower() == card_text_norm.lower():
+            matched = c
+            break
+    if matched is None:
+        for c in hand:
+            if card_text_norm.lower() in c.lower():
+                matched = c
+                break
+
+    if matched is None:
+        sdm(uid,
+            f"Card '{card_text}' not found in your hand.\n"
+            f"{_uno_hand_text(hand)}\n"
+            "Tip: type the card name exactly as shown, e.g.  #play Red 7")
+        return
+
+    if not _uno_can_play(matched, top, active_color):
+        sdm(uid,
+            f"Can't play {_uno_card_emoji(matched)} on {_uno_top_card_text(state)}.\n"
+            f"Must match color ({active_color}) or face value.")
+        return
+
+    # Remove from hand and place on discard
+    hand.remove(matched)
+    state["discard"].append(matched)
+    state["drawn"]     = False
+    state["last_move"] = time.time()
+
+    sg(gid, f"🃏 {name} played {_uno_card_emoji(matched)}!")
+
+    if len(hand) == 1:
+        sg(gid, f"🔔 UNO! {name} has one card left!")
+
+    if len(hand) == 0:
+        _uno_handle_win(gid, state, uid, sg, sdm)
+        return
+
+    # Wild — prompt for color, don't advance turn yet
+    if matched in ("Wild", "Wild Draw Four"):
+        state["color_pending"]      = True
+        state["color_pending_card"] = matched
+        state["color_pending_uid"]  = uid
+        sdm(uid,
+            f"You played {_uno_card_emoji(matched)}!\n"
+            f"Choose a color:\n"
+            f"  #play Red\n  #play Yellow\n  #play Green\n  #play Blue")
+        sg(gid, f"🎨 {name} is choosing a color...")
+        return
+
+    # Non-wild: set color and apply effects
+    state["color"] = matched.split(" ", 1)[0]
+    face  = matched.split(" ", 1)[1] if " " in matched else ""
+    skip  = False
+
+    if face == "Reverse":
+        state["direction"] *= -1
+        if len(state["players"]) == 2:
+            skip = True
+        else:
+            sg(gid, "🔄 Direction reversed!")
+
+    elif face == "Skip":
+        skip = True
+        next_idx = (state["current"] + state["direction"]) % len(state["players"])
+        skipped_name = state["names"][state["players"][next_idx]]
+        sg(gid, f"⏭ {skipped_name} is skipped!")
+
+    elif face == "Draw Two":
+        next_idx = (state["current"] + state["direction"]) % len(state["players"])
+        victim_uid = state["players"][next_idx]
+        drawn_cards = _uno_draw_cards(state, 2)
+        state["hands"][victim_uid].extend(drawn_cards)
+        victim_name = state["names"][victim_uid]
+        sg(gid, f"➕2️⃣ {victim_name} draws 2 cards and is skipped!")
+        sdm(victim_uid,
+            f"You were hit with Draw Two! Drew 2 cards.\n"
+            f"{_uno_hand_text(state['hands'][victim_uid])}")
+        skip = True
+
+    _uno_next_turn(state, skip=skip)
+    _uno_announce_turn(gid, state, sdm, sg)
+
+
+def _uno_handle_win(gid, state, uid, sg, sdm):
+    """Player played their last card — they win."""
+    name = state["names"].get(uid, uid)
+    sg(gid,
+       f"🎉 {name} played their last card and wins UNO! 🏆\n"
+       f"Thanks for playing everyone!")
+    state["state"] = "done"
+
+
+def uno_quit_player(gid, state, uid, name, sg, sdm):
+    """Remove a player from the game. Returns True if game ended."""
+    uid = str(uid)
+    if uid not in state["players"]:
+        return False
+
+    idx = state["players"].index(uid)
+    state["players"].remove(uid)
+    state["names"].pop(uid, None)
+
+    # Return hand to deck
+    hand = state["hands"].pop(uid, [])
+    state["deck"].extend(hand)
+    random.shuffle(state["deck"])
+
+    sg(gid, f"🚪 {name} left the UNO game.")
+
+    if len(state["players"]) < UNO_MIN_PLAYERS:
+        if state["players"]:
+            winner_uid  = state["players"][0]
+            winner_name = state["names"].get(winner_uid, winner_uid)
+            sg(gid, f"Not enough players to continue. {winner_name} wins by default!")
+        else:
+            sg(gid, "Everyone left — UNO game over!")
+        state["state"] = "done"
+        return True
+
+    # Fix current index if needed
+    if state["state"] == "playing":
+        n = len(state["players"])
+        if idx <= state["current"]:
+            state["current"] = max(0, state["current"] - 1)
+        state["current"] = state["current"] % n
+        _uno_announce_turn(gid, state, sdm, sg)
+
+    return False
+
+
+def uno_check_idle(gid, state, sg, sdm):
+    """Kick the current player if they've been idle too long. Returns True if game ended."""
+    if state["state"] != "playing":
+        return False
+    last = state.get("last_move", time.time())
+    if time.time() - last < UNO_IDLE_SECONDS:
+        return False
+
+    uid  = state["players"][state["current"]]
+    name = state["names"].get(uid, uid)
+    sg(gid, f"⏰ {name} took too long and is kicked from UNO!")
+    sdm(uid, "You were removed from the UNO game for inactivity.")
+    return uno_quit_player(gid, state, uid, name, sg, sdm)
+
+
+def uno_status(gid, state, sg):
+    """Post a summary of the current game state to the group."""
+    if state["state"] == "lobby":
+        players_list = ", ".join(state["names"][u] for u in state["players"])
+        sg(gid, f"🃏 UNO Lobby — Players: {players_list}\nHost: say #start uno go to begin.")
+        return
+    if state["state"] != "playing":
+        sg(gid, "No active UNO game.")
+        return
+    cur_uid  = state["players"][state["current"]]
+    cur_name = state["names"].get(cur_uid, cur_uid)
+    top_txt  = _uno_top_card_text(state)
+    counts   = "\n".join(
+        f"  {state['names'].get(u,u)}: {len(state['hands'][u])} card{'s' if len(state['hands'][u])!=1 else ''}"
+        for u in state["players"]
     )
+    direction = "➡️ clockwise" if state["direction"] == 1 else "⬅️ counter-clockwise"
+    sg(gid,
+       f"🃏 UNO Status\n"
+       f"{top_txt}\n"
+       f"Turn: {cur_name}  |  Direction: {direction}\n"
+       f"Card counts:\n{counts}")

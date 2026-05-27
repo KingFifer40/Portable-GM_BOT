@@ -1113,14 +1113,23 @@ def _ollama_is_listening():
         return False
 
 
+# Set True by ensure_ollama_running() if Ollama is available on this machine.
+# All AI features check this flag before attempting to call Ollama.
+_OLLAMA_AVAILABLE = False
+
+
 def ensure_ollama_running():
     """
-    Makes sure Ollama is running, the base model is pulled, and the bot's
-    custom model is built from the Modelfile. Safe to call on every startup.
+    Tries to bring Ollama up and verifies the required models are present.
+    If Ollama is not installed this function logs a warning and returns False
+    — the bot continues to run with AI features silently disabled rather than
+    crashing.  Sets the module-level _OLLAMA_AVAILABLE flag accordingly.
     """
+    global _OLLAMA_AVAILABLE
+
     # ── 1. Start Ollama server if not already listening ──────────────────────
     if not _ollama_is_listening():
-        print("[setup] Ollama is not running — starting it...")
+        print("[setup] Ollama is not running — attempting to start it...")
         try:
             kwargs = {}
             if sys.platform == "win32":
@@ -1137,13 +1146,17 @@ def ensure_ollama_running():
                 if _ollama_is_listening():
                     break
             if not _ollama_is_listening():
-                print("[setup] WARNING: Ollama did not start in time. Continuing anyway.")
+                print("[setup] WARNING: Ollama did not start in time. AI features disabled.")
+                _OLLAMA_AVAILABLE = False
+                return False
         except FileNotFoundError:
-            print("[setup] ERROR: 'ollama' command not found.")
-            print("        Please install Ollama from https://ollama.com and try again.")
-            sys.exit(1)
+            print("[setup] Ollama is not installed on this device — AI features will be disabled.")
+            print("        Install Ollama from https://ollama.com to enable AI chat.")
+            _OLLAMA_AVAILABLE = False
+            return False
         except Exception as e:
-            print(f"[setup] Failed to start Ollama: {e}")
+            print(f"[setup] Could not start Ollama: {e} — AI features disabled.")
+            _OLLAMA_AVAILABLE = False
             return False
     else:
         print("[setup] Ollama is already running.")
@@ -1180,6 +1193,7 @@ def ensure_ollama_running():
     except Exception as e:
         print(f"[setup] WARNING: Model build failed: {e}")
 
+    _OLLAMA_AVAILABLE = True
     return True
 
 # ---------------------------------------------------------
@@ -2639,7 +2653,9 @@ def run_ollama(prompt_text, model=AI_MODEL_NAME, user_id=None, sender_name=None)
     """
     global _ai_memory
 
-    # Decide whether this model has the system prompt baked in already
+    if not _OLLAMA_AVAILABLE:
+        return "AI is not available on this device (Ollama is not installed)."
+
     is_custom_model = (model == AI_MODEL_NAME)
 
     # ── 1. Build and append the user message ────────────────────────────────
@@ -3709,6 +3725,9 @@ def handle_game_command(message):
     # -----------------------------
     # !ai <message>
     if cmd == "!ai":
+        if not _OLLAMA_AVAILABLE:
+            send_message(GAME_GROUP_ID, "🤖 AI is not available on this device (Ollama is not installed).", reply_to_id=msg_id)
+            return
         if not AI_ENABLED:
             send_message(GAME_GROUP_ID, "AI is disabled.", reply_to_id=msg_id)
             return
@@ -4266,7 +4285,6 @@ def handle_game_command(message):
 
             secret = random.randint(1, 10)
             group_sessions[uid_str] = {"number": secret, "attempts": 0}
-            set_ai_cooldown(sender_id, _guess_last_used)
             send_message(GAME_GROUP_ID,
                 f"🔢 {sender_name} starts a guessing game!\n"
                 f"I'm thinking of a number from 1 to 10.\n"
@@ -4312,6 +4330,7 @@ def handle_game_command(message):
         reward = reward_table.get(attempts, 5)   # 5 pts for 5th guess and beyond
 
         del group_sessions[uid_str]   # clear the session
+        set_ai_cooldown(sender_id, _guess_last_used)   # cooldown starts on completion
 
         new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, reward)
 
@@ -6225,7 +6244,7 @@ GITHUB_COMMIT_PAGE = f"https://github.com/{GITHUB_REPO}/commits/main"
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
-BOT_COMMIT_SHA = "237ff17"
+BOT_COMMIT_SHA = "b82cdbb"
 
 _control_panel_instance = None  # set when panel launches
 
@@ -6258,6 +6277,9 @@ def _do_self_update():
     Downloads the latest Porta-GMBOT.py from the main branch, stamps the new
     commit SHA into it so the update checker knows what version is running,
     then replaces this file atomically and triggers a restart via restart_bot.py.
+
+    Before overwriting, saves the current file as Porta-GMBOT.py.bak so the
+    user can roll back if the new version has problems.
     """
     try:
         # Fetch the new script
@@ -6267,8 +6289,6 @@ def _do_self_update():
         new_source = resp.text
 
         # Fetch the current commit SHA and stamp it into the downloaded source.
-        # The repo file always has some hardcoded SHA (or "unknown"), so we use
-        # a regex to replace whatever is there rather than matching a fixed string.
         sha_short, _, _ = _check_for_update()
         if sha_short:
             import re as _re
@@ -6280,16 +6300,26 @@ def _do_self_update():
             )
 
         script_path = os.path.abspath(__file__)
-        tmp_path = script_path + ".update_tmp"
+        bak_path    = script_path + ".bak"
+        tmp_path    = script_path + ".update_tmp"
+
+        # ── Back up the current version before overwriting ───────────────────
+        try:
+            import shutil as _shutil
+            _shutil.copy2(script_path, bak_path)
+            print(f"[update] Current version backed up to: {bak_path}")
+        except Exception as e:
+            print(f"[update] WARNING: Could not create backup: {e}")
+
         with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(new_source)
         os.replace(tmp_path, script_path)
-        
+
         # Find and call restart_bot.py in the same directory
         restart_script = os.path.join(os.path.dirname(script_path), "restart_bot.py")
         if not os.path.exists(restart_script):
             return False, "restart_bot.py not found in script directory"
-        
+
         print("[update] Update complete. Restarting bot via restart_bot.py...")
 
         # Manually release the lock file before exiting — os._exit() bypasses
@@ -6299,13 +6329,45 @@ def _do_self_update():
         except OSError:
             pass
 
-        # Launch restart script and immediately exit (DON'T wait for it to return)
-        # This ensures the lock file is already gone before restart_bot checks it.
         subprocess.Popen([sys.executable, restart_script])
         os._exit(0)
-        
+
     except Exception as e:
         return False, str(e)
+
+
+def _do_rollback():
+    """
+    Restores Porta-GMBOT.py from the .bak file created by the last update
+    and restarts the bot.  Returns (False, reason_str) if rollback is not
+    possible (no backup exists, backup unreadable, etc.).
+    """
+    script_path = os.path.abspath(__file__)
+    bak_path    = script_path + ".bak"
+
+    if not os.path.exists(bak_path):
+        return False, "No backup file found (Porta-GMBOT.py.bak does not exist)."
+
+    try:
+        tmp_path = script_path + ".rollback_tmp"
+        import shutil as _shutil
+        _shutil.copy2(bak_path, tmp_path)
+        os.replace(tmp_path, script_path)
+        print("[rollback] Restored previous version from backup.")
+    except Exception as e:
+        return False, f"Could not restore backup: {e}"
+
+    restart_script = os.path.join(os.path.dirname(script_path), "restart_bot.py")
+    try:
+        os.remove(_LOCK_FILE)
+    except OSError:
+        pass
+
+    if os.path.exists(restart_script):
+        subprocess.Popen([sys.executable, restart_script])
+    else:
+        subprocess.Popen([sys.executable, script_path])
+    os._exit(0)
 
 
 class ControlPanel:
@@ -7938,12 +8000,20 @@ class ControlPanel:
                                      state="disabled")
         self._update_btn.pack(side="left")
 
+        tk.Button(btn_row, text="↩  Rollback to Previous",
+                  font=("Helvetica", 10),
+                  command=self._rollback_update,
+                  bg="#ff9500", fg="white",
+                  relief="flat", padx=12, pady=6).pack(side="left", padx=(10, 0))
+
         ttk.Separator(tab, orient="horizontal").pack(fill="x", pady=16)
         tk.Label(tab,
                  text=(
                      "\u26a0\ufe0f  'Download & Restart' replaces Porta-GMBOT.py with the latest version "
                      "from the main branch and restarts the bot. "
-                     "Your config.json and Porta-GMBOT/ folder are not affected."
+                     "Your config.json and Porta-GMBOT/ folder are not affected.\n"
+                     "A backup of the current version is saved as Porta-GMBOT.py.bak before each update. "
+                     "'Rollback' restores that backup if the new version has problems."
                  ),
                  font=("Helvetica", 9), fg="#888888", justify="left", wraplength=440).pack(anchor="w")
 
@@ -8333,6 +8403,33 @@ class ControlPanel:
 
         threading.Thread(target=do_update, daemon=True).start()
 
+    def _rollback_update(self):
+        from tkinter import messagebox
+        bak_path = os.path.abspath(__file__) + ".bak"
+        if not os.path.exists(bak_path):
+            messagebox.showerror(
+                "Rollback Unavailable",
+                "No backup file found (Porta-GMBOT.py.bak does not exist).\n"
+                "A backup is created automatically each time you apply an update.",
+            )
+            return
+        if not messagebox.askyesno(
+            "Confirm Rollback",
+            "This will restore the previous version of Porta-GMBOT.py\n"
+            "from the backup and restart the bot.\n\n"
+            "Continue?",
+        ):
+            return
+
+        self._set_status("Rolling back to previous version…")
+
+        def do_rollback():
+            # _do_rollback calls os._exit(0) on success
+            ok, err = _do_rollback()
+            self.root.after(0, lambda: self._set_status(f"Rollback failed: {err}"))
+
+        threading.Thread(target=do_rollback, daemon=True).start()
+
     # ── Restart / Stop ────────────────────────────────────────────────────────
 
     def _restart_bot(self):
@@ -8614,8 +8711,20 @@ def _launch_emergency_recovery(crash_log: str):
 
         def on_download():
             dl_btn.config(state="disabled")
+            rb_btn.config(state="disabled")
             import threading as _t
             _t.Thread(target=_do_emergency_update, args=(_status,), daemon=True).start()
+
+        def on_rollback():
+            bak_path = os.path.abspath(__file__) + ".bak"
+            if not os.path.exists(bak_path):
+                _status("No backup file found (Porta-GMBOT.py.bak does not exist).")
+                return
+            dl_btn.config(state="disabled")
+            rb_btn.config(state="disabled")
+            _status("Restoring backup and restarting…")
+            import threading as _t
+            _t.Thread(target=_do_rollback, daemon=True).start()
 
         dl_btn = tk.Button(
             btn_frame,
@@ -8627,6 +8736,16 @@ def _launch_emergency_recovery(crash_log: str):
         )
         dl_btn.pack(side="left", padx=(0, 10))
 
+        rb_btn = tk.Button(
+            btn_frame,
+            text="↩  Rollback to Previous Version",
+            font=("Helvetica", 10),
+            bg="#ff9500", fg="white",
+            relief="flat", padx=12, pady=6,
+            command=on_rollback,
+        )
+        rb_btn.pack(side="left", padx=(0, 10))
+
         tk.Button(
             btn_frame,
             text="✕  Exit",
@@ -8637,8 +8756,9 @@ def _launch_emergency_recovery(crash_log: str):
 
         tk.Label(body,
                  text=(
-                     "Downloading replaces Porta-GMBOT.py with the latest version from the "
-                     "main branch.  Your config.json is not affected."
+                     "Download replaces Porta-GMBOT.py with the latest version from the "
+                     "main branch.  Rollback restores the .bak backup from your last update.  "
+                     "Your config.json is not affected by either."
                  ),
                  font=("Helvetica", 8), fg="#888888",
                  wraplength=480, justify="left").pack(anchor="w", pady=(8, 0))
@@ -8654,11 +8774,22 @@ def _launch_emergency_recovery(crash_log: str):
         print("=" * 60)
         print("\nOptions:")
         print("  1 — Download fresh copy from GitHub and restart")
-        print("  2 — Exit")
-        choice = input("\nEnter choice [1/2]: ").strip()
+        bak_exists = os.path.exists(os.path.abspath(__file__) + ".bak")
+        print(f"  2 — Rollback to previous version{'' if bak_exists else ' (no backup found)'}")
+        print("  3 — Exit")
+        choice = input("\nEnter choice [1/2/3]: ").strip()
         if choice == "1":
             print("Downloading…")
             ok, err = _do_emergency_update()
+            if not ok:
+                print(err)
+                sys.exit(1)
+        elif choice == "2":
+            if not bak_exists:
+                print("No backup file found (Porta-GMBOT.py.bak does not exist).")
+                sys.exit(1)
+            print("Rolling back…")
+            ok, err = _do_rollback()
             if not ok:
                 print(err)
                 sys.exit(1)

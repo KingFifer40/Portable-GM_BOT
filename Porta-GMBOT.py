@@ -6992,12 +6992,12 @@ class ControlPanel:
         sort_row = tk.Frame(lb_outer)
         sort_row.pack(fill="x", pady=(0, 2))
         tk.Label(sort_row, text="Sort:", font=("Helvetica", 9)).pack(side="left")
-        self._pts_sort_var = tk.StringVar(value="points")
-        for val, lbl in [("points", "Points"), ("name", "Name"), ("creations", "Items")]:
+        self._pts_sort_var = tk.StringVar(value="rank")
+        for val, lbl in [("rank", "Rank"), ("points", "Points"), ("level", "Level"), ("net_worth", "Net Worth"), ("name", "Name"), ("creations", "Items")]:
             ttk.Radiobutton(sort_row, text=lbl, variable=self._pts_sort_var, value=val,
                             command=self._pts_refresh_table).pack(side="left", padx=2)
 
-        cols = ("rank", "name", "points", "creations")
+        cols = ("rank", "name", "level", "points", "net_worth", "creations")
         tree_frame = tk.Frame(lb_outer)
         tree_frame.pack(fill="x")
 
@@ -7010,13 +7010,17 @@ class ControlPanel:
 
         self._pts_tree.heading("rank",      text="#")
         self._pts_tree.heading("name",      text="Name")
-        self._pts_tree.heading("points",    text="Points")
+        self._pts_tree.heading("level",     text="⭐ Lv")
+        self._pts_tree.heading("points",    text="Liquid Pts")
+        self._pts_tree.heading("net_worth", text="Net Worth")
         self._pts_tree.heading("creations", text="Items")
 
         self._pts_tree.column("rank",      width=28,  anchor="center", stretch=False)
-        self._pts_tree.column("name",      width=130, anchor="w")
-        self._pts_tree.column("points",    width=70,  anchor="e")
-        self._pts_tree.column("creations", width=38,  anchor="center")
+        self._pts_tree.column("name",      width=110, anchor="w")
+        self._pts_tree.column("level",     width=40,  anchor="center", stretch=False)
+        self._pts_tree.column("points",    width=75,  anchor="e")
+        self._pts_tree.column("net_worth", width=75,  anchor="e")
+        self._pts_tree.column("creations", width=38,  anchor="center", stretch=False)
 
         self._pts_tree.tag_configure("gold",   background="#fff8dc")
         self._pts_tree.tag_configure("silver", background="#f5f5f5")
@@ -7094,7 +7098,32 @@ class ControlPanel:
 
         ttk.Separator(detail, orient="horizontal").pack(fill="x", pady=6)
 
-        # ── Inventory list ────────────────────────────────────────────────────
+        # ── Level adjustment ──────────────────────────────────────────────────
+        tk.Label(detail, text="⭐ Level:", font=("Helvetica", 9, "bold")).pack(anchor="w")
+        tk.Label(detail, text="Set a player's level directly (admin override, no point cost).",
+                 font=("Helvetica", 8), fg="#888888", wraplength=360, justify="left").pack(anchor="w")
+
+        lv_row = tk.Frame(detail)
+        lv_row.pack(fill="x", pady=(4, 0))
+        self._pts_level_var = tk.StringVar(value="0")
+        tk.Entry(lv_row, textvariable=self._pts_level_var, width=5,
+                 font=("Helvetica", 10)).pack(side="left", padx=(0, 4))
+        tk.Label(lv_row, text="level", font=("Helvetica", 9)).pack(side="left")
+
+        lv_btn_row = tk.Frame(detail)
+        lv_btn_row.pack(fill="x", pady=(4, 0))
+        for text_, action in [("➕ +1", "add_lv"), ("➖ -1", "sub_lv"), ("📌 Set", "set_lv"), ("🗑 Reset", "reset_lv")]:
+            bg_ = {"add_lv": "#34c759", "sub_lv": "#ff9500", "set_lv": "#0055aa", "reset_lv": "#ff3b30"}[action]
+            tk.Button(lv_btn_row, text=text_, font=("Helvetica", 9),
+                      command=lambda a=action: self._pts_adjust_level(a),
+                      bg=bg_, fg="white", relief="flat",
+                      padx=6, pady=3).pack(side="left", padx=(0, 3))
+
+        self._pts_lv_status = tk.Label(detail, text="", font=("Helvetica", 9), fg="#34c759",
+                                        wraplength=360, justify="left")
+        self._pts_lv_status.pack(anchor="w", pady=(3, 0))
+
+        ttk.Separator(detail, orient="horizontal").pack(fill="x", pady=6)
         tk.Label(detail, text="Inventory:", font=("Helvetica", 9, "bold")).pack(anchor="w")
 
         inv_frame = tk.Frame(detail)
@@ -7183,12 +7212,18 @@ class ControlPanel:
         ledger = load_points(gid)
         rows = []
         for uid, record in ledger.items():
-            inv = _load_inventory(gid, uid)
-            creations = len(inv.get("creations", []))
+            inv        = _load_inventory(gid, uid)
+            creations  = len(inv.get("creations", []))
+            level      = record.get("level", 0)
+            item_worth = sum(c.get("worth", 0) for c in inv.get("creations", []) if c.get("worth", 0) > 0)
+            net_worth  = record.get("points", 0) + item_worth
             rows.append({
                 "uid":        uid,
                 "name":       record.get("name", uid),
                 "points":     record.get("points", 0),
+                "level":      level,
+                "net_worth":  net_worth,
+                "item_worth": item_worth,
                 "creations":  creations,
                 "inv":        inv,
             })
@@ -7212,14 +7247,21 @@ class ControlPanel:
     def _pts_refresh_table(self):
         """Re-sort and repopulate the treeview from cached _pts_data."""
         sort = self._pts_sort_var.get()
-        reverse = sort in ("points", "creations")
-        key_fn = {
-            "points":    lambda r: r["points"],
-            "name":      lambda r: r["name"].lower(),
-            "creations": lambda r: r["creations"],
-        }.get(sort, lambda r: r["points"])
-
-        sorted_data = sorted(self._pts_data, key=key_fn, reverse=reverse)
+        # "rank" mirrors the actual leaderboard order: level desc, net_worth desc
+        if sort == "rank":
+            sorted_data = sorted(self._pts_data,
+                                 key=lambda r: (r["level"], r["net_worth"]),
+                                 reverse=True)
+        else:
+            reverse = sort in ("points", "creations", "level", "net_worth")
+            key_fn = {
+                "points":    lambda r: r["points"],
+                "level":     lambda r: r["level"],
+                "net_worth": lambda r: r["net_worth"],
+                "name":      lambda r: r["name"].lower(),
+                "creations": lambda r: r["creations"],
+            }.get(sort, lambda r: r["points"])
+            sorted_data = sorted(self._pts_data, key=key_fn, reverse=reverse)
 
         tree = self._pts_tree
         tree.delete(*tree.get_children())
@@ -7228,13 +7270,15 @@ class ControlPanel:
         tag_map = {0: "gold", 1: "silver", 2: "bronze"}
 
         for i, row in enumerate(sorted_data):
-            rank_str = medals.get(i, str(i + 1)) if sort == "points" else str(i + 1)
-            tag = tag_map.get(i, "even" if i % 2 == 0 else "odd")
+            rank_str = medals.get(i, str(i + 1)) if sort == "rank" else str(i + 1)
+            tag      = tag_map.get(i, "even" if i % 2 == 0 else "odd")
+            lv_str   = str(row["level"]) if row["level"] > 0 else "—"
+            nw_str   = f"{row['net_worth']:,}" if row["item_worth"] > 0 else f"{row['points']:,}"
             iid = tree.insert("", "end",
-                              values=(rank_str, row["name"], f"{row['points']:,}",
+                              values=(rank_str, row["name"], lv_str,
+                                      f"{row['points']:,}", nw_str,
                                       row["creations"]),
                               tags=(tag,))
-            # Restore selection if this was the selected user
             if row["uid"] == self._pts_selected_uid:
                 tree.selection_set(iid)
                 tree.see(iid)
@@ -7247,12 +7291,13 @@ class ControlPanel:
             return
 
         total_pts = sum(r["points"] for r in rows)
-        top = max(rows, key=lambda r: r["points"])
+        top = max(rows, key=lambda r: (r["level"], r["net_worth"]))
 
         self._pts_summary_labels["users"].config(text=str(len(rows)))
         self._pts_summary_labels["total_pts"].config(text=f"{total_pts:,}")
         self._pts_summary_labels["top_user"].config(text=top["name"])
-        self._pts_summary_labels["top_pts"].config(text=f"{top['points']:,}")
+        lv_note = f"Lv.{top['level']} · " if top["level"] > 0 else ""
+        self._pts_summary_labels["top_pts"].config(text=f"{lv_note}{top['net_worth']:,} net")
 
     def _pts_on_select(self, event):
         tree = self._pts_tree
@@ -7273,7 +7318,16 @@ class ControlPanel:
     def _pts_render_detail(self, matched):
         """Populate the detail panel widgets from a data row dict."""
         self._pts_detail_name.config(text=matched["name"])
-        self._pts_detail_pts.config(text=f"Points: {matched['points']:,}")
+        level     = matched.get("level", 0)
+        pts       = matched["points"]
+        net_worth = matched.get("net_worth", pts)
+        item_w    = matched.get("item_worth", 0)
+        lv_line   = f"  ⭐ Level {level}" if level > 0 else "  ⭐ Level 0 (not levelled yet)"
+        nw_line   = f"  🌐 Net worth: {net_worth:,} pts  ({pts:,} liquid + {item_w:,} items)" if item_w > 0 else f"  💰 Liquid pts: {pts:,}"
+        self._pts_detail_pts.config(text=f"{lv_line}\n{nw_line}")
+        # Pre-fill the level entry with current level for convenience
+        if hasattr(self, "_pts_level_var"):
+            self._pts_level_var.set(str(level))
 
         lb = self._pts_inv_list
         lb.delete(0, "end")
@@ -7282,7 +7336,8 @@ class ControlPanel:
         for creation in inv.get("creations", []):
             name_c = creation.get("name", "?")
             worth  = creation.get("worth", 0)
-            lb.insert("end", f"  i{slot}  🛠 {name_c}  ({worth} pts)")
+            flag   = " ⚠️illegal" if worth < 0 else ""
+            lb.insert("end", f"  i{slot}  🛠 {name_c}  ({worth:,} pts){flag}")
             slot += 1
         if slot == 1:
             lb.insert("end", "  (empty)")
@@ -7330,6 +7385,56 @@ class ControlPanel:
             _save_user_record(gid, uid, record)
             self._pts_adj_status.config(text=f"✅ Set to {amount:,}", fg="#34c759")
 
+        self._pts_refresh()
+
+    def _pts_adjust_level(self, action):
+        """Admin-set a player's level directly — no point cost."""
+        import tkinter.messagebox as mb
+        gid = self._pts_selected_group_id()
+        if not self._pts_selected_uid or not gid:
+            self._pts_lv_status.config(text="No user selected.", fg="#ff3b30")
+            return
+
+        uid   = self._pts_selected_uid
+        uname = self._pts_selected_name
+        record = _load_user_record(gid, uid)
+        cur_lv = record.get("level", 0)
+
+        if action == "reset_lv":
+            if not mb.askyesno("Confirm Reset", f"Reset {uname}'s level to 0?"):
+                return
+            record["level"] = 0
+            _save_user_record(gid, uid, record)
+            self._pts_lv_status.config(text=f"✅ {uname} level reset to 0.", fg="#34c759")
+            self._pts_refresh()
+            return
+
+        if action == "add_lv":
+            record["level"] = cur_lv + 1
+            _save_user_record(gid, uid, record)
+            self._pts_lv_status.config(text=f"✅ {uname} → Level {record['level']}", fg="#34c759")
+            self._pts_refresh()
+            return
+
+        if action == "sub_lv":
+            record["level"] = max(0, cur_lv - 1)
+            _save_user_record(gid, uid, record)
+            self._pts_lv_status.config(text=f"✅ {uname} → Level {record['level']}", fg="#34c759")
+            self._pts_refresh()
+            return
+
+        # set_lv — read from entry
+        raw = self._pts_level_var.get().strip()
+        try:
+            new_lv = int(raw)
+            if new_lv < 0:
+                raise ValueError
+        except ValueError:
+            self._pts_lv_status.config(text="Enter a valid non-negative number.", fg="#ff3b30")
+            return
+        record["level"] = new_lv
+        _save_user_record(gid, uid, record)
+        self._pts_lv_status.config(text=f"✅ {uname} set to Level {new_lv}", fg="#34c759")
         self._pts_refresh()
 
     def _pts_inv_remove(self):

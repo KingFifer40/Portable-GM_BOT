@@ -1601,8 +1601,7 @@ def apply_group_config(group_id):
     Called whenever the active group changes.
     """
     global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED
-    global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED, GAME_TIMEOUT_SECONDS
-    global CHESS_ENABLED
+    global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED, CHESS_ENABLED, GAME_TIMEOUT_SECONDS
     cfg = load_group_config(group_id)
     GAME_ENABLED      = cfg.get("game_enabled",      False)
     AI_ENABLED        = cfg.get("ai_enabled",         False)
@@ -1611,6 +1610,7 @@ def apply_group_config(group_id):
     CONNECT4_ENABLED  = cfg.get("connect4_enabled",   False)
     TICTACTOE_ENABLED = cfg.get("tictactoe_enabled",  False)
     WORDLE_ENABLED    = cfg.get("wordle_enabled",     False)
+    CHESS_ENABLED     = cfg.get("chess_enabled",      False)
     GAME_TIMEOUT_SECONDS = cfg.get("game_timeout",    300)
 
 
@@ -2681,7 +2681,7 @@ def handle_dev_command(message):
     global POINTS_STEAL_MIN, POINTS_STEAL_MAX, POINTS_STEAL_CD
     global POINTS_COIN_CD, POINTS_MAX_CAP, LEADERBOARD_SIZE
     global AI_COOLDOWN_SECONDS, AISET_COOLDOWN_SECONDS, AI_MEMORY_MAX_TURNS
-    global EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED
+    global EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED, CHESS_ENABLED
 
     text = (message.get("text") or "").strip()
     raw_name = message.get("name", "Unknown")
@@ -2712,7 +2712,7 @@ def handle_dev_command(message):
             "!groups — List all currently active game groups\n"
             "!reload — Restart the bot\n"
             "!state true/false — Master on/off switch\n"
-            "!toggle ai/8ball/scripture/connect4/tictactoe/wordle true/false — Toggle feature\n"
+            "!toggle ai/8ball/scripture/connect4/tictactoe/chess/wordle true/false — Toggle feature\n"
             "!aiswitch true/false — Enable/disable AI\n"
             "\n"
             "── Points Management ──\n"
@@ -2972,7 +2972,7 @@ def handle_dev_command(message):
     # !toggle <feature> true/false
     if cmd == "!toggle":
         if len(parts) < 3:
-            send_message(DEV_GROUP_ID, "Usage: !toggle ai/8ball/scripture/connect4/tictactoe/wordle true/false", reply_to_id=msg_id)
+            send_message(DEV_GROUP_ID, "Usage: !toggle ai/8ball/scripture/connect4/tictactoe/chess/wordle true/false", reply_to_id=msg_id)
             return
         feature = parts[1].lower()
         val_str = parts[2].lower()
@@ -5059,6 +5059,7 @@ def handle_game_command(message):
                     "#state scripture true/false    — Scripture on/off\n"
                     "#state connect4 true/false     — Connect Four on/off\n"
                     "#state tictactoe true/false    — Tic-Tac-Toe on/off\n"
+                    "#state chess true/false        — Chess on/off\n"
                     "#state wordle true/false       — Wordle on/off\n"
                     "\n"
                     "!aiforget — Clear the shared AI conversation history\n"
@@ -6303,13 +6304,14 @@ class ControlPanel:
             ("Bot (master)",  "master"),
             ("Connect Four",  "connect4"),
             ("Tic-Tac-Toe",   "tictactoe"),
+            ("Chess",         "chess"),
             ("Wordle",        "wordle"),
             ("Magic 8-Ball",  "8ball"),
             ("Scripture",     "scripture"),
             ("AI Chat",       "ai"),
         ]
         # NOTE: if you add a feature here, also update state_map in _refresh_ui,
-        # _apply_to_rec and label_map in _toggle_feature, and the WORDLE_ENABLED globals.
+        # _apply_to_rec and label_map in _toggle_feature, and the CHESS_ENABLED globals.
 
         grid = tk.Frame(tab)
         grid.pack(fill="x")
@@ -7749,7 +7751,7 @@ class ControlPanel:
 
     def _refresh_ui(self):
         global GAME_GROUP_ID, GAME_ENABLED, AI_ENABLED
-        global EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED
+        global EIGHTBALL_ENABLED, SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED, CHESS_ENABLED
 
         # Build the shared group entry list used by all group dropdowns
         entries = self._active_group_dropdown_entries()
@@ -7776,6 +7778,7 @@ class ControlPanel:
                 "master":    viewed_rec.get("GAME_ENABLED",      GAME_ENABLED),
                 "connect4":  viewed_rec.get("CONNECT4_ENABLED",  CONNECT4_ENABLED),
                 "tictactoe": viewed_rec.get("TICTACTOE_ENABLED", TICTACTOE_ENABLED),
+                "chess":     viewed_rec.get("CHESS_ENABLED",     CHESS_ENABLED),
                 "wordle":    viewed_rec.get("WORDLE_ENABLED",    WORDLE_ENABLED),
                 "8ball":     viewed_rec.get("EIGHTBALL_ENABLED", EIGHTBALL_ENABLED),
                 "scripture": viewed_rec.get("SCRIPTURE_ENABLED", SCRIPTURE_ENABLED),
@@ -7786,6 +7789,7 @@ class ControlPanel:
                 "master":    GAME_ENABLED,
                 "connect4":  CONNECT4_ENABLED,
                 "tictactoe": TICTACTOE_ENABLED,
+                "chess":     CHESS_ENABLED,
                 "wordle":    WORDLE_ENABLED,
                 "8ball":     EIGHTBALL_ENABLED,
                 "scripture": SCRIPTURE_ENABLED,
@@ -7846,7 +7850,7 @@ class ControlPanel:
 
     def _toggle_feature(self, key, var):
         global GAME_ENABLED, AI_ENABLED, EIGHTBALL_ENABLED
-        global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED
+        global SCRIPTURE_ENABLED, CONNECT4_ENABLED, TICTACTOE_ENABLED, WORDLE_ENABLED, CHESS_ENABLED
 
         val = var.get()
 
@@ -7863,6 +7867,7 @@ class ControlPanel:
                 rec["SCRIPTURE_ENABLED"] = val
                 rec["CONNECT4_ENABLED"]  = val
                 rec["TICTACTOE_ENABLED"] = val
+                rec["CHESS_ENABLED"]     = val
                 rec["WORDLE_ENABLED"]    = val
             elif key == "ai":
                 rec["AI_ENABLED"] = val
@@ -7874,6 +7879,8 @@ class ControlPanel:
                 rec["CONNECT4_ENABLED"] = val
             elif key == "tictactoe":
                 rec["TICTACTOE_ENABLED"] = val
+            elif key == "chess":
+                rec["CHESS_ENABLED"] = val
             elif key == "wordle":
                 rec["WORDLE_ENABLED"] = val
 
@@ -7895,6 +7902,7 @@ class ControlPanel:
                 SCRIPTURE_ENABLED = val
                 CONNECT4_ENABLED  = val
                 TICTACTOE_ENABLED = val
+                CHESS_ENABLED     = val
                 WORDLE_ENABLED    = val
                 for k, v in self._feature_vars.items():
                     v.set(val)
@@ -7903,6 +7911,7 @@ class ControlPanel:
             elif key == "scripture":  SCRIPTURE_ENABLED = val
             elif key == "connect4":   CONNECT4_ENABLED  = val
             elif key == "tictactoe":  TICTACTOE_ENABLED = val
+            elif key == "chess":      CHESS_ENABLED     = val
             elif key == "wordle":     WORDLE_ENABLED    = val
 
         label_map = {
@@ -7912,6 +7921,7 @@ class ControlPanel:
             "scripture": "Scripture",
             "connect4":  "Connect Four",
             "tictactoe": "Tic-Tac-Toe",
+            "chess":     "Chess",
             "wordle":    "Wordle",
         }
         feature_label = label_map.get(key, key)

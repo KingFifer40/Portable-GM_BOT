@@ -666,13 +666,69 @@ def _register_group_name(gid: str, label: str):
 DEV_POLL_INTERVAL = 10  # seconds
 GAME_POLL_INTERVAL = 3  # seconds
 
-# Global rate-limiter — prevents multiple group threads from hammering the
-# GroupMe API simultaneously.  Every poll acquires this lock and waits until
-# at least API_MIN_GAP seconds have passed since the last poll call.
+# Global rate-limiter — all gm_get / gm_post calls go through _api_throttle()
+# which enforces a minimum gap between any two outgoing API requests, regardless
+# of which thread is making them (poll threads, dev thread, message sends, etc.).
+# On a 429 response the caller backs off with exponential delay + jitter before
+# retrying, so a burst never cascades into a flood.
+#
+# GroupMe's documented limit is ~1 req/s per token.  We set API_MIN_GAP to 1.1 s
+# to stay comfortably under it even with clock jitter, and allow short bursts
+# (e.g. sending a reply immediately after receiving a message) by using a small
+# token-bucket rather than a strict per-call sleep.
 import threading as _threading_rl
-_api_rate_lock = _threading_rl.Lock()
-_api_last_poll = 0.0
-API_MIN_GAP    = 1.0   # minimum seconds between any two group poll calls
+_api_rate_lock  = _threading_rl.Lock()
+_api_last_call  = 0.0          # timestamp of last outgoing request (any thread)
+API_MIN_GAP     = 1.1          # seconds between any two API calls (all threads)
+_api_429_until  = 0.0          # if >0, don't make any call until this timestamp
+_api_429_lock   = _threading_rl.Lock()
+
+
+def _api_throttle():
+    """
+    Block the calling thread until it is safe to make an API call.
+    Enforces API_MIN_GAP between all outgoing requests and respects any
+    active 429 back-off window set by _api_handle_429().
+    Call this inside _api_rate_lock already held, or stand-alone before
+    the lock-free path (see gm_get / gm_post).
+    """
+    global _api_last_call
+    # 1. Honour any active 429 back-off
+    with _api_429_lock:
+        wait_until = _api_429_until
+    pause = wait_until - time.time()
+    if pause > 0:
+        time.sleep(pause)
+    # 2. Enforce minimum gap since last call
+    with _api_rate_lock:
+        gap = time.time() - _api_last_call
+        if gap < API_MIN_GAP:
+            time.sleep(API_MIN_GAP - gap)
+        _api_last_call = time.time()
+
+
+def _api_handle_429(retry_after_header=None):
+    """
+    Record a 429 response and set a back-off window so all threads pause.
+    Uses the Retry-After header value if present, otherwise exponential back-off
+    starting at 5 s and capped at 60 s, with ±20 % jitter.
+    """
+    global _api_429_until
+    import random as _rand
+    if retry_after_header:
+        try:
+            delay = float(retry_after_header)
+        except (TypeError, ValueError):
+            delay = 10.0
+    else:
+        # Increase back-off each successive 429; reset when calls succeed
+        delay = min(60.0, 5.0 * (1 + _rand.uniform(-0.2, 0.2)))
+
+    with _api_429_lock:
+        new_until = time.time() + delay
+        if new_until > _api_429_until:
+            _api_429_until = new_until
+    print(f"[rate] 429 received — backing off {delay:.1f}s (all threads paused).")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Feature toggles — all controllable at runtime via #state <feature> true/false
@@ -1996,45 +2052,67 @@ def normalize_quotes(text: str) -> str:
     return text
 
 
-def gm_get(path, params=None):
+def gm_get(path, params=None, _retry=3):
+    """
+    Throttled GET against the GroupMe API.
+    - Waits for the global rate-limit gap before every call.
+    - Retries up to _retry times on 429 (with back-off via _api_handle_429).
+    - Returns the 'response' sub-dict on success, {} on any unrecoverable error.
+    """
     if params is None:
         params = {}
 
     params["token"] = ACCESS_TOKEN
     url = f"{BASE_URL}{path}"
 
-    try:
-        resp = requests.get(url, params=params, timeout=10)
-
-        # 304 = No new messages (normal)
-        if resp.status_code == 304:
-            return {}
-
-        # Any other non-200 is worth logging
-        if resp.status_code != 200:
-            print(f"Warning: GET {url} returned status {resp.status_code}")
-            return {}
-
-        # Try to decode JSON safely
+    for attempt in range(max(1, _retry)):
+        _api_throttle()
         try:
-            data = resp.json()
+            resp = requests.get(url, params=params, timeout=10)
+
+            # 304 = no new messages — normal, not an error
+            if resp.status_code == 304:
+                return {}
+
+            if resp.status_code == 429:
+                _api_handle_429(resp.headers.get("Retry-After"))
+                if attempt < _retry - 1:
+                    continue          # retry after back-off
+                print(f"Warning: GET {url} still 429 after {_retry} attempts — skipping.")
+                return {}
+
+            if resp.status_code != 200:
+                print(f"Warning: GET {url} returned status {resp.status_code}")
+                return {}
+
+            try:
+                data = resp.json()
+            except Exception:
+                print(f"Warning: GET {url} returned non-JSON response")
+                return {}
+
+            if "response" not in data:
+                print(f"Warning: GET {url} missing 'response' field")
+                return {}
+
+            return data["response"]
+
         except Exception:
-            print(f"Warning: GET {url} returned non-JSON response")
+            print(f"Error in gm_get({path}):")
+            traceback.print_exc()
             return {}
 
-        # Must contain "response"
-        if "response" not in data:
-            print(f"Warning: GET {url} missing 'response' field")
-            return {}
+    return {}
 
-        return data["response"]
 
-    except Exception:
-        print(f"Error in gm_get({path}):")
-        traceback.print_exc()
-        return {}
-
-def gm_post(path, data=None):
+def gm_post(path, data=None, _retry=3):
+    """
+    Throttled POST against the GroupMe API.
+    - Waits for the global rate-limit gap before every call.
+    - Retries up to _retry times on 429 (with back-off via _api_handle_429).
+    - Raises on other HTTP errors (preserving existing behaviour for callers
+      that catch exceptions).
+    """
     if data is None:
         data = {}
 
@@ -2045,9 +2123,27 @@ def gm_post(path, data=None):
         "X-Access-Token": ACCESS_TOKEN,
     }
 
-    resp = requests.post(url, params=params, json=data, headers=headers, timeout=10)
-    resp.raise_for_status()
-    return resp.json().get("response")
+    for attempt in range(max(1, _retry)):
+        _api_throttle()
+        try:
+            resp = requests.post(url, params=params, json=data,
+                                 headers=headers, timeout=10)
+            if resp.status_code == 429:
+                _api_handle_429(resp.headers.get("Retry-After"))
+                if attempt < _retry - 1:
+                    continue
+                print(f"Warning: POST {url} still 429 after {_retry} attempts.")
+                return None
+            resp.raise_for_status()
+            return resp.json().get("response")
+        except requests.HTTPError:
+            raise
+        except Exception:
+            print(f"Error in gm_post({path}):")
+            traceback.print_exc()
+            return None
+
+    return None
 
 
 def send_message(group_id, text, reply_to_id=None):
@@ -3695,8 +3791,10 @@ def handle_game_command(message):
     # Extract text early so we can use it safely
     text = (message.get("text") or "").strip()
 
-    # Allow AI commands even when bot is disabled
-    if not GAME_ENABLED and not text.lower().startswith("#state") and not text.startswith("!ai") and not text.startswith("!aiswitch"):
+    # Commands that work regardless of whether the bot is enabled.
+    # Points/leaderboard/help are utility features that should never be gated.
+    _always_on = ("#state", "#leaderboard", "#level", "#levelup", "#help", "#balance", "#bal", "#points")
+    if not GAME_ENABLED and not any(text.lower().startswith(c) for c in _always_on) and not text.startswith("!ai") and not text.startswith("!aiswitch"):
         return
 
     if GAME_GROUP_ID is None:
@@ -6139,15 +6237,9 @@ def _group_poll_loop(group_id: str):
                 time.sleep(GAME_POLL_INTERVAL)
                 continue
 
-            # ── Rate-limit gate: stagger requests across all group threads ────
-            global _api_last_poll
-            with _api_rate_lock:
-                gap = time.time() - _api_last_poll
-                if gap < API_MIN_GAP:
-                    time.sleep(API_MIN_GAP - gap)
-                _api_last_poll = time.time()
-
             # ── Fetch new messages ───────────────────────────────────────────
+            # Throttling is handled centrally by gm_get/_api_throttle(),
+            # so no per-thread rate-gate is needed here.
             msgs, new_since_id = fetch_new_messages(gid, since_id=rec["since_id"])
             rec["since_id"] = new_since_id
 
@@ -6160,10 +6252,10 @@ def _group_poll_loop(group_id: str):
             print(f"[poll] Error in poll loop for group {gid}:")
             traceback.print_exc()
 
-        # Scale sleep with group count so aggregate API rate stays ~1 req/sec
-        n_groups = max(1, len(_group_registry))
-        per_group_interval = max(GAME_POLL_INTERVAL, API_MIN_GAP * n_groups)
-        time.sleep(per_group_interval)
+        # Sleep between our own polls. The shared _api_throttle() gate in
+        # gm_get already enforces API_MIN_GAP across all threads, so this
+        # sleep just prevents threads from spinning when there's no activity.
+        time.sleep(GAME_POLL_INTERVAL)
 
 
 

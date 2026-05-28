@@ -25,8 +25,6 @@
 #     credited through the injected helpers from the main file.
 # =============================================================================
 
-# This comment here is just to add more data so I can update it, nothing essential and should be removed as soon as possible, i am simply making a commit.
-
 import os
 import random
 import time
@@ -1832,24 +1830,26 @@ def _init_chess_board():
 def _render_chess_board(board, last_move=None):
     """Return a GroupMe-friendly text board."""
     lines = []
-    lm_squares = set()
-    if last_move:
-        lm_squares = {last_move[0], last_move[1]}
     rank_nums = ["8","7","6","5","4","3","2","1"]
     for row in range(8):
         row_str = rank_nums[row] + " "
         for col in range(8):
-            sq = (row, col)
             piece = board[row][col]
             if piece:
                 row_str += _CHESS_PIECES[piece]
             else:
                 row_str += _DARK if (row + col) % 2 == 1 else _LIGHT
         lines.append(row_str)
+    # File labels: a-h with flag/letter emojis
     lines.append("  " + "".join(_FILE_LABELS[i] for i in range(8)))
-    lines.append("⬜=light  🟫=dark")
-    lines.append("White: 🔵K 🟦Q 🟪R 🔷B 💠N 🔹P")
-    lines.append("Black: 🔴k 🟥q 🟣r 🔶b 🔸n ❤️p")
+    # Piece key: emoji + Unicode chess symbol + letter label
+    lines.append(
+        "White: 🔵♔K  🟦♕Q  🟪♖R  🔷♗B  💠♘N  🔹♙P"
+    )
+    lines.append(
+        "Black: 🔴♚k  🟥♛q  🟣♜r  🔶♝b  🔸♞n  ❤️♟p"
+    )
+    lines.append("🟨=light square  🟫=dark square")
     return "\n".join(lines)
 
 def _sq_to_rc(sq_str):

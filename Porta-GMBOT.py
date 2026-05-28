@@ -3574,29 +3574,127 @@ def get_admin_group_id():
     If in subgroup mode, returns the linked main group; otherwise returns the game group.
     """
     return ADMIN_GROUP_ID if USE_SUBGROUP and ADMIN_GROUP_ID else GAME_GROUP_ID
-        
+
+
+# ── Admin check cache ─────────────────────────────────────────────────────────
+# Caches (user_id → is_admin bool) per group for up to _ADMIN_CACHE_TTL seconds.
+# This avoids a live API call on every admin-gated command while still picking
+# up role changes within a reasonable window.
+_admin_cache        = {}   # { group_id: { user_id: (bool, timestamp) } }
+_admin_cache_lock   = threading.Lock()
+_ADMIN_CACHE_TTL    = 60   # seconds
+
+
+def _admin_cache_get(group_id, user_id):
+    """Return cached result or None if missing/expired."""
+    with _admin_cache_lock:
+        entry = _admin_cache.get(str(group_id), {}).get(str(user_id))
+        if entry is None:
+            return None
+        result, ts = entry
+        if time.time() - ts > _ADMIN_CACHE_TTL:
+            return None
+        return result
+
+
+def _admin_cache_set(group_id, user_id, result):
+    with _admin_cache_lock:
+        gid = str(group_id)
+        if gid not in _admin_cache:
+            _admin_cache[gid] = {}
+        _admin_cache[gid][str(user_id)] = (result, time.time())
+
+
+def _member_is_admin(member):
+    """
+    Return True if a GroupMe member dict represents an owner or admin.
+
+    GroupMe v3 API can return roles in two shapes:
+      - A list:   ["owner"]  /  ["admin"]  /  []
+      - A string: "owner"    (seen in some older API responses)
+    We handle both without relying on substring matching so that e.g. a role
+    string "co-admin" doesn't accidentally match "admin".
+    """
+    roles = member.get("roles", [])
+    # Normalise to a list of lowercase strings regardless of API shape.
+    if isinstance(roles, str):
+        roles = [roles.lower()]
+    else:
+        roles = [r.lower() for r in roles if isinstance(r, str)]
+    return "owner" in roles or "admin" in roles
+
+
 def is_group_admin(group_id, user_id):
     """
-    Returns True if user_id is an admin (or owner) in the given GroupMe group.
-    Fetches the group membership list fresh each call so role changes take effect immediately.
+    Returns True if user_id is an admin or owner in the relevant GroupMe group.
+
+    Which group is checked:
+      - Normally: the game group (GAME_GROUP_ID).
+      - Subgroup mode: the linked main group (ADMIN_GROUP_ID), because topic/
+        subgroup IDs don't have their own /groups/:id member list.
+
+    Fallback chain so a single API hiccup doesn't silently lock out admins:
+      1. Short-lived in-memory cache (60 s TTL) — avoids hammering the API.
+      2. Live fetch from /groups/:id  →  member roles array.
+      3. Fallback: check creator_user_id at the top of the group response
+         (GroupMe always includes this; it identifies the group owner even when
+         the roles array is empty or malformed).
+      4. If all fetches fail, returns False and prints a warning rather than
+         crashing the command.
     """
     if user_id is None:
         return False
-    # Use admin group for checking privileges
+
+    uid = str(user_id)
+
+    # Always use the admin-authoritative group, never a topic/subgroup id.
     check_group_id = get_admin_group_id()
+
+    if not check_group_id:
+        # Bot hasn't been assigned a game group yet — no admin check possible.
+        return False
+
+    # ── 1. Cache hit ─────────────────────────────────────────────────────────
+    cached = _admin_cache_get(check_group_id, uid)
+    if cached is not None:
+        return cached
+
+    # ── 2 & 3. Live API fetch ─────────────────────────────────────────────────
     try:
         resp = gm_get(f"/groups/{check_group_id}")
-        members = resp.get("members", [])
-        for member in members:
-            if str(member.get("user_id")) == str(user_id):
-                roles = member.get("roles", [])
-                # GroupMe uses "owner" and "admin" as role strings
-                if "owner" in roles or "admin" in roles:
-                    return True
+
+        if not resp:
+            # gm_get returns {} on 404 / network failure.
+            # This happens if check_group_id is a topic id (no /groups/:id endpoint).
+            # Try the parent game group as a last resort if we're not already using it.
+            if check_group_id != str(GAME_GROUP_ID) and GAME_GROUP_ID:
+                resp = gm_get(f"/groups/{GAME_GROUP_ID}")
+
+        if resp:
+            # ── 2. roles array ───────────────────────────────────────────────
+            members = resp.get("members", [])
+            for member in members:
+                if str(member.get("user_id")) == uid:
+                    result = _member_is_admin(member)
+                    _admin_cache_set(check_group_id, uid, result)
+                    return result
+
+            # ── 3. creator_user_id fallback (owner only) ─────────────────────
+            # If the user wasn't found in members (shouldn't happen) or roles
+            # was empty, at least honour the group creator as an owner.
+            creator = str(resp.get("creator_user_id", ""))
+            if creator and creator == uid:
+                _admin_cache_set(check_group_id, uid, True)
+                return True
+
+        # User not found or fetch returned nothing — not an admin.
+        _admin_cache_set(check_group_id, uid, False)
         return False
+
     except Exception:
-        print("Error checking admin status:")
+        print(f"[admin] Error checking admin status for user {uid} in group {check_group_id}:")
         traceback.print_exc()
+        # Do NOT cache on exception — let the next call try again.
         return False
 
 

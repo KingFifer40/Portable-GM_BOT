@@ -1,5 +1,5 @@
 # Porta-GMBOT — GroupMe Bot with AI Chat
-
+### DEV NOTE: PAUSING THE UPDATES FOR NOW BECAUSE CLAUDE KICKED ME OUT DUE TO AGE
 A portable GroupMe bot that lets your group play **Connect Four**, **Tic-Tac-Toe**, and **Wordle**, look up **scriptures**, chat with a **local AI** (via Ollama), earn **points**, and more. Built in Python, runs on Windows, Mac, or Linux.
 
 ---

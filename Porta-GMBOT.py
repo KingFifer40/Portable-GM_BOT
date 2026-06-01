@@ -2854,6 +2854,25 @@ def handle_dev_command(message):
         return
     cmd = parts[0].lower()
 
+    def _sync_group_toggles():
+        for gid in all_active_group_ids():
+            rec = get_or_create_group_record(gid)
+            rec["GAME_ENABLED"]      = GAME_ENABLED
+            rec["AI_ENABLED"]        = AI_ENABLED
+            rec["EIGHTBALL_ENABLED"] = EIGHTBALL_ENABLED
+            rec["SCRIPTURE_ENABLED"] = SCRIPTURE_ENABLED
+            rec["CONNECT4_ENABLED"]  = CONNECT4_ENABLED
+            rec["TICTACTOE_ENABLED"] = TICTACTOE_ENABLED
+            rec["WORDLE_ENABLED"]    = WORDLE_ENABLED
+            rec["CHESS_ENABLED"]     = CHESS_ENABLED
+            rec["GAME_TIMEOUT_SECONDS"] = GAME_TIMEOUT_SECONDS
+            snapshot_group_record(gid)
+
+    def _clear_all_ai_memory():
+        for gid in all_active_group_ids():
+            rec = get_or_create_group_record(gid)
+            rec["_ai_memory"] = []
+
     # !help
     if cmd == "!help":
         help_text = (
@@ -3124,6 +3143,10 @@ def handle_dev_command(message):
         else:
             send_message(DEV_GROUP_ID, "Usage: !state true/false", reply_to_id=msg_id)
             return
+        if not all_active_group_ids():
+            send_message(DEV_GROUP_ID, "No active game groups. Use !add or !addgroup first.", reply_to_id=msg_id)
+            return
+        _sync_group_toggles()
         send_message(DEV_GROUP_ID, f"Game responding state set to {GAME_ENABLED}", reply_to_id=msg_id)
         return
 
@@ -3158,7 +3181,10 @@ def handle_dev_command(message):
         else:
             send_message(DEV_GROUP_ID, "Unknown feature. Use: ai, 8ball, scripture, connect4, tictactoe, wordle, chess", reply_to_id=msg_id)
             return
-        snapshot_group_config(GAME_GROUP_ID)
+        if not all_active_group_ids():
+            send_message(DEV_GROUP_ID, "No active game groups. Use !add or !addgroup first.", reply_to_id=msg_id)
+            return
+        _sync_group_toggles()
         send_message(DEV_GROUP_ID, f"{'✅' if val else '❌'} {feature} set to {val}", reply_to_id=msg_id)
         return
 
@@ -3175,6 +3201,10 @@ def handle_dev_command(message):
         else:
             send_message(DEV_GROUP_ID, "Usage: !aiswitch true/false", reply_to_id=msg_id)
             return
+        if not all_active_group_ids():
+            send_message(DEV_GROUP_ID, "No active game groups. Use !add or !addgroup first.", reply_to_id=msg_id)
+            return
+        _sync_group_toggles()
         send_message(DEV_GROUP_ID, f"AI responding set to {AI_ENABLED}", reply_to_id=msg_id)
         return
 
@@ -3501,6 +3531,7 @@ def handle_dev_command(message):
         send_message(DEV_GROUP_ID, "Updating AI personality...", reply_to_id=msg_id)
         def _do_personality():
             update_personality(personality_text)
+            _clear_all_ai_memory()
             send_message(DEV_GROUP_ID, "✅ AI personality updated and memory cleared.", reply_to_id=msg_id)
         threading.Thread(target=_do_personality, daemon=True).start()
         return
@@ -3558,6 +3589,7 @@ def handle_dev_command(message):
     # !clearai
     if cmd == "!clearai":
         _ai_memory.clear()
+        _clear_all_ai_memory()
         send_message(DEV_GROUP_ID, "🧹 AI memory cleared.", reply_to_id=msg_id)
         return
 

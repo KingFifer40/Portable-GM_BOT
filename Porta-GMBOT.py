@@ -2998,15 +2998,22 @@ def handle_dev_command(message):
             "!toggle ai/8ball/scripture/connect4/tictactoe/chess/wordle true/false — Toggle feature\n"
             "!aiswitch true/false — Enable/disable AI\n"
             "\n"
-            "── Points Management ──\n"
+            "── Points & Shared Objects ──\n"
             "!setpoints @user <amount> — Set a user's points exactly\n"
             "!addpoints @user <amount> — Add points to a user\n"
             "!removepoints @user <amount> — Remove points from a user\n"
             "!resetpoints @user — Zero out a user's points\n"
-            "!resetallpoints — Zero ALL users' points (destructive!)\n"
-            "!pointscap <amount> — Set the max points cap (0 = unlimited)\n"
-            "!leaderboard [n] — Show top n users (default 10)\n"
-            "!checkpoints @user — Check a specific user's balance\n"
+            "!resetallpoints — Zero ALL users' points\n"
+            "!pointscap <amount> — Set max point cap (0 = unlimited)\n"
+            "!leaderboard [n] — Show top n users\n"
+            "!checkpoints @user — Check a user's balance\n"
+            "!create \"Name\" <worth> --shared — Create a shared object\n"
+            "!share sN with @user — Add members to a shared object\n"
+            "!sharelist — List shared objects\n"
+            "!rmvote sN with @user — Start or vote yes on a removal\n"
+            "!listv sN — Show active removal votes\n"
+            "!leave sN — Leave a shared object without voting\n"
+            "!worth sN +/-amount — Deposit or withdraw shared object points\n"
             "\n"
             "── Points Config ──\n"
             "!setfih min <n> max <n> cd <s> — Configure fishing\n"
@@ -7035,12 +7042,41 @@ GITHUB_UPDATE_FILES = {
     "Porta-Games.py": GITHUB_GAMES_URL,
 }
 
+# Path to the file used to track an in-progress update across restart.
+_UPDATE_STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "update_state.json")
+
 # SHA of the commit this copy was downloaded from.
 # The update checker compares this against the latest commit on main.
 # It is updated automatically after a successful self-update.
 BOT_COMMIT_SHA = "3a41d00"
 
 _control_panel_instance = None  # set when panel launches
+
+
+def _save_update_state(state):
+    try:
+        with open(_UPDATE_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception:
+        pass
+
+
+def _load_update_state():
+    try:
+        if os.path.exists(_UPDATE_STATE_PATH):
+            with open(_UPDATE_STATE_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
+
+
+def _clear_update_state():
+    try:
+        if os.path.exists(_UPDATE_STATE_PATH):
+            os.remove(_UPDATE_STATE_PATH)
+    except Exception:
+        pass
 
 
 def _check_for_update():
@@ -7082,6 +7118,13 @@ def _do_self_update():
         # ── Fetch the new commit SHA first ───────────────────────────────────
         sha_short, _, _ = _check_for_update()
 
+        if sha_short:
+            try:
+                if DEV_GROUP_ID:
+                    send_message(DEV_GROUP_ID, f"🤖 Porta-GMBOT update in progress: applying commit {sha_short} and restarting shortly.")
+            except Exception:
+                pass
+
         # ── Download every bot file ──────────────────────────────────────────
         downloaded = {}   # filename → new text content
         import re as _re
@@ -7119,7 +7162,14 @@ def _do_self_update():
             os.replace(tmp, dest)
             print(f"[update] Wrote {dest}")
 
-        # ── Restart ──────────────────────────────────────────────────────────
+        # ── Persist update state and restart ─────────────────────────────────
+        if sha_short:
+            _save_update_state({
+                "status": "in_progress",
+                "target_sha": sha_short,
+                "updated_to": sha_short,
+            })
+
         restart_script = os.path.join(script_dir, "restart_bot.py")
         if not os.path.exists(restart_script):
             return False, "restart_bot.py not found in script directory"
@@ -7896,175 +7946,34 @@ class ControlPanel:
 
         self._pts_tree.bind("<<TreeviewSelect>>", self._pts_on_select)
 
-        missing_row = tk.Frame(lb_outer)
-        missing_row.pack(fill="x", pady=(8, 2))
-        tk.Button(missing_row, text="🔍 Scan Missing Members", font=("Helvetica", 9),
-                  command=self._pts_scan_missing_members,
+        ttk.Separator(outer, orient="horizontal").pack(fill="x", pady=(8, 0))
+
+        tool_frame = tk.Frame(outer, pady=10)
+        tool_frame.pack(fill="x")
+        tk.Label(tool_frame, text="Points Tools", font=("Helvetica", 10, "bold")).pack(anchor="w")
+
+        btn_row = tk.Frame(tool_frame)
+        btn_row.pack(fill="x", pady=(6, 0))
+        tk.Button(btn_row, text="👤 User Tools", font=("Helvetica", 9),
+                  command=self._pts_open_user_tools_window,
                   bg="#007aff", fg="white", relief="flat",
                   padx=8, pady=3).pack(side="left")
-        tk.Button(missing_row, text="🗑 Remove Selected", font=("Helvetica", 9),
-                  command=self._pts_remove_missing_selected,
-                  bg="#ff3b30", fg="white", relief="flat",
+        tk.Button(btn_row, text="🔍 Missing Members", font=("Helvetica", 9),
+                  command=self._pts_open_missing_members_window,
+                  bg="#34c759", fg="white", relief="flat",
                   padx=8, pady=3).pack(side="left", padx=(6, 0))
-        tk.Button(missing_row, text="🔗 Shared Objects", font=("Helvetica", 9),
+        tk.Button(btn_row, text="🔗 Shared Objects", font=("Helvetica", 9),
                   command=self._pts_open_shared_objects,
                   bg="#5856d6", fg="white", relief="flat",
                   padx=8, pady=3).pack(side="left", padx=(6, 0))
-        self._pts_missing_status = tk.StringVar(value="")
-        tk.Label(missing_row, textvariable=self._pts_missing_status,
-                 font=("Helvetica", 8), fg="#555555").pack(side="left", padx=(10, 0))
+        tk.Button(btn_row, text="🔁 Refresh", font=("Helvetica", 9),
+                  command=self._pts_refresh,
+                  bg="#8e8e93", fg="white", relief="flat",
+                  padx=8, pady=3).pack(side="left", padx=(6, 0))
 
-        missing_frame = tk.Frame(lb_outer)
-        missing_frame.pack(fill="both", expand=True)
-        missing_vsb = tk.Scrollbar(missing_frame, orient="vertical")
-        self._pts_missing_listbox = tk.Listbox(missing_frame, font=("Courier", 9),
-                                               height=4, selectmode="extended",
-                                               yscrollcommand=missing_vsb.set,
-                                               relief="solid", bd=1)
-        missing_vsb.config(command=self._pts_missing_listbox.yview)
-        missing_vsb.pack(side="right", fill="y")
-        self._pts_missing_listbox.pack(side="left", fill="both", expand=True)
-
-        ttk.Separator(outer, orient="horizontal").pack(fill="x", pady=(8, 0))
-
-        # ── Detail panel — scrollable canvas so nothing gets cut off ──────────
-        detail_outer = tk.Frame(outer)
-        detail_outer.pack(fill="both", expand=True)
-
-        detail_canvas = tk.Canvas(detail_outer, highlightthickness=0)
-        detail_vsb = tk.Scrollbar(detail_outer, orient="vertical", command=detail_canvas.yview)
-        detail_canvas.configure(yscrollcommand=detail_vsb.set)
-        detail_vsb.pack(side="right", fill="y")
-        detail_canvas.pack(side="left", fill="both", expand=True)
-
-        detail = tk.Frame(detail_canvas, padx=10, pady=8)
-        detail_win = detail_canvas.create_window((0, 0), window=detail, anchor="nw")
-
-        def _on_detail_configure(e):
-            detail_canvas.configure(scrollregion=detail_canvas.bbox("all"))
-        detail.bind("<Configure>", _on_detail_configure)
-
-        def _on_canvas_configure(e):
-            detail_canvas.itemconfig(detail_win, width=e.width)
-        detail_canvas.bind("<Configure>", _on_canvas_configure)
-
-        # Mousewheel scrolling on the detail panel
-        def _on_mousewheel(e):
-            detail_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-        detail_canvas.bind("<MouseWheel>", _on_mousewheel)
-        detail.bind("<MouseWheel>", _on_mousewheel)
-
-        # ── Selected user info ────────────────────────────────────────────────
-        self._pts_detail_name = tk.Label(detail, text="← Select a user above",
-                                          font=("Helvetica", 11, "bold"), fg="#1c1c1e")
-        self._pts_detail_name.pack(anchor="w")
-
-        self._pts_detail_pts = tk.Label(detail, text="", font=("Helvetica", 10), fg="#0055aa")
-        self._pts_detail_pts.pack(anchor="w")
-
-        ttk.Separator(detail, orient="horizontal").pack(fill="x", pady=6)
-
-        # ── Quick point adjustment ────────────────────────────────────────────
-        tk.Label(detail, text="Points:", font=("Helvetica", 9, "bold")).pack(anchor="w")
-
-        adj_row = tk.Frame(detail)
-        adj_row.pack(fill="x", pady=(3, 0))
-        self._pts_adj_var = tk.StringVar()
-        tk.Entry(adj_row, textvariable=self._pts_adj_var, width=8,
-                 font=("Helvetica", 10)).pack(side="left", padx=(0, 4))
-        tk.Label(adj_row, text="pts", font=("Helvetica", 9)).pack(side="left")
-
-        btn_row_pts = tk.Frame(detail)
-        btn_row_pts.pack(fill="x", pady=(4, 0))
-        for text_, action, bg_ in [
-            ("➕ Add",    "add",    "#34c759"),
-            ("➖ Remove", "remove", "#ff9500"),
-            ("📌 Set",    "set",    "#0055aa"),
-            ("🗑 Reset",  "reset",  "#ff3b30"),
-        ]:
-            tk.Button(btn_row_pts, text=text_, font=("Helvetica", 9),
-                      command=lambda a=action: self._pts_adjust(a),
-                      bg=bg_, fg="white", relief="flat",
-                      padx=6, pady=3).pack(side="left", padx=(0, 3))
-
-        self._pts_adj_status = tk.Label(detail, text="", font=("Helvetica", 9), fg="#34c759",
-                                         wraplength=360, justify="left")
-        self._pts_adj_status.pack(anchor="w", pady=(3, 0))
-
-        ttk.Separator(detail, orient="horizontal").pack(fill="x", pady=6)
-
-        # ── Level adjustment ──────────────────────────────────────────────────
-        tk.Label(detail, text="⭐ Level:", font=("Helvetica", 9, "bold")).pack(anchor="w")
-        tk.Label(detail, text="Set a player's level directly (admin override, no point cost).",
-                 font=("Helvetica", 8), fg="#888888", wraplength=360, justify="left").pack(anchor="w")
-
-        lv_row = tk.Frame(detail)
-        lv_row.pack(fill="x", pady=(4, 0))
-        self._pts_level_var = tk.StringVar(value="0")
-        tk.Entry(lv_row, textvariable=self._pts_level_var, width=5,
-                 font=("Helvetica", 10)).pack(side="left", padx=(0, 4))
-        tk.Label(lv_row, text="level", font=("Helvetica", 9)).pack(side="left")
-
-        lv_btn_row = tk.Frame(detail)
-        lv_btn_row.pack(fill="x", pady=(4, 0))
-        for text_, action in [("➕ +1", "add_lv"), ("➖ -1", "sub_lv"), ("📌 Set", "set_lv"), ("🗑 Reset", "reset_lv")]:
-            bg_ = {"add_lv": "#34c759", "sub_lv": "#ff9500", "set_lv": "#0055aa", "reset_lv": "#ff3b30"}[action]
-            tk.Button(lv_btn_row, text=text_, font=("Helvetica", 9),
-                      command=lambda a=action: self._pts_adjust_level(a),
-                      bg=bg_, fg="white", relief="flat",
-                      padx=6, pady=3).pack(side="left", padx=(0, 3))
-
-        self._pts_lv_status = tk.Label(detail, text="", font=("Helvetica", 9), fg="#34c759",
-                                        wraplength=360, justify="left")
-        self._pts_lv_status.pack(anchor="w", pady=(3, 0))
-
-        ttk.Separator(detail, orient="horizontal").pack(fill="x", pady=6)
-        tk.Label(detail, text="Inventory:", font=("Helvetica", 9, "bold")).pack(anchor="w")
-
-        inv_frame = tk.Frame(detail)
-        inv_frame.pack(fill="x", pady=(3, 0))
-        inv_vsb = tk.Scrollbar(inv_frame, orient="vertical")
-        self._pts_inv_list = tk.Listbox(inv_frame, font=("Courier", 9),
-                                         yscrollcommand=inv_vsb.set, height=4,
-                                         selectmode="browse", relief="solid", bd=1)
-        inv_vsb.config(command=self._pts_inv_list.yview)
-        inv_vsb.pack(side="right", fill="y")
-        self._pts_inv_list.pack(fill="x", expand=True)
-
-        inv_btn_row = tk.Frame(detail)
-        inv_btn_row.pack(fill="x", pady=(4, 0))
-        tk.Button(inv_btn_row, text="🗑 Remove Selected", font=("Helvetica", 9),
-                  command=self._pts_inv_remove,
-                  bg="#ff3b30", fg="white", relief="flat",
-                  padx=6, pady=3).pack(side="left", padx=(0, 4))
-
-        ttk.Separator(detail, orient="horizontal").pack(fill="x", pady=6)
-
-        # ── Inject item ───────────────────────────────────────────────────────
-        tk.Label(detail, text="Inject Item:", font=("Helvetica", 9, "bold")).pack(anchor="w")
-        tk.Label(detail, text="Bypasses all normal limits. Worth can be negative (prank trap).",
-                 font=("Helvetica", 8), fg="#888888", wraplength=360, justify="left").pack(anchor="w")
-
-        inject_grid = tk.Frame(detail)
-        inject_grid.pack(fill="x", pady=(4, 0))
-        inject_grid.columnconfigure(1, weight=1)
-
-        tk.Label(inject_grid, text="Name:", font=("Helvetica", 9), anchor="w").grid(
-            row=0, column=0, sticky="w", padx=(0, 4))
-        self._pts_inject_name_var = tk.StringVar()
-        tk.Entry(inject_grid, textvariable=self._pts_inject_name_var,
-                 font=("Helvetica", 9)).grid(row=0, column=1, sticky="ew")
-
-        tk.Label(inject_grid, text="Worth:", font=("Helvetica", 9), anchor="w").grid(
-            row=1, column=0, sticky="w", padx=(0, 4), pady=(4, 0))
-        self._pts_inject_worth_var = tk.StringVar(value="0")
-        tk.Entry(inject_grid, textvariable=self._pts_inject_worth_var,
-                 font=("Helvetica", 9), width=8).grid(row=1, column=1, sticky="w", pady=(4, 0))
-
-        tk.Button(detail, text="💉 Inject Item", font=("Helvetica", 9),
-                  command=self._pts_inv_inject,
-                  bg="#ff9500", fg="white", relief="flat",
-                  padx=8, pady=3).pack(anchor="w", pady=(6, 0))
+        tk.Label(tool_frame,
+                 text="Open a tool window to manage the selected leaderboard user, shared objects, or missing members.",
+                 font=("Helvetica", 8), fg="#555555", wraplength=520, justify="left").pack(anchor="w", pady=(6, 0))
 
         # Internal state
         self._pts_data = []
@@ -8385,6 +8294,223 @@ class ControlPanel:
             del self._pts_shared_objects
         if hasattr(self, "_pts_shared_obj_selected_idx"):
             del self._pts_shared_obj_selected_idx
+
+    def _pts_open_user_tools_window(self):
+        import tkinter as tk
+        from tkinter import messagebox, ttk
+
+        if not self._pts_selected_group_id():
+            self._set_status("Select a group first.")
+            return
+        if not self._pts_selected_uid:
+            self._set_status("Select a leaderboard user first.")
+            return
+        if hasattr(self, "_pts_user_window") and self._pts_user_window.winfo_exists():
+            self._pts_user_window.lift()
+            self._pts_refresh_user_window()
+            return
+
+        win = tk.Toplevel(self.root)
+        self._pts_user_window = win
+        win.title(f"User Tools — {self._pts_selected_name}")
+        win.geometry("620x520")
+        win.transient(self.root)
+
+        header = tk.Label(win, text=f"User Tools: {self._pts_selected_name}", font=("Helvetica", 12, "bold"))
+        header.pack(anchor="w", pady=(10, 4), padx=10)
+
+        info = tk.Label(win,
+                       text="Use the controls below to update points, level, inventory, and shared-object actions for the selected user.",
+                       font=("Helvetica", 9), fg="#555555", wraplength=600, justify="left")
+        info.pack(anchor="w", padx=10, pady=(0, 8))
+
+        body = tk.Frame(win, padx=10, pady=0)
+        body.pack(fill="both", expand=True)
+
+        self._pts_detail_name = tk.Label(body, text=self._pts_selected_name,
+                                          font=("Helvetica", 11, "bold"), fg="#1c1c1e")
+        self._pts_detail_name.pack(anchor="w")
+
+        self._pts_detail_pts = tk.Label(body, text="", font=("Helvetica", 10), fg="#0055aa")
+        self._pts_detail_pts.pack(anchor="w")
+
+        ttk.Separator(body, orient="horizontal").pack(fill="x", pady=6)
+
+        tk.Label(body, text="Quick point adjustment:", font=("Helvetica", 9, "bold")).pack(anchor="w")
+        adj_row = tk.Frame(body)
+        adj_row.pack(fill="x", pady=(4, 0))
+        self._pts_adj_var = tk.StringVar()
+        tk.Entry(adj_row, textvariable=self._pts_adj_var, width=8,
+                 font=("Helvetica", 10)).pack(side="left", padx=(0, 4))
+        tk.Label(adj_row, text="pts", font=("Helvetica", 9)).pack(side="left")
+        btn_row_pts = tk.Frame(body)
+        btn_row_pts.pack(fill="x", pady=(4, 0))
+        for text_, action, bg_ in [
+            ("➕ Add", "add", "#34c759"),
+            ("➖ Remove", "remove", "#ff9500"),
+            ("📌 Set", "set", "#0055aa"),
+            ("🗑 Reset", "reset", "#ff3b30"),
+        ]:
+            tk.Button(btn_row_pts, text=text_, font=("Helvetica", 9),
+                      command=lambda a=action: self._pts_adjust(a),
+                      bg=bg_, fg="white", relief="flat",
+                      padx=6, pady=3).pack(side="left", padx=(0, 3))
+
+        self._pts_adj_status = tk.Label(body, text="", font=("Helvetica", 9), fg="#34c759",
+                                        wraplength=580, justify="left")
+        self._pts_adj_status.pack(anchor="w", pady=(4, 0))
+
+        ttk.Separator(body, orient="horizontal").pack(fill="x", pady=8)
+
+        tk.Label(body, text="Level adjustment:", font=("Helvetica", 9, "bold")).pack(anchor="w")
+        lv_row = tk.Frame(body)
+        lv_row.pack(fill="x", pady=(4, 0))
+        self._pts_level_var = tk.StringVar(value="0")
+        tk.Entry(lv_row, textvariable=self._pts_level_var, width=6,
+                 font=("Helvetica", 10)).pack(side="left", padx=(0, 4))
+        tk.Label(lv_row, text="level", font=("Helvetica", 9)).pack(side="left")
+        lv_btn_row = tk.Frame(body)
+        lv_btn_row.pack(fill="x", pady=(4, 0))
+        for text_, action in [("➕ +1", "add_lv"), ("➖ -1", "sub_lv"), ("📌 Set", "set_lv"), ("🗑 Reset", "reset_lv")]:
+            bg_ = {"add_lv": "#34c759", "sub_lv": "#ff9500", "set_lv": "#0055aa", "reset_lv": "#ff3b30"}[action]
+            tk.Button(lv_btn_row, text=text_, font=("Helvetica", 9),
+                      command=lambda a=action: self._pts_adjust_level(a),
+                      bg=bg_, fg="white", relief="flat",
+                      padx=6, pady=3).pack(side="left", padx=(0, 3))
+
+        self._pts_lv_status = tk.Label(body, text="", font=("Helvetica", 9), fg="#34c759",
+                                       wraplength=580, justify="left")
+        self._pts_lv_status.pack(anchor="w", pady=(4, 0))
+
+        ttk.Separator(body, orient="horizontal").pack(fill="x", pady=8)
+
+        tk.Label(body, text="Inventory:", font=("Helvetica", 9, "bold")).pack(anchor="w")
+        inv_frame = tk.Frame(body)
+        inv_frame.pack(fill="both", expand=True, pady=(4, 0))
+        inv_vsb = tk.Scrollbar(inv_frame, orient="vertical")
+        self._pts_inv_list = tk.Listbox(inv_frame, font=("Courier", 9),
+                                         yscrollcommand=inv_vsb.set, height=8,
+                                         selectmode="browse", relief="solid", bd=1)
+        inv_vsb.config(command=self._pts_inv_list.yview)
+        inv_vsb.pack(side="right", fill="y")
+        self._pts_inv_list.pack(fill="both", expand=True)
+
+        inv_btn_row = tk.Frame(body)
+        inv_btn_row.pack(fill="x", pady=(6, 0))
+        tk.Button(inv_btn_row, text="🗑 Remove Selected", font=("Helvetica", 9),
+                  command=self._pts_inv_remove,
+                  bg="#ff3b30", fg="white", relief="flat",
+                  padx=6, pady=3).pack(side="left")
+
+        ttk.Separator(body, orient="horizontal").pack(fill="x", pady=8)
+
+        tk.Label(body, text="Inject item:", font=("Helvetica", 9, "bold")).pack(anchor="w")
+        inject_grid = tk.Frame(body)
+        inject_grid.pack(fill="x", pady=(4, 0))
+        inject_grid.columnconfigure(1, weight=1)
+        tk.Label(inject_grid, text="Name:", font=("Helvetica", 9), anchor="w").grid(
+            row=0, column=0, sticky="w", padx=(0, 4))
+        self._pts_inject_name_var = tk.StringVar()
+        tk.Entry(inject_grid, textvariable=self._pts_inject_name_var,
+                 font=("Helvetica", 9)).grid(row=0, column=1, sticky="ew")
+        tk.Label(inject_grid, text="Worth:", font=("Helvetica", 9), anchor="w").grid(
+            row=1, column=0, sticky="w", padx=(0, 4), pady=(4, 0))
+        self._pts_inject_worth_var = tk.StringVar(value="0")
+        tk.Entry(inject_grid, textvariable=self._pts_inject_worth_var,
+                 font=("Helvetica", 9), width=10).grid(row=1, column=1, sticky="w", pady=(4, 0))
+
+        tk.Button(body, text="💉 Inject Item", font=("Helvetica", 9),
+                  command=self._pts_inv_inject,
+                  bg="#ff9500", fg="white", relief="flat",
+                  padx=8, pady=3).pack(anchor="w", pady=(6, 0))
+
+        win.protocol("WM_DELETE_WINDOW", lambda: self._close_user_tools_window())
+        self._pts_refresh_user_window()
+
+    def _close_user_tools_window(self):
+        if hasattr(self, "_pts_user_window") and self._pts_user_window.winfo_exists():
+            self._pts_user_window.destroy()
+        if hasattr(self, "_pts_user_window"):
+            del self._pts_user_window
+        for attr in ["_pts_detail_name", "_pts_detail_pts", "_pts_adj_var", "_pts_adj_status",
+                     "_pts_level_var", "_pts_lv_status", "_pts_inv_list",
+                     "_pts_inject_name_var", "_pts_inject_worth_var"]:
+            if hasattr(self, attr):
+                delattr(self, attr)
+
+    def _pts_refresh_user_window(self):
+        if not hasattr(self, "_pts_user_window") or not self._pts_user_window.winfo_exists():
+            return
+        if not self._pts_selected_uid:
+            self._pts_detail_name.config(text="← Select a user above")
+            self._pts_detail_pts.config(text="")
+            return
+        matched = next((r for r in self._pts_data if r["uid"] == self._pts_selected_uid), None)
+        if matched:
+            self._pts_render_detail(matched)
+
+    def _pts_open_missing_members_window(self):
+        import tkinter as tk
+        from tkinter import messagebox
+
+        if not self._pts_selected_group_id():
+            self._set_status("Select a group first.")
+            return
+        if hasattr(self, "_pts_missing_window") and self._pts_missing_window.winfo_exists():
+            self._pts_missing_window.lift()
+            return
+
+        win = tk.Toplevel(self.root)
+        self._pts_missing_window = win
+        win.title("Missing Members")
+        win.geometry("580x380")
+        win.transient(self.root)
+
+        header = tk.Label(win, text="Missing Member Cleanup", font=("Helvetica", 12, "bold"))
+        header.pack(anchor="w", pady=(10, 4), padx=10)
+
+        info = tk.Label(win,
+                       text="Scan the selected group for members who no longer appear in the GroupMe group and remove them from points storage.",
+                       font=("Helvetica", 9), fg="#555555", wraplength=560, justify="left")
+        info.pack(anchor="w", padx=10, pady=(0, 8))
+
+        action_row = tk.Frame(win, padx=10)
+        action_row.pack(fill="x")
+        tk.Button(action_row, text="🔄 Scan Missing Members", font=("Helvetica", 9),
+                  command=self._pts_scan_missing_members,
+                  bg="#007aff", fg="white", relief="flat",
+                  padx=8, pady=3).pack(side="left")
+        tk.Button(action_row, text="🗑 Remove Selected", font=("Helvetica", 9),
+                  command=self._pts_remove_missing_selected,
+                  bg="#ff3b30", fg="white", relief="flat",
+                  padx=8, pady=3).pack(side="left", padx=(6, 0))
+
+        list_frame = tk.Frame(win, padx=10, pady=(8, 0))
+        list_frame.pack(fill="both", expand=True)
+        list_vsb = tk.Scrollbar(list_frame, orient="vertical")
+        self._pts_missing_listbox = tk.Listbox(list_frame, font=("Courier", 9),
+                                               yscrollcommand=list_vsb.set, height=12,
+                                               selectmode="extended", relief="solid", bd=1)
+        list_vsb.config(command=self._pts_missing_listbox.yview)
+        list_vsb.pack(side="right", fill="y")
+        self._pts_missing_listbox.pack(fill="both", expand=True)
+
+        self._pts_missing_status = tk.StringVar(value="")
+        tk.Label(win, textvariable=self._pts_missing_status,
+                 font=("Helvetica", 8), fg="#555555", wraplength=560, justify="left").pack(anchor="w", padx=10, pady=(8, 0))
+
+        win.protocol("WM_DELETE_WINDOW", lambda: self._close_missing_members_window())
+        self._pts_scan_missing_members()
+
+    def _close_missing_members_window(self):
+        if hasattr(self, "_pts_missing_window") and self._pts_missing_window.winfo_exists():
+            self._pts_missing_window.destroy()
+        if hasattr(self, "_pts_missing_window"):
+            del self._pts_missing_window
+        if hasattr(self, "_pts_missing_listbox"):
+            del self._pts_missing_listbox
+        if hasattr(self, "_pts_missing_status"):
+            del self._pts_missing_status
 
     def _pts_refresh_shared_objects_window(self):
         if not hasattr(self, "_shared_obj_window") or not self._shared_obj_window.winfo_exists():
@@ -9708,6 +9834,28 @@ def main():
         print(f"Active game groups at startup: {startup_groups}")
     else:
         print("No game groups configured. Use !add or !addgroup from the dev group.")
+
+    update_state = _load_update_state()
+    if update_state and update_state.get("status") == "in_progress":
+        target_sha = update_state.get("target_sha")
+        if target_sha == BOT_COMMIT_SHA:
+            update_msg = f"🤖 Porta-GMBOT update complete. Now running commit {BOT_COMMIT_SHA}."
+        else:
+            update_msg = (
+                f"🤖 Porta-GMBOT restart detected after an update attempt. "
+                f"Current commit is {BOT_COMMIT_SHA}."
+            )
+        try:
+            if DEV_GROUP_ID:
+                send_message(DEV_GROUP_ID, update_msg)
+        except Exception:
+            pass
+        for gid in startup_groups:
+            try:
+                send_message(gid, update_msg)
+            except Exception:
+                pass
+        _clear_update_state()
 
     # Pre-populate the name cache from the full group list (one API call).
     # This covers regular groups; subtopic IDs won't appear here (they 404

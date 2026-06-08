@@ -3010,6 +3010,7 @@ def handle_dev_command(message):
             "!create \"Name\" <worth> --shared — Create a shared object\n"
             "!share sN with @user — Add members to a shared object\n"
             "!sharelist — List shared objects\n"
+            "!members sN — Show the shared object name and members\n"
             "!rmvote sN with @user — Start or vote yes on a removal\n"
             "!listv sN — Show active removal votes\n"
             "!leave sN — Leave a shared object without voting\n"
@@ -5007,9 +5008,51 @@ def handle_game_command(message):
         lines.append("Use !share sN with @user to add members.")
         lines.append("Use !rmvote sN with @user to start or vote yes on a removal.")
         lines.append("Use !listv sN to view active removal votes.")
+        lines.append("Use !members sN to show the shared object name and members.")
         lines.append("Use !leave sN to leave a shared object without voting.")
         lines.append("Use !worth sN +/-amount to deposit or withdraw points.")
         send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
+        return
+
+    if cmd == "!members":
+        import re as _re_members
+        gid = GAME_GROUP_ID
+        if not gid:
+            send_message(GAME_GROUP_ID, "\u274c No active group selected.", reply_to_id=msg_id)
+            return
+        if len(parts) < 2:
+            send_message(
+                GAME_GROUP_ID,
+                "\u274c Usage: !members s<slot>\nExample: !members s2",
+                reply_to_id=msg_id,
+            )
+            return
+        obj_token = parts[1].lower()
+        slot_match = _re_members.match(r'^[sS](\d+)$', obj_token)
+        if not slot_match:
+            send_message(GAME_GROUP_ID, "\u274c Could not parse the shared object. Use s<slot>.", reply_to_id=msg_id)
+            return
+        slot_num = int(slot_match.group(1))
+        _, obj = _get_shared_object_by_slot(gid, slot_num)
+        if obj is None:
+            send_message(GAME_GROUP_ID, f"\u274c Shared object s{slot_num} does not exist.", reply_to_id=msg_id)
+            return
+        members = obj.get("members", [])
+        if not members:
+            send_message(
+                GAME_GROUP_ID,
+                f"\U0001f4cb {obj['id']} ({obj['name']}) has no members.",
+                reply_to_id=msg_id,
+            )
+            return
+        member_names = [
+            _known_names.get(uid, uid) for uid in members
+        ]
+        send_message(
+            GAME_GROUP_ID,
+            f"\U0001f4cb {obj['id']} ({obj['name']}) members: {', '.join(member_names)}",
+            reply_to_id=msg_id,
+        )
         return
 
     if cmd == "!rmvote":
@@ -6009,9 +6052,9 @@ def handle_game_command(message):
                         "  Example: !create \"Community Jar\" 200 --shared\n"
                         "\u2022 !share s<slot> with @user1 @user2 \u2014 Add members to a shared object\n"
                         "\u2022 !sharelist \u2014 List shared objects\n"
+                        "\u2022 !members s<slot> \u2014 Show the shared object name and members\n"
                         "\u2022 !rmvote s<slot> with @user1 @user2 \u2014 Start or vote yes on a removal vote\n"
                         "\u2022 !listv s<slot> \u2014 List active removal votes for a shared object\n"
-                        "\u2022 !leave s<slot> \u2014 Leave a shared object without voting\n"
                         "\u2022 !worth s<slot> [-amount] \u2014 Withdraw from a shared object\n"
                         "  Example: !worth s1 -20\n"
                         "  Slot and amount can be in any order; no sign = add.\n"

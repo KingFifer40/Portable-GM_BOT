@@ -7332,6 +7332,31 @@ class ControlPanel:
 
         self._pts_tree.bind("<<TreeviewSelect>>", self._pts_on_select)
 
+        missing_row = tk.Frame(lb_outer)
+        missing_row.pack(fill="x", pady=(8, 2))
+        tk.Button(missing_row, text="🔍 Scan Missing Members", font=("Helvetica", 9),
+                  command=self._pts_scan_missing_members,
+                  bg="#007aff", fg="white", relief="flat",
+                  padx=8, pady=3).pack(side="left")
+        tk.Button(missing_row, text="🗑 Remove Selected", font=("Helvetica", 9),
+                  command=self._pts_remove_missing_selected,
+                  bg="#ff3b30", fg="white", relief="flat",
+                  padx=8, pady=3).pack(side="left", padx=(6, 0))
+        self._pts_missing_status = tk.StringVar(value="")
+        tk.Label(missing_row, textvariable=self._pts_missing_status,
+                 font=("Helvetica", 8), fg="#555555").pack(side="left", padx=(10, 0))
+
+        missing_frame = tk.Frame(lb_outer)
+        missing_frame.pack(fill="both", expand=True)
+        missing_vsb = tk.Scrollbar(missing_frame, orient="vertical")
+        self._pts_missing_listbox = tk.Listbox(missing_frame, font=("Courier", 9),
+                                               height=4, selectmode="extended",
+                                               yscrollcommand=missing_vsb.set,
+                                               relief="solid", bd=1)
+        missing_vsb.config(command=self._pts_missing_listbox.yview)
+        missing_vsb.pack(side="right", fill="y")
+        self._pts_missing_listbox.pack(side="left", fill="both", expand=True)
+
         ttk.Separator(outer, orient="horizontal").pack(fill="x", pady=(8, 0))
 
         # ── Detail panel — scrollable canvas so nothing gets cut off ──────────
@@ -7497,6 +7522,11 @@ class ControlPanel:
         self._pts_detail_pts.config(text="")
         self._pts_inv_list.delete(0, "end")
         self._pts_adj_status.config(text="")
+        if hasattr(self, "_pts_missing_listbox"):
+            self._pts_missing_listbox.delete(0, "end")
+        if hasattr(self, "_pts_missing_status"):
+            self._pts_missing_status.set("")
+        self._pts_missing_users = []
 
     def _pts_selected_group_id(self):
         """Return the group ID currently selected in the Points tab dropdown."""
@@ -7584,6 +7614,100 @@ class ControlPanel:
             if row["uid"] == self._pts_selected_uid:
                 tree.selection_set(iid)
                 tree.see(iid)
+
+    def _pts_scan_missing_members(self):
+        import tkinter.messagebox as mb
+        gid = self._pts_selected_group_id()
+        if not gid:
+            self._pts_missing_status.set("Select a group first.")
+            return
+
+        self._pts_missing_listbox.delete(0, "end")
+        self._pts_missing_status.set("Scanning group membership…")
+        self._pts_missing_users = []
+
+        def do_scan():
+            member_ids = set()
+            resp = gm_get(f"/groups/{gid}")
+            if not resp or "members" not in resp:
+                if str(gid) != str(GAME_GROUP_ID) and GAME_GROUP_ID:
+                    resp = gm_get(f"/groups/{GAME_GROUP_ID}")
+
+            if resp and isinstance(resp.get("members", []), list):
+                for member in resp.get("members", []):
+                    if member is None:
+                        continue
+                    member_ids.add(str(member.get("user_id", "")))
+
+            if not member_ids:
+                self.root.after(0, lambda: self._pts_missing_status.set(
+                    "Could not fetch member list for this group."))
+                return
+
+            ledger = load_points(gid)
+            missing = []
+            for uid, record in ledger.items():
+                if str(uid) not in member_ids:
+                    missing.append({
+                        "uid": uid,
+                        "name": record.get("name", uid),
+                        "points": record.get("points", 0),
+                    })
+
+            missing.sort(key=lambda r: r["name"].lower())
+
+            def finish():
+                self._pts_missing_users = missing
+                self._pts_missing_listbox.delete(0, "end")
+                if not missing:
+                    self._pts_missing_status.set("No missing users found.")
+                    return
+                for row in missing:
+                    self._pts_missing_listbox.insert(
+                        "end",
+                        f"{row['name']} ({row['uid']}) — {row['points']:,} pts"
+                    )
+                self._pts_missing_status.set(f"Found {len(missing)} missing user(s). Select entries to remove.")
+
+            self.root.after(0, finish)
+
+        threading.Thread(target=do_scan, daemon=True).start()
+
+    def _pts_remove_missing_selected(self):
+        import tkinter.messagebox as mb
+        gid = self._pts_selected_group_id()
+        if not gid:
+            self._pts_missing_status.set("Select a group first.")
+            return
+
+        sel = self._pts_missing_listbox.curselection()
+        if not sel:
+            self._pts_missing_status.set("Select one or more missing users first.")
+            return
+
+        selected = [self._pts_missing_users[i] for i in sel]
+        names = ", ".join(row["name"] for row in selected)
+        if not mb.askyesno(
+            "Confirm Remove",
+            f"Remove the following missing user(s) from points storage?\n\n{names}",
+        ):
+            return
+
+        for row in selected:
+            self._pts_remove_user_data(gid, row["uid"])
+
+        self._pts_refresh()
+        self._pts_scan_missing_members()
+        self._pts_missing_status.set(f"Removed {len(selected)} missing user(s).")
+
+    def _pts_remove_user_data(self, group_id, user_id):
+        for path_fn in (_user_points_path, _inventory_path, _requests_path):
+            try:
+                path = path_fn(group_id, user_id)
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
 
     def _pts_update_summary(self):
         rows = self._pts_data

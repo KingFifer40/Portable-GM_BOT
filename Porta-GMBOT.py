@@ -7628,17 +7628,42 @@ class ControlPanel:
         self._pts_missing_users = []
 
         def do_scan():
-            member_ids = set()
-            resp = gm_get(f"/groups/{gid}", warn_on_not_found=False)
-            if not resp or "members" not in resp:
-                if str(gid) != str(GAME_GROUP_ID) and GAME_GROUP_ID:
-                    resp = gm_get(f"/groups/{GAME_GROUP_ID}")
-
-            if resp and isinstance(resp.get("members", []), list):
-                for member in resp.get("members", []):
+            def parse_member_ids(resp):
+                ids = set()
+                if isinstance(resp, list):
+                    members = resp
+                else:
+                    members = resp.get("members", []) if isinstance(resp, dict) else []
+                if not isinstance(members, list):
+                    return ids
+                for member in members:
                     if member is None:
                         continue
-                    member_ids.add(str(member.get("user_id", "")))
+                    if isinstance(member, dict):
+                        uid = member.get("user_id") or member.get("id")
+                        if uid is None and isinstance(member.get("user"), dict):
+                            uid = member["user"].get("id")
+                    else:
+                        uid = member
+                    if uid is not None:
+                        ids.add(str(uid))
+                return ids
+
+            member_ids = set()
+            resp = gm_get(f"/groups/{gid}", warn_on_not_found=False)
+            member_ids = parse_member_ids(resp)
+
+            if not member_ids:
+                # Try the fallback parent or admin group for topic/subgroup IDs.
+                fallback_gid = get_admin_group_id() if get_admin_group_id() else GAME_GROUP_ID
+                if fallback_gid and str(fallback_gid) != str(gid):
+                    resp = gm_get(f"/groups/{fallback_gid}")
+                    member_ids = parse_member_ids(resp)
+
+            if not member_ids:
+                # Try the explicit members endpoint if available.
+                resp = gm_get(f"/groups/{gid}/members", warn_on_not_found=False)
+                member_ids = parse_member_ids(resp)
 
             if not member_ids:
                 self.root.after(0, lambda: self._pts_missing_status.set(

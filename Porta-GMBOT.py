@@ -5993,9 +5993,12 @@ def handle_game_command(message):
                     help_text = (
                         "\U0001f4b0 The points menu has multiple sections.\n"
                         "Use one of these to see details:\n"
-                        "\u2022 #help points 1 \u2014 Earning & spending points\n"
-                        "\u2022 #help points 2 \u2014 Inventory\n"
-                        "\u2022 #help points 3 \u2014 Trading & requests\n"
+                        "\u2022 #help points 1 \u2014 Earning points\n"
+                        "\u2022 #help points 2 \u2014 Gambling & games\n"
+                        "\u2022 #help points 3 \u2014 Levels & leaderboard\n"
+                        "\u2022 #help points 4 \u2014 Creating & managing items\n"
+                        "\u2022 #help points 5 \u2014 Shared objects\n"
+                        "\u2022 #help points 6 \u2014 Trading & requests\n"
                         "\u2022 #help gamepoints \u2014 Game betting & AI rewards"
                     )
                     send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
@@ -6003,27 +6006,14 @@ def handle_game_command(message):
 
                 if subpage == 1:
                     help_text = (
-                        "\U0001f4b0 *Points \u2014 Section 1: Earning & Spending*\n"
+                        "\U0001f4b0 *Points \u2014 Section 1: Earning Points*\n"
                         "\u2022 !points \u2014 Check your point balance\n"
                         "\u2022 !fih \u2014 Fish for points (5 min cooldown)\n"
+                        "  Earn 5–40 pts per catch (25% chance to lose pts instead)\n"
                         "\u2022 !steal \u2014 Steal from a random person (5 min cooldown)\n"
+                        "  Steal 5–30 pts from someone in the group\n"
                         "\u2022 !give @username <amount> \u2014 Give points to another player\n"
                         "  Example: !give @PlayerName 50\n"
-                        "\u2022 !coin <h/t> <bet> \u2014 Flip a coin to gamble points\n"
-                        "  Example: !coin h 50\n"
-                        "\u2022 !wheel \u2014 Spin the prize wheel (costs 50 pts to enter)\n"
-                        "  Betting your full balance or more = All In!\n"
-                        "\u2022 !guess \u2014 Guess a number 1–10 to earn points\n"
-                        "  First guess = 200 pts, drops off fast!\n"
-                        "\n"
-                        "\u2b50 *Levels*\n"
-                        "\u2022 #level \u2014 Check your level and progress toward next\n"
-                        "\u2022 #levelup \u2014 Spend 10,000 liquid pts to gain 1 level\n"
-                        "  Levels rank you above same-net-worth players on the board.\n"
-                        "  Like Mario Party stars \u2014 more levels = higher placement!\n"
-                        "  Items must be sold/extracted first (only liquid pts count).\n"
-                        "\n"
-                        "\u2022 #leaderboard \u2014 Top ranking (sorted by level, then net worth)\n"
                         "\n"
                         "\u26a0\ufe0f There is a max point cap set by the server admin."
                     )
@@ -6032,7 +6022,44 @@ def handle_game_command(message):
 
                 if subpage == 2:
                     help_text = (
-                        "\U0001f6e0\ufe0f *Points \u2014 Section 2: Inventory*\n"
+                        "\U0001f3b2 *Points \u2014 Section 2: Gambling & Games*\n"
+                        "\u2022 !coin <h/t> <bet> \u2014 Flip a coin to gamble points\n"
+                        "  Example: !coin h 50\n"
+                        "  Betting your full balance or more = All In!\n"
+                        "\u2022 !wheel \u2014 Spin the prize wheel (costs 50 pts to enter)\n"
+                        "  Random outcome: win, lose, or free spin!\n"
+                        "\u2022 !guess \u2014 Guess a number 1–10 to earn points\n"
+                        "  First guess = 200 pts (drops off quickly per guess)\n"
+                        "  Each player gets 2 min cooldown between guesses\n"
+                        "\n"
+                        "💡 *Game Betting:*\n"
+                        "  See #help gamepoints for Connect Four betting, AI challenges, spectator wagering."
+                    )
+                    send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
+                    return
+
+                if subpage == 3:
+                    help_text = (
+                        "\u2b50 *Points \u2014 Section 3: Levels & Leaderboard*\n"
+                        "\u2022 #level \u2014 Check your level and progress toward next\n"
+                        "\u2022 #levelup \u2014 Spend 10,000 liquid pts to gain 1 level\n"
+                        "  Levels rank you above same-net-worth players on the board.\n"
+                        "  Like Mario Party stars \u2014 more levels = higher placement!\n"
+                        "  Important: only liquid pts count (items must be sold first)\n"
+                        "\n"
+                        "\u2022 #leaderboard \u2014 See top players\n"
+                        "  Sorted by: level first, then net worth (liquid + items)\n"
+                        "\n"
+                        "\ud83d\udcc8 *Your Stats:*\n"
+                        "  Your net worth = liquid points + value of items\n"
+                        "  Your rank = position on the leaderboard"
+                    )
+                    send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
+                    return
+
+                if subpage == 4:
+                    help_text = (
+                        "\U0001f6e0\ufe0f *Points \u2014 Section 4: Creating & Managing Items*\n"
                         "\u2022 !create \"Name\" <worth> \u2014 Create a named item\n"
                         f"  Name max {ITEM_NAME_MAX_LEN} chars, min worth {CREATION_MIN_WORTH} pts.\n"
                         "  Names must be unique. You pay the worth in points.\n"
@@ -6042,30 +6069,41 @@ def handle_game_command(message):
                         "\u2022 !items @user \u2014 View someone else's inventory\n"
                         "\n"
                         "\u2022 !sellitem i<slot> \u2014 Sell a creation to the bot\n"
-                        "  Destroys the item; gives you its worth in points.\n"
+                        "  Destroys the item; refunds its worth in points.\n"
                         "  Example: !sellitem i2\n"
                         "\n"
                         "\u2022 !worth i<slot> [+/-]<amount> \u2014 Adjust an item's worth\n"
                         "  Adding worth costs you points; removing refunds them.\n"
-                        "\u2022 !create \"Name\" <worth> --shared \u2014 Create a shared object\n"
-                        "  Optionally seed it with points (costs you that amount).\n"
-                        "  Example: !create \"Community Jar\" 200 --shared\n"
-                        "\u2022 !share s<slot> with @user1 @user2 \u2014 Add members to a shared object\n"
-                        "\u2022 !sharelist \u2014 List shared objects\n"
-                        "\u2022 !members s<slot> \u2014 Show the shared object name and members\n"
-                        "\u2022 !rmvote s<slot> with @user1 @user2 \u2014 Start or vote yes on a removal vote\n"
-                        "\u2022 !listv s<slot> \u2014 List active removal votes for a shared object\n"
-                        "\u2022 !worth s<slot> [-amount] \u2014 Withdraw from a shared object\n"
-                        "  Example: !worth s1 -20\n"
-                        "  Slot and amount can be in any order; no sign = add.\n"
-                        "  Examples: !worth i1 +3 | !worth i1 -5 | !worth +3 i1 | !worth i1 3"
+                        "  Example: !worth i1 +10"
                     )
                     send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
                     return
 
-                if subpage == 3:
+                if subpage == 5:
                     help_text = (
-                        "\U0001f91d *Points \u2014 Section 3: Trading & Requests*\n"
+                        "\U0001f517 *Points \u2014 Section 5: Shared Objects*\n"
+                        "\u2022 !create \"Name\" <worth> --shared \u2014 Create a shared object\n"
+                        "  Optionally seed it with points (costs you that amount).\n"
+                        "  Example: !create \"Community Jar\" 200 --shared\n"
+                        "\n"
+                        "\u2022 !share s<slot> with @user1 @user2 \u2014 Add members to a shared object\n"
+                        "\u2022 !sharelist \u2014 List all shared objects\n"
+                        "\u2022 !members s<slot> \u2014 Show the shared object name and members\n"
+                        "\n"
+                        "\u2022 !worth s<slot> [+/-]<amount> \u2014 Deposit or withdraw points\n"
+                        "  Example: !worth s1 -20\n"
+                        "\n"
+                        "\u2022 !rmvote s<slot> with @user \u2014 Start or vote yes on a removal\n"
+                        "\u2022 !listv s<slot> \u2014 See active removal votes\n"
+                        "\u2022 !leave s<slot> \u2014 Leave a shared object\n"
+                        "  (Members can vote you out; you can leave freely)"
+                    )
+                    send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
+                    return
+
+                if subpage == 6:
+                    help_text = (
+                        "\U0001f91d *Points \u2014 Section 6: Trading & Requests*\n"
                         "\u2022 !give @user i<slot> \u2014 Gift an item for free\n"
                         "  Example: !give @PlayerName i2\n"
                         "\n"
@@ -6083,9 +6121,12 @@ def handle_game_command(message):
                     send_message(GAME_GROUP_ID, help_text, reply_to_id=msg_id)
                     return
 
+
+
                 send_message(
                     GAME_GROUP_ID,
-                    "Available points sections: #help points 1, #help points 2, #help points 3",
+                    "Available points sections: #help points 1–6\n"
+                    "1=Earning, 2=Gambling, 3=Levels, 4=Items, 5=Shared, 6=Trading",
                     reply_to_id=msg_id,
                 )
                 return

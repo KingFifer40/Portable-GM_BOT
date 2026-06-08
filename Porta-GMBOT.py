@@ -2052,7 +2052,7 @@ def normalize_quotes(text: str) -> str:
     return text
 
 
-def gm_get(path, params=None, _retry=3):
+def gm_get(path, params=None, _retry=3, warn_on_not_found=True):
     """
     Throttled GET against the GroupMe API.
     - Waits for the global rate-limit gap before every call.
@@ -2082,6 +2082,8 @@ def gm_get(path, params=None, _retry=3):
                 return {}
 
             if resp.status_code != 200:
+                if resp.status_code == 404 and not warn_on_not_found:
+                    return {}
                 print(f"Warning: GET {url} returned status {resp.status_code}")
                 return {}
 
@@ -3693,8 +3695,7 @@ def is_group_admin(group_id, user_id):
 
     # ── 2 & 3. Live API fetch ─────────────────────────────────────────────────
     try:
-        resp = gm_get(f"/groups/{check_group_id}")
-
+        resp = gm_get(f"/groups/{check_group_id}", warn_on_not_found=False)
         if not resp:
             # gm_get returns {} on 404 / network failure.
             # This happens if check_group_id is a topic id (no /groups/:id endpoint).
@@ -7628,7 +7629,7 @@ class ControlPanel:
 
         def do_scan():
             member_ids = set()
-            resp = gm_get(f"/groups/{gid}")
+            resp = gm_get(f"/groups/{gid}", warn_on_not_found=False)
             if not resp or "members" not in resp:
                 if str(gid) != str(GAME_GROUP_ID) and GAME_GROUP_ID:
                     resp = gm_get(f"/groups/{GAME_GROUP_ID}")

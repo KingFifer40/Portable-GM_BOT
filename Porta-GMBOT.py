@@ -7995,10 +7995,14 @@ class ControlPanel:
         """Clear the currently-selected user (called when the group dropdown changes)."""
         self._pts_selected_uid  = None
         self._pts_selected_name = None
-        self._pts_detail_name.config(text="← Select a user above")
-        self._pts_detail_pts.config(text="")
-        self._pts_inv_list.delete(0, "end")
-        self._pts_adj_status.config(text="")
+        if hasattr(self, "_pts_detail_name"):
+            self._pts_detail_name.config(text="← Select a user above")
+        if hasattr(self, "_pts_detail_pts"):
+            self._pts_detail_pts.config(text="")
+        if hasattr(self, "_pts_inv_list"):
+            self._pts_inv_list.delete(0, "end")
+        if hasattr(self, "_pts_adj_status"):
+            self._pts_adj_status.config(text="")
         if hasattr(self, "_pts_missing_listbox"):
             self._pts_missing_listbox.delete(0, "end")
         if hasattr(self, "_pts_missing_status"):
@@ -8677,6 +8681,9 @@ class ControlPanel:
 
     def _pts_render_detail(self, matched):
         """Populate the detail panel widgets from a data row dict."""
+        if not hasattr(self, "_pts_detail_name") or not hasattr(self, "_pts_detail_pts"):
+            return
+
         self._pts_detail_name.config(text=matched["name"])
         level     = matched.get("level", 0)
         pts       = matched["points"]
@@ -8689,18 +8696,19 @@ class ControlPanel:
         if hasattr(self, "_pts_level_var"):
             self._pts_level_var.set(str(level))
 
-        lb = self._pts_inv_list
-        lb.delete(0, "end")
-        inv = matched["inv"]
-        slot = 1
-        for creation in inv.get("creations", []):
-            name_c = creation.get("name", "?")
-            worth  = creation.get("worth", 0)
-            flag   = " ⚠️illegal" if worth < 0 else ""
-            lb.insert("end", f"  i{slot}  🛠 {name_c}  ({worth:,} pts){flag}")
-            slot += 1
-        if slot == 1:
-            lb.insert("end", "  (empty)")
+        if hasattr(self, "_pts_inv_list"):
+            lb = self._pts_inv_list
+            lb.delete(0, "end")
+            inv = matched["inv"]
+            slot = 1
+            for creation in inv.get("creations", []):
+                name_c = creation.get("name", "?")
+                worth  = creation.get("worth", 0)
+                flag   = " ⚠️illegal" if worth < 0 else ""
+                lb.insert("end", f"  i{slot}  🛠 {name_c}  ({worth:,} pts){flag}")
+                slot += 1
+            if slot == 1:
+                lb.insert("end", "  (empty)")
 
     def _pts_adjust(self, action):
         """Quick adjust points for the selected user."""

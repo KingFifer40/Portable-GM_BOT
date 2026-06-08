@@ -8009,6 +8009,12 @@ class ControlPanel:
             self._pts_missing_status.set("")
         self._pts_missing_users = []
 
+    def _pts_has_user_detail_window(self):
+        return (
+            hasattr(self, "_pts_user_window") and self._pts_user_window.winfo_exists()
+            and hasattr(self, "_pts_detail_name") and hasattr(self, "_pts_detail_pts")
+        )
+
     def _pts_selected_group_id(self):
         """Return the group ID currently selected in the Points tab dropdown."""
         sel = self._pts_group_var.get()
@@ -8050,7 +8056,7 @@ class ControlPanel:
         # If a user is already selected, re-render their detail panel from fresh data
         # so inventory changes (injections, removals) appear immediately without
         # requiring the user to click the row again.
-        if self._pts_selected_uid:
+        if self._pts_selected_uid and self._pts_has_user_detail_window():
             matched = next((r for r in self._pts_data if r["uid"] == self._pts_selected_uid), None)
             if matched:
                 self._pts_render_detail(matched)
@@ -8443,7 +8449,7 @@ class ControlPanel:
                 delattr(self, attr)
 
     def _pts_refresh_user_window(self):
-        if not hasattr(self, "_pts_user_window") or not self._pts_user_window.winfo_exists():
+        if not self._pts_has_user_detail_window():
             return
         if not self._pts_selected_uid:
             self._pts_detail_name.config(text="← Select a user above")
@@ -8677,11 +8683,12 @@ class ControlPanel:
             return
         self._pts_selected_uid  = matched["uid"]
         self._pts_selected_name = matched["name"]
-        self._pts_render_detail(matched)
+        if self._pts_has_user_detail_window():
+            self._pts_render_detail(matched)
 
     def _pts_render_detail(self, matched):
         """Populate the detail panel widgets from a data row dict."""
-        if not hasattr(self, "_pts_detail_name") or not hasattr(self, "_pts_detail_pts"):
+        if not self._pts_has_user_detail_window():
             return
 
         self._pts_detail_name.config(text=matched["name"])

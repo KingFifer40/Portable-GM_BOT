@@ -1642,6 +1642,110 @@ def _all_creation_names(group_id):
     return names
 
 
+def _shared_objects_path(group_id):
+    cid = _canonical_group_id(group_id)
+    shared_dir = os.path.join(SCRIPT_DIR, "groups", cid)
+    os.makedirs(shared_dir, exist_ok=True)
+    return os.path.join(shared_dir, "shared_objects.json")
+
+
+def _load_shared_objects(group_id):
+    path = _shared_objects_path(group_id)
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            return []
+        clean = []
+        for obj in data:
+            if not isinstance(obj, dict):
+                continue
+            obj_id = str(obj.get("id", "")).strip()
+            if not obj_id:
+                continue
+            members = obj.get("members", [])
+            if not isinstance(members, list):
+                members = []
+            remove_votes = []
+            raw_votes = obj.get("remove_votes", [])
+            if isinstance(raw_votes, list):
+                for vote in raw_votes:
+                    if not isinstance(vote, dict):
+                        continue
+                    vote_id = str(vote.get("id", "")).strip()
+                    if not vote_id:
+                        continue
+                    target_ids = [str(mid) for mid in vote.get("target_ids", []) if mid is not None]
+                    yes_votes = [str(mid) for mid in vote.get("yes_votes", []) if mid is not None]
+                    remove_votes.append({
+                        "id": vote_id,
+                        "target_ids": target_ids,
+                        "yes_votes": yes_votes,
+                        "created_by": str(vote.get("created_by", "")),
+                    })
+            clean.append({
+                "id": obj_id,
+                "name": str(obj.get("name", "")).strip(),
+                "points": int(obj.get("points", 0)) if isinstance(obj.get("points", 0), int) else 0,
+                "members": [str(mid) for mid in members if mid is not None],
+                "created_by": str(obj.get("created_by", "")),
+                "remove_votes": remove_votes,
+            })
+        return clean
+    except Exception:
+        return []
+
+
+def _save_shared_objects(group_id, data):
+    path = _shared_objects_path(group_id)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"Warning: could not save shared objects for {group_id}: {e}")
+
+
+def _next_shared_object_id(group_id):
+    objs = _load_shared_objects(group_id)
+    used = set()
+    for obj in objs:
+        if isinstance(obj.get("id"), str) and obj["id"].lower().startswith("s"):
+            suffix = obj["id"][1:]
+            if suffix.isdigit():
+                used.add(int(suffix))
+    slot = 1
+    while slot in used:
+        slot += 1
+    return f"s{slot}"
+
+
+def _get_shared_object_by_slot(group_id, slot):
+    objs = _load_shared_objects(group_id)
+    sorted_objs = sorted(objs, key=lambda obj: int(obj["id"][1:]) if obj["id"].lower().startswith("s") and obj["id"][1:].isdigit() else float("inf"))
+    if slot < 1 or slot > len(sorted_objs):
+        return None, None
+    return slot - 1, sorted_objs[slot - 1]
+
+
+def _find_shared_object(group_id, object_id):
+    object_id = str(object_id).lower()
+    objs = _load_shared_objects(group_id)
+    for idx, obj in enumerate(objs):
+        if obj.get("id", "").lower() == object_id:
+            return idx, obj
+    return None, None
+
+
+def _all_shared_object_names(group_id):
+    return {obj.get("name", "").lower() for obj in _load_shared_objects(group_id)}
+
+
+def _shared_object_vote_threshold(member_count: int) -> int:
+    return (member_count + 1) // 2
+
+
 def _inventory_display(inv, owner_name):
     """Format a user's inventory as a readable string."""
     lines = [f"\U0001f392 Inventory of {owner_name}:"]
@@ -4679,15 +4783,20 @@ def handle_game_command(message):
             )
             return
 
-    # ── CREATIONS: !create "<name>" <worth>  (any order) ─────────────────────
+    # ── CREATIONS / SHARED OBJECTS: !create "<name>" <worth> [--shared] ─────
     if cmd == "!create":
         import re as _re2
         arg_text = normalize_quotes(text[len("!create"):].strip())
+        shared_mode = False
+        if "--shared" in arg_text.lower():
+            shared_mode = True
+            arg_text = _re2.sub(r'(?i)--shared', "", arg_text).strip()
+
         quote_match = _re2.search(r'"([^"]+)"', arg_text)
         if not quote_match:
             send_message(
                 GAME_GROUP_ID,
-                '\u274c Usage: !create "Item Name" <worth>\nExample: !create "The Left Kidney" 200',
+                '\u274c Usage: !create "Item Name" <worth> [--shared]\nExample: !create "The Left Kidney" 200',
                 reply_to_id=msg_id,
             )
             return
@@ -4702,8 +4811,58 @@ def handle_game_command(message):
         if not creation_name:
             send_message(GAME_GROUP_ID, "\u274c Item name cannot be empty.", reply_to_id=msg_id)
             return
+
         remaining = arg_text[:quote_match.start()] + arg_text[quote_match.end():]
         worth_match = _re2.search(r'\b(\d+)\b', remaining)
+        worth = int(worth_match.group(1)) if worth_match else 0
+        if shared_mode:
+            if worth < 0:
+                send_message(
+                    GAME_GROUP_ID,
+                    "\u274c Shared object starting points must be 0 or greater.",
+                    reply_to_id=msg_id,
+                )
+                return
+            existing_names = _all_creation_names(GAME_GROUP_ID) | _all_shared_object_names(GAME_GROUP_ID)
+            if creation_name.lower() in existing_names:
+                send_message(
+                    GAME_GROUP_ID,
+                    f'\u274c A creation or shared object named "{creation_name}" already exists. Choose a unique name.',
+                    reply_to_id=msg_id,
+                )
+                return
+            if worth > 0:
+                bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
+                if bal < worth:
+                    send_message(
+                        GAME_GROUP_ID,
+                        f"\u274c You need {worth} pts to seed a shared object with that amount. You have {bal} pts.",
+                        reply_to_id=msg_id,
+                    )
+                    return
+                new_bal = _add_pts(GAME_GROUP_ID, sender_id, sender_name, -worth)
+            else:
+                new_bal = get_points(GAME_GROUP_ID, sender_id, sender_name)
+
+            obj_id = _next_shared_object_id(GAME_GROUP_ID)
+            shared = _load_shared_objects(GAME_GROUP_ID)
+            shared.append({
+                "id": obj_id,
+                "name": creation_name,
+                "points": worth,
+                "members": [str(sender_id)],
+                "created_by": str(sender_id),
+            })
+            _save_shared_objects(GAME_GROUP_ID, shared)
+            send_message(
+                GAME_GROUP_ID,
+                f'\U0001f4a1 {sender_name} created shared object "{creation_name}" ({obj_id}) with {worth} pts!\n'
+                f"Balance: {new_bal} pts\n"
+                f"Use !share {obj_id} with @user to add members and !worth s1 -20 to withdraw points.",
+                reply_to_id=msg_id,
+            )
+            return
+
         if not worth_match:
             send_message(
                 GAME_GROUP_ID,
@@ -4711,7 +4870,6 @@ def handle_game_command(message):
                 reply_to_id=msg_id,
             )
             return
-        worth = int(worth_match.group(1))
         if worth < CREATION_MIN_WORTH:
             send_message(
                 GAME_GROUP_ID,
@@ -4743,6 +4901,336 @@ def handle_game_command(message):
             GAME_GROUP_ID,
             f'\U0001f6e0\ufe0f {sender_name} created "{creation_name}" (worth {worth} pts)!\n'
             f"Balance: {new_bal} pts",
+            reply_to_id=msg_id,
+        )
+        return
+
+    # ── SHARED OBJECTS: !share, !sharelist ───────────────────────────────────
+    if cmd == "!share":
+        import re as _re_share
+        gid = GAME_GROUP_ID
+        if not gid:
+            send_message(GAME_GROUP_ID, "\u274c No active group selected.", reply_to_id=msg_id)
+            return
+        if len(parts) < 2:
+            send_message(
+                GAME_GROUP_ID,
+                "\u274c Usage: !share s<slot> with @user1 @user2\nExample: !share s2 with @PlayerName",
+                reply_to_id=msg_id,
+            )
+            return
+        obj_token = parts[1].lower()
+        slot_match = _re_share.match(r'^[sS](\d+)$', obj_token)
+        if not slot_match:
+            send_message(
+                GAME_GROUP_ID,
+                "\u274c Could not parse the shared object. Use s<slot>.",
+                reply_to_id=msg_id,
+            )
+            return
+        slot_num = int(slot_match.group(1))
+        obj_idx, obj = _get_shared_object_by_slot(gid, slot_num)
+        if obj is None:
+            send_message(GAME_GROUP_ID, f"\u274c Shared object s{slot_num} does not exist.", reply_to_id=msg_id)
+            return
+        if str(sender_id) not in obj.get("members", []) and str(sender_id) != str(obj.get("created_by", "")):
+            send_message(GAME_GROUP_ID, "\u274c You must be a member of that shared object to modify its membership.", reply_to_id=msg_id)
+            return
+
+        target_ids = []
+        for att in message.get("attachments", []):
+            if att.get("type") == "mentions":
+                for uid in att.get("user_ids", []):
+                    target_ids.append(str(uid))
+        if not target_ids:
+            mention_text = " ".join(parts[2:]).replace("with", "").strip().lstrip("@").lower()
+            for uid, name_val in _known_names.items():
+                if uid == str(sender_id):
+                    continue
+                if mention_text and (name_val.lower() == mention_text or mention_text in name_val.lower()):
+                    target_ids.append(uid)
+                    break
+        if not target_ids:
+            send_message(
+                GAME_GROUP_ID,
+                "\u274c No users found to add. Mention users or use their exact name.",
+                reply_to_id=msg_id,
+            )
+            return
+
+        added = []
+        for uid in target_ids:
+            if uid not in obj["members"]:
+                obj["members"].append(uid)
+                added.append(_known_names.get(str(uid), str(uid)))
+        if not added:
+            send_message(GAME_GROUP_ID, "\u274c Those users are already members of that shared object.", reply_to_id=msg_id)
+            return
+
+        shared = _load_shared_objects(gid)
+        for idx, item in enumerate(shared):
+            if item.get("id", "").lower() == obj.get("id", "").lower():
+                shared[idx] = obj
+                break
+        _save_shared_objects(gid, shared)
+        send_message(
+            GAME_GROUP_ID,
+            f"\u2705 Added {', '.join(added)} to shared object {obj['id']} ({obj['name']}).",
+            reply_to_id=msg_id,
+        )
+        return
+
+    if cmd == "!sharelist":
+        gid = GAME_GROUP_ID
+        if not gid:
+            send_message(GAME_GROUP_ID, "\u274c No active group selected.", reply_to_id=msg_id)
+            return
+        shared = _load_shared_objects(gid)
+        if not shared:
+            send_message(GAME_GROUP_ID, "\u274c No shared objects exist for this group.", reply_to_id=msg_id)
+            return
+        shared_sorted = sorted(shared, key=lambda obj: int(obj["id"][1:]) if obj["id"].lower().startswith("s") and obj["id"][1:].isdigit() else float("inf"))
+        lines = ["\U0001f517 Shared Objects:"]
+        for index, obj in enumerate(shared_sorted, start=1):
+            member_count = len(obj.get("members", []))
+            lines.append(
+                f"  s{index} ({obj['id']}): \"{obj['name']}\" — {obj.get('points', 0):,} pts, {member_count} member(s)"
+            )
+        lines.append("")
+        lines.append("Use !share sN with @user to add members.")
+        lines.append("Use !rmvote sN with @user to start or vote yes on a removal.")
+        lines.append("Use !listv sN to view active removal votes.")
+        lines.append("Use !leave sN to leave a shared object without voting.")
+        lines.append("Use !worth sN +/-amount to deposit or withdraw points.")
+        send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
+        return
+
+    if cmd == "!rmvote":
+        import re as _re_rmvote
+        gid = GAME_GROUP_ID
+        if not gid:
+            send_message(GAME_GROUP_ID, "\u274c No active group selected.", reply_to_id=msg_id)
+            return
+        if len(parts) < 3:
+            send_message(
+                GAME_GROUP_ID,
+                "\u274c Usage: !rmvote s<slot> with @user1 @user2\nExample: !rmvote s2 with @PlayerName",
+                reply_to_id=msg_id,
+            )
+            return
+        obj_token = parts[1].lower()
+        slot_match = _re_rmvote.match(r'^[sS](\d+)$', obj_token)
+        if not slot_match:
+            send_message(GAME_GROUP_ID, "\u274c Could not parse the shared object. Use s<slot>.", reply_to_id=msg_id)
+            return
+        slot_num = int(slot_match.group(1))
+        obj_idx, obj = _get_shared_object_by_slot(gid, slot_num)
+        if obj is None:
+            send_message(GAME_GROUP_ID, f"\u274c Shared object s{slot_num} does not exist.", reply_to_id=msg_id)
+            return
+        if str(sender_id) not in obj.get("members", []) and str(sender_id) != str(obj.get("created_by", "")):
+            send_message(GAME_GROUP_ID, "\u274c You must be a member of that shared object to vote on removals.", reply_to_id=msg_id)
+            return
+
+        target_ids = []
+        for att in message.get("attachments", []):
+            if att.get("type") == "mentions":
+                for uid in att.get("user_ids", []):
+                    target_ids.append(str(uid))
+        if not target_ids:
+            mention_text = " ".join(parts[2:]).replace("with", "").strip().lstrip("@").lower()
+            for uid, name_val in _known_names.items():
+                if uid == str(sender_id):
+                    continue
+                if mention_text and (name_val.lower() == mention_text or mention_text in name_val.lower()):
+                    target_ids.append(uid)
+                    break
+        if not target_ids:
+            send_message(
+                GAME_GROUP_ID,
+                "\u274c No users found to remove. Mention users or use their exact name.",
+                reply_to_id=msg_id,
+            )
+            return
+
+        target_ids = [uid for uid in dict.fromkeys(target_ids) if uid in obj.get("members", [])]
+        if not target_ids:
+            send_message(
+                GAME_GROUP_ID,
+                "\u274c You can only vote to remove current members of that shared object.",
+                reply_to_id=msg_id,
+            )
+            return
+        if str(sender_id) in target_ids:
+            send_message(
+                GAME_GROUP_ID,
+                f"\u274c To leave a shared object yourself, use !leave s{slot_num}.",
+                reply_to_id=msg_id,
+            )
+            return
+
+        if "remove_votes" not in obj:
+            obj["remove_votes"] = []
+        existing_vote = None
+        for vote in obj["remove_votes"]:
+            if sorted(vote.get("target_ids", [])) == sorted(target_ids):
+                existing_vote = vote
+                break
+
+        if existing_vote is None:
+            vote_id = str(len(obj.get("remove_votes", [])) + 1)
+            vote = {
+                "id": vote_id,
+                "target_ids": target_ids,
+                "yes_votes": [str(sender_id)],
+                "created_by": str(sender_id),
+            }
+            obj["remove_votes"].append(vote)
+            vote_started = True
+        else:
+            vote = existing_vote
+            if str(sender_id) in vote.get("yes_votes", []):
+                send_message(
+                    GAME_GROUP_ID,
+                    "\u274c You have already voted yes on that removal vote.",
+                    reply_to_id=msg_id,
+                )
+                return
+            vote["yes_votes"].append(str(sender_id))
+            vote_started = False
+
+        vote["yes_votes"] = [*dict.fromkeys(vote.get("yes_votes", []))]
+        current_members = [m for m in obj.get("members", [])]
+        threshold = _shared_object_vote_threshold(len(current_members))
+        yes_count = len([uid for uid in vote["yes_votes"] if uid in current_members])
+
+        if yes_count >= threshold:
+            removed_names = [
+                _known_names.get(uid, uid) for uid in target_ids if uid in obj.get("members", [])
+            ]
+            obj["members"] = [uid for uid in obj.get("members", []) if uid not in target_ids]
+            obj["remove_votes"] = [v for v in obj.get("remove_votes", []) if v.get("id") != vote.get("id")]
+            shared = _load_shared_objects(gid)
+            for idx, item in enumerate(shared):
+                if item.get("id", "").lower() == obj.get("id", "").lower():
+                    shared[idx] = obj
+                    break
+            _save_shared_objects(gid, shared)
+            send_message(
+                GAME_GROUP_ID,
+                f"\u2705 Removal vote passed for {', '.join(removed_names)} in {obj['id']} ({obj['name']}).\n"
+                f"They have been removed from the shared object.",
+                reply_to_id=msg_id,
+            )
+            return
+
+        shared = _load_shared_objects(gid)
+        for idx, item in enumerate(shared):
+            if item.get("id", "").lower() == obj.get("id", "").lower():
+                shared[idx] = obj
+                break
+        _save_shared_objects(gid, shared)
+
+        voter_name = _known_names.get(str(sender_id), str(sender_id))
+        if vote_started:
+            send_message(
+                GAME_GROUP_ID,
+                f"\u2705 {voter_name} started a removal vote for {', '.join(_known_names.get(uid, uid) for uid in target_ids)} in {obj['id']} ({obj['name']}).\n"
+                f"Yes votes: {yes_count}/{threshold}. Other members can join by repeating !rmvote {obj['id']} with @user.",
+                reply_to_id=msg_id,
+            )
+        else:
+            send_message(
+                GAME_GROUP_ID,
+                f"\u2705 {voter_name} voted yes on removal vote {vote['id']} for {', '.join(_known_names.get(uid, uid) for uid in target_ids)} in {obj['id']} ({obj['name']}).\n"
+                f"Yes votes: {yes_count}/{threshold}.",
+                reply_to_id=msg_id,
+            )
+        return
+
+    if cmd == "!listv":
+        import re as _re_listv
+        gid = GAME_GROUP_ID
+        if not gid:
+            send_message(GAME_GROUP_ID, "\u274c No active group selected.", reply_to_id=msg_id)
+            return
+        if len(parts) < 2:
+            send_message(
+                GAME_GROUP_ID,
+                "\u274c Usage: !listv s<slot>\nExample: !listv s2",
+                reply_to_id=msg_id,
+            )
+            return
+        obj_token = parts[1].lower()
+        slot_match = _re_listv.match(r'^[sS](\d+)$', obj_token)
+        if not slot_match:
+            send_message(GAME_GROUP_ID, "\u274c Could not parse the shared object. Use s<slot>.", reply_to_id=msg_id)
+            return
+        slot_num = int(slot_match.group(1))
+        _, obj = _get_shared_object_by_slot(gid, slot_num)
+        if obj is None:
+            send_message(GAME_GROUP_ID, f"\u274c Shared object s{slot_num} does not exist.", reply_to_id=msg_id)
+            return
+        if not obj.get("remove_votes"):
+            send_message(GAME_GROUP_ID, f"\u274c There are no active removal votes for {obj['id']} ({obj['name']}).", reply_to_id=msg_id)
+            return
+        lines = [f"\U0001f4dd Active removal votes for {obj['id']} ({obj['name']}):"]
+        current_members = [m for m in obj.get("members", [])]
+        threshold = _shared_object_vote_threshold(len(current_members))
+        for vote in obj.get("remove_votes", []):
+            targets = ", ".join(_known_names.get(uid, uid) for uid in vote.get("target_ids", []))
+            yes_count = len([uid for uid in vote.get("yes_votes", []) if uid in current_members])
+            voters = ", ".join(_known_names.get(uid, uid) for uid in vote.get("yes_votes", []))
+            lines.append(f"  Vote {vote.get('id')}: remove {targets} — {yes_count}/{threshold} yes ({voters})")
+        lines.append("")
+        lines.append("Use !rmvote sN with @user to vote yes on an existing removal.")
+        lines.append("Use !leave sN to leave the shared object yourself.")
+        send_message(GAME_GROUP_ID, "\n".join(lines), reply_to_id=msg_id)
+        return
+
+    if cmd == "!leave":
+        import re as _re_leave
+        gid = GAME_GROUP_ID
+        if not gid:
+            send_message(GAME_GROUP_ID, "\u274c No active group selected.", reply_to_id=msg_id)
+            return
+        if len(parts) < 2:
+            send_message(
+                GAME_GROUP_ID,
+                "\u274c Usage: !leave s<slot>\nExample: !leave s1",
+                reply_to_id=msg_id,
+            )
+            return
+        obj_token = parts[1].lower()
+        slot_match = _re_leave.match(r'^[sS](\d+)$', obj_token)
+        if not slot_match:
+            send_message(GAME_GROUP_ID, "\u274c Could not parse the shared object. Use s<slot>.", reply_to_id=msg_id)
+            return
+        slot_num = int(slot_match.group(1))
+        _, obj = _get_shared_object_by_slot(gid, slot_num)
+        if obj is None:
+            send_message(GAME_GROUP_ID, f"\u274c Shared object s{slot_num} does not exist.", reply_to_id=msg_id)
+            return
+        if str(sender_id) not in obj.get("members", []) and str(sender_id) != str(obj.get("created_by", "")):
+            send_message(GAME_GROUP_ID, "\u274c You are not a member of that shared object.", reply_to_id=msg_id)
+            return
+        if str(sender_id) not in obj.get("members", []):
+            send_message(GAME_GROUP_ID, "\u274c You have already left that shared object.", reply_to_id=msg_id)
+            return
+        obj["members"] = [uid for uid in obj.get("members", []) if uid != str(sender_id)]
+        for vote in obj.get("remove_votes", []):
+            vote["yes_votes"] = [uid for uid in vote.get("yes_votes", []) if uid != str(sender_id)]
+            vote["target_ids"] = [uid for uid in vote.get("target_ids", []) if uid in obj.get("members", [])]
+        obj["remove_votes"] = [vote for vote in obj.get("remove_votes", []) if vote.get("target_ids")]
+        shared = _load_shared_objects(gid)
+        for idx, item in enumerate(shared):
+            if item.get("id", "").lower() == obj.get("id", "").lower():
+                shared[idx] = obj
+                break
+        _save_shared_objects(gid, shared)
+        send_message(
+            GAME_GROUP_ID,
+            f"\u2705 {sender_name} left shared object {obj['id']} ({obj['name']}).",
             reply_to_id=msg_id,
         )
         return
@@ -4850,34 +5338,101 @@ def handle_game_command(message):
         if len(parts) < 3:
             send_message(
                 GAME_GROUP_ID,
-                "Usage: !worth i<slot> [+/-]<amount>\n"
+                "Usage: !worth i<slot> [+/-]<amount> or !worth s<slot> [+/-]<amount>\n"
                 "  !worth i1 +3  — add 3 pts to item's worth (costs you 3 pts)\n"
                 "  !worth i1 -5  — remove 5 pts from item's worth (refunds you 5 pts)\n"
-                "  !worth i1 3   — treated as +3 (no sign = add)\n"
-                "The slot and amount can be in any order.",
+                "  !worth s1 -20 — withdraw 20 pts from a shared object\n"
+                "The slot and amount can be in any order; no sign = add.",
                 reply_to_id=msg_id,
             )
             return
         # Parse slot and delta from the two args (order-independent)
         arg1, arg2 = parts[1], parts[2]
         slot_worth = None
+        slot_type = None
         delta_worth = None
         for arg in (arg1, arg2):
-            # Slot: starts with 'i' followed by digits
-            if _re_worth.match(r'^[iI]\d+$', arg) and slot_worth is None:
-                slot_worth = int(arg[1:])
-            # Delta: optional +/- prefix, then digits
+            m = _re_worth.match(r'^([iIsS])(\d+)$', arg)
+            if m and slot_worth is None:
+                token = m.group(1).lower()
+                slot_type = "s" if token == "s" else "i"
+                slot_worth = int(m.group(2))
             elif _re_worth.match(r'^[+\-]?\d+$', arg) and delta_worth is None:
                 delta_worth = int(arg)
-        if slot_worth is None or delta_worth is None:
+        if slot_worth is None or delta_worth is None or slot_type is None:
             send_message(
                 GAME_GROUP_ID,
-                "❌ Couldn't parse that. Usage: !worth i<slot> [+/-]<amount>\nExample: !worth i2 +10",
+                "❌ Couldn't parse that. Usage: !worth i<slot> [+/-]<amount> or !worth s<slot> [+/-]<amount>\nExample: !worth i2 +10",
                 reply_to_id=msg_id,
             )
             return
-        # If no sign was given (pure digits), treat as addition
-        # int() already handles this correctly; a bare '3' becomes +3
+
+        if slot_type == "s":
+            gid = GAME_GROUP_ID
+            slot_idx, shared_obj = _get_shared_object_by_slot(gid, slot_worth)
+            if shared_obj is None:
+                send_message(GAME_GROUP_ID, f"❌ Shared object s{slot_worth} does not exist.", reply_to_id=msg_id)
+                return
+            if str(sender_id) not in shared_obj.get("members", []) and str(sender_id) != str(shared_obj.get("created_by", "")):
+                send_message(GAME_GROUP_ID, "❌ You must be a member of that shared object to adjust its points.", reply_to_id=msg_id)
+                return
+            if delta_worth > 0:
+                bal_w = get_points(GAME_GROUP_ID, sender_id, sender_name)
+                if bal_w < delta_worth:
+                    send_message(
+                        GAME_GROUP_ID,
+                        f"❌ You need {delta_worth} pts to deposit that much into {shared_obj['id']}. You have {bal_w} pts.",
+                        reply_to_id=msg_id,
+                    )
+                    return
+                new_bal_w = _add_pts(GAME_GROUP_ID, sender_id, sender_name, -delta_worth)
+                shared_obj["points"] = shared_obj.get("points", 0) + delta_worth
+                shared = _load_shared_objects(GAME_GROUP_ID)
+                for idx, obj in enumerate(shared):
+                    if obj.get("id", "").lower() == shared_obj.get("id", "").lower():
+                        shared[idx] = shared_obj
+                        break
+                _save_shared_objects(GAME_GROUP_ID, shared)
+                send_message(
+                    GAME_GROUP_ID,
+                    f'💰 {sender_name} deposited {delta_worth} pts into {shared_obj["id"]} ("{shared_obj["name"]}").\n'
+                    f'Shared object balance: {shared_obj["points"]:,} pts\n'
+                    f'Your balance: {new_bal_w:,} pts',
+                    reply_to_id=msg_id,
+                )
+                return
+            if delta_worth < 0:
+                withdraw = -delta_worth
+                if shared_obj.get("points", 0) < withdraw:
+                    send_message(
+                        GAME_GROUP_ID,
+                        f"❌ {shared_obj['id']} only has {shared_obj.get('points', 0):,} pts to withdraw.",
+                        reply_to_id=msg_id,
+                    )
+                    return
+                shared_obj["points"] -= withdraw
+                new_bal_w, _ = add_points(GAME_GROUP_ID, sender_id, sender_name, withdraw)
+                shared = _load_shared_objects(GAME_GROUP_ID)
+                for idx, obj in enumerate(shared):
+                    if obj.get("id", "").lower() == shared_obj.get("id", "").lower():
+                        shared[idx] = shared_obj
+                        break
+                _save_shared_objects(GAME_GROUP_ID, shared)
+                send_message(
+                    GAME_GROUP_ID,
+                    f'💰 {sender_name} withdrew {withdraw} pts from {shared_obj["id"]} ("{shared_obj["name"]}").\n'
+                    f'Shared object balance: {shared_obj["points"]:,} pts\n'
+                    f'Your balance: {new_bal_w:,} pts',
+                    reply_to_id=msg_id,
+                )
+                return
+            send_message(
+                GAME_GROUP_ID,
+                "❌ Enter a positive or negative amount to deposit or withdraw points.",
+                reply_to_id=msg_id,
+            )
+            return
+
         inv_w = _load_inventory(GAME_GROUP_ID, sender_id)
         section_w, idx_w, item_w = _get_item_by_slot(inv_w, slot_worth)
         if section_w is None:
@@ -4895,7 +5450,6 @@ def handle_game_command(message):
                 reply_to_id=msg_id,
             )
             return
-        # Adding worth costs points; removing worth refunds them
         bal_w = get_points(GAME_GROUP_ID, sender_id, sender_name)
         if delta_worth > 0 and bal_w < delta_worth:
             send_message(
@@ -4904,7 +5458,6 @@ def handle_game_command(message):
                 reply_to_id=msg_id,
             )
             return
-        # Apply point change (negative delta_worth = refund, positive = cost)
         new_bal_w, _ = add_points(GAME_GROUP_ID, sender_id, sender_name, -delta_worth)
         inv_w["creations"][idx_w]["worth"] = new_worth
         _save_inventory(GAME_GROUP_ID, sender_id, inv_w)
@@ -5444,6 +5997,16 @@ def handle_game_command(message):
                         "\n"
                         "\u2022 !worth i<slot> [+/-]<amount> \u2014 Adjust an item's worth\n"
                         "  Adding worth costs you points; removing refunds them.\n"
+                        "\u2022 !create \"Name\" <worth> --shared \u2014 Create a shared object\n"
+                        "  Optionally seed it with points (costs you that amount).\n"
+                        "  Example: !create \"Community Jar\" 200 --shared\n"
+                        "\u2022 !share s<slot> with @user1 @user2 \u2014 Add members to a shared object\n"
+                        "\u2022 !sharelist \u2014 List shared objects\n"
+                        "\u2022 !rmvote s<slot> with @user1 @user2 \u2014 Start or vote yes on a removal vote\n"
+                        "\u2022 !listv s<slot> \u2014 List active removal votes for a shared object\n"
+                        "\u2022 !leave s<slot> \u2014 Leave a shared object without voting\n"
+                        "\u2022 !worth s<slot> [-amount] \u2014 Withdraw from a shared object\n"
+                        "  Example: !worth s1 -20\n"
                         "  Slot and amount can be in any order; no sign = add.\n"
                         "  Examples: !worth i1 +3 | !worth i1 -5 | !worth +3 i1 | !worth i1 3"
                     )
@@ -7343,6 +7906,10 @@ class ControlPanel:
                   command=self._pts_remove_missing_selected,
                   bg="#ff3b30", fg="white", relief="flat",
                   padx=8, pady=3).pack(side="left", padx=(6, 0))
+        tk.Button(missing_row, text="🔗 Shared Objects", font=("Helvetica", 9),
+                  command=self._pts_open_shared_objects,
+                  bg="#5856d6", fg="white", relief="flat",
+                  padx=8, pady=3).pack(side="left", padx=(6, 0))
         self._pts_missing_status = tk.StringVar(value="")
         tk.Label(missing_row, textvariable=self._pts_missing_status,
                  font=("Helvetica", 8), fg="#555555").pack(side="left", padx=(10, 0))
@@ -7725,6 +8292,221 @@ class ControlPanel:
         self._pts_refresh()
         self._pts_scan_missing_members()
         self._pts_missing_status.set(f"Removed {len(selected)} missing user(s).")
+
+    def _pts_open_shared_objects(self):
+        import tkinter as tk
+        from tkinter import messagebox
+        import tkinter.simpledialog as simpledialog
+
+        gid = self._pts_selected_group_id()
+        if not gid:
+            self._pts_missing_status.set("Select a group first.")
+            return
+
+        if hasattr(self, "_shared_obj_window") and self._shared_obj_window.winfo_exists():
+            self._shared_obj_window.lift()
+            return
+
+        win = tk.Toplevel(self.root)
+        self._shared_obj_window = win
+        win.title("Shared Objects")
+        win.geometry("580x420")
+        win.transient(self.root)
+
+        header = tk.Label(win, text="Shared Objects Manager", font=("Helvetica", 12, "bold"))
+        header.pack(anchor="w", pady=(10, 4), padx=10)
+
+        info = tk.Label(win,
+                       text="Select a shared object to view members and manage it. Use !share, !rmvote, !listv, !leave, and !worth sN in chat.",
+                       font=("Helvetica", 9), fg="#555555", wraplength=560, justify="left")
+        info.pack(anchor="w", padx=10, pady=(0, 8))
+
+        body = tk.Frame(win)
+        body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+
+        list_frame = tk.Frame(body)
+        list_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        tk.Label(list_frame, text="Shared Objects", font=("Helvetica", 10, "bold")).pack(anchor="w")
+        shared_vsb = tk.Scrollbar(list_frame, orient="vertical")
+        self._pts_shared_objs_listbox = tk.Listbox(list_frame, yscrollcommand=shared_vsb.set, font=("Courier", 9), height=14)
+        shared_vsb.config(command=self._pts_shared_objs_listbox.yview)
+        shared_vsb.pack(side="right", fill="y")
+        self._pts_shared_objs_listbox.pack(fill="both", expand=True)
+        self._pts_shared_objs_listbox.bind("<<ListboxSelect>>", lambda e: self._pts_refresh_shared_objects_detail())
+
+        actions_frame = tk.Frame(list_frame)
+        actions_frame.pack(fill="x", pady=(6, 0))
+        tk.Button(actions_frame, text="🔄 Refresh", font=("Helvetica", 9), command=self._pts_refresh_shared_objects_window,
+                  bg="#007aff", fg="white", relief="flat", padx=8, pady=3).pack(side="left")
+        tk.Button(actions_frame, text="➕ New", font=("Helvetica", 9), command=self._pts_shared_objects_new,
+                  bg="#34c759", fg="white", relief="flat", padx=8, pady=3).pack(side="left", padx=(6, 0))
+
+        detail_frame = tk.Frame(body)
+        detail_frame.grid(row=0, column=1, sticky="nsew")
+        tk.Label(detail_frame, text="Details", font=("Helvetica", 10, "bold")).pack(anchor="w")
+        self._pts_shared_objs_detail = tk.Label(detail_frame, text="Select a shared object to see details.",
+                                               font=("Helvetica", 9), fg="#333333", justify="left", anchor="nw", wraplength=260)
+        self._pts_shared_objs_detail.pack(fill="x", pady=(2, 6))
+
+        tk.Label(detail_frame, text="Members", font=("Helvetica", 10, "bold")).pack(anchor="w")
+        members_frame = tk.Frame(detail_frame)
+        members_frame.pack(fill="both", expand=True)
+        members_vsb = tk.Scrollbar(members_frame, orient="vertical")
+        self._pts_shared_objs_members = tk.Listbox(members_frame, yscrollcommand=members_vsb.set, font=("Courier", 9), height=8)
+        members_vsb.config(command=self._pts_shared_objs_members.yview)
+        members_vsb.pack(side="right", fill="y")
+        self._pts_shared_objs_members.pack(fill="both", expand=True)
+
+        buttons_frame = tk.Frame(detail_frame)
+        buttons_frame.pack(fill="x", pady=(6, 0))
+        tk.Button(buttons_frame, text="🗑 Remove Selected Member", font=("Helvetica", 9),
+                  command=self._pts_shared_objects_remove_member,
+                  bg="#ff3b30", fg="white", relief="flat", padx=8, pady=3).pack(side="left")
+        tk.Button(buttons_frame, text="🗑 Delete Object", font=("Helvetica", 9),
+                  command=self._pts_shared_objects_delete,
+                  bg="#ff3b30", fg="white", relief="flat", padx=8, pady=3).pack(side="left", padx=(6, 0))
+
+        footer = tk.Label(detail_frame,
+                          text="Tip: add members from chat with !share sN with @user. Adjust shared object points with !worth sN +/-amount.",
+                          font=("Helvetica", 8), fg="#555555", wraplength=260, justify="left")
+        footer.pack(anchor="w", pady=(8, 0))
+
+        win.protocol("WM_DELETE_WINDOW", lambda: self._close_shared_objects_window())
+        self._pts_refresh_shared_objects_window()
+
+    def _close_shared_objects_window(self):
+        if hasattr(self, "_shared_obj_window") and self._shared_obj_window.winfo_exists():
+            self._shared_obj_window.destroy()
+        if hasattr(self, "_shared_obj_window"):
+            del self._shared_obj_window
+        if hasattr(self, "_pts_shared_objects"):
+            del self._pts_shared_objects
+        if hasattr(self, "_pts_shared_obj_selected_idx"):
+            del self._pts_shared_obj_selected_idx
+
+    def _pts_refresh_shared_objects_window(self):
+        if not hasattr(self, "_shared_obj_window") or not self._shared_obj_window.winfo_exists():
+            return
+        gid = self._pts_selected_group_id()
+        if not gid:
+            return
+        shared = _load_shared_objects(gid)
+        shared_sorted = sorted(shared, key=lambda obj: int(obj["id"][1:]) if obj["id"].lower().startswith("s") and obj["id"][1:].isdigit() else float("inf"))
+        self._pts_shared_objects = shared_sorted
+        self._pts_shared_objs_listbox.delete(0, "end")
+        for idx, obj in enumerate(shared_sorted, start=1):
+            self._pts_shared_objs_listbox.insert(
+                "end",
+                f"s{idx} ({obj['id']}): {obj['name']} — {obj.get('points', 0):,} pts"
+            )
+        self._pts_shared_objs_detail.config(text="Select a shared object to see details.")
+        self._pts_shared_objs_members.delete(0, "end")
+        self._pts_shared_obj_selected_idx = None
+
+    def _pts_refresh_shared_objects_detail(self):
+        if not hasattr(self, "_pts_shared_objects"):
+            return
+        sel = self._pts_shared_objs_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if idx < 0 or idx >= len(self._pts_shared_objects):
+            return
+        obj = self._pts_shared_objects[idx]
+        self._pts_shared_obj_selected_idx = idx
+        member_list = obj.get("members", [])
+        lines = [
+            f"Name: {obj.get('name', '')}",
+            f"ID: {obj.get('id', '')}",
+            f"Points: {obj.get('points', 0):,}",
+            f"Members: {len(member_list)}",
+        ]
+        self._pts_shared_objs_detail.config(text="\n".join(lines))
+        self._pts_shared_objs_members.delete(0, "end")
+        for member_id in member_list:
+            self._pts_shared_objs_members.insert(
+                "end",
+                _known_names.get(str(member_id), str(member_id)),
+            )
+
+    def _pts_shared_objects_new(self):
+        import tkinter as tk
+        from tkinter import messagebox
+        import tkinter.simpledialog as simpledialog
+
+        gid = self._pts_selected_group_id()
+        if not gid:
+            return
+        name = simpledialog.askstring("New Shared Object", "Enter a shared object name:", parent=self._shared_obj_window)
+        if not name:
+            return
+        name = name.strip()
+        if not name:
+            messagebox.showwarning("Invalid name", "Name cannot be empty.", parent=self._shared_obj_window)
+            return
+        if len(name) > ITEM_NAME_MAX_LEN:
+            messagebox.showwarning("Invalid name", f"Name too long (max {ITEM_NAME_MAX_LEN} chars).", parent=self._shared_obj_window)
+            return
+        points = simpledialog.askinteger("Starting Points", "Starting points (0 default):", parent=self._shared_obj_window, minvalue=0)
+        if points is None:
+            return
+        existing_names = _all_creation_names(gid) | _all_shared_object_names(gid)
+        if name.lower() in existing_names:
+            messagebox.showwarning("Duplicate name", "A creation or shared object with that name already exists.", parent=self._shared_obj_window)
+            return
+        obj_id = _next_shared_object_id(gid)
+        shared = _load_shared_objects(gid)
+        shared.append({
+            "id": obj_id,
+            "name": name,
+            "points": points,
+            "members": [],
+            "created_by": "panel",
+        })
+        _save_shared_objects(gid, shared)
+        self._pts_refresh_shared_objects_window()
+        messagebox.showinfo("Created", f"Created shared object {obj_id} with {points} points.", parent=self._shared_obj_window)
+
+    def _pts_shared_objects_remove_member(self):
+        import tkinter as tk
+        from tkinter import messagebox
+
+        if not hasattr(self, "_pts_shared_objects"):
+            return
+        sel = self._pts_shared_objs_members.curselection()
+        if not sel or self._pts_shared_obj_selected_idx is None:
+            messagebox.showwarning("No member selected", "Select a member to remove.", parent=self._shared_obj_window)
+            return
+        member_idx = sel[0]
+        obj = self._pts_shared_objects[self._pts_shared_obj_selected_idx]
+        member_id = obj.get("members", [])[member_idx]
+        if not messagebox.askyesno("Remove Member", f"Remove {_known_names.get(str(member_id), str(member_id))} from {obj.get('id')}?", parent=self._shared_obj_window):
+            return
+        obj["members"].pop(member_idx)
+        shared = _load_shared_objects(self._pts_selected_group_id())
+        for idx, item in enumerate(shared):
+            if item.get("id", "").lower() == obj.get("id", "").lower():
+                shared[idx] = obj
+                break
+        _save_shared_objects(self._pts_selected_group_id(), shared)
+        self._pts_refresh_shared_objects_window()
+
+    def _pts_shared_objects_delete(self):
+        import tkinter as tk
+        from tkinter import messagebox
+
+        if not hasattr(self, "_pts_shared_objects") or self._pts_shared_obj_selected_idx is None:
+            messagebox.showwarning("No object selected", "Select a shared object to delete.", parent=self._shared_obj_window)
+            return
+        obj = self._pts_shared_objects[self._pts_shared_obj_selected_idx]
+        if not messagebox.askyesno("Delete Shared Object", f"Delete {obj.get('id')} ({obj.get('name')})?", parent=self._shared_obj_window):
+            return
+        shared = _load_shared_objects(self._pts_selected_group_id())
+        shared = [item for item in shared if item.get("id", "").lower() != obj.get("id", "").lower()]
+        _save_shared_objects(self._pts_selected_group_id(), shared)
+        self._pts_refresh_shared_objects_window()
 
     def _pts_remove_user_data(self, group_id, user_id):
         for path_fn in (_user_points_path, _inventory_path, _requests_path):

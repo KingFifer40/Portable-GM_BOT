@@ -1541,7 +1541,7 @@ def get_level(group_id, user_id):
     record = _load_user_record(group_id, str(user_id))
     return record.get("level", 0)
 
-def buy_level(group_id, user_id, name):
+def bulk_levelup(group_id, user_id, name):
     """
     Attempt to spend LEVEL_COST points to gain 1 level.
     Returns (success, new_level, pts_remaining, reason).
@@ -6953,7 +6953,7 @@ def handle_game_command(message):
 
     # #levelup  — spend 10,000 liquid points to gain 1 level
     if cmd == "#levelup":
-        success, new_level, pts_left, reason = buy_level(GAME_GROUP_ID, sender_id, sender_name)
+        success, new_level, pts_left, reason = bulk_levelup(GAME_GROUP_ID, sender_id, sender_name)
         if not success:
             send_message(GAME_GROUP_ID,
                 f"⭐ Level Up failed — {reason}\n"
